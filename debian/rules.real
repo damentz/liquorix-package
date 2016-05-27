@@ -1,0 +1,333 @@
+#
+# This Makefile executes the unpack/build/binary targets for a single
+# subarch, which is passed in the subarch variable. Empty subarch
+# variable means that we are building for an arch without the subarch.
+# Additionally, variables version, abiname and ltver are
+# expected to be available (need to be exported from the parent process).
+#
+SHELL  := bash -e
+DEB_HOST_ARCH     := $(shell dpkg-architecture -a'$(ARCH)' -qDEB_HOST_ARCH)
+DEB_HOST_GNU_TYPE := $(shell dpkg-architecture -a'$(ARCH)' -qDEB_HOST_GNU_TYPE)
+DEB_HOST_MULTIARCH:= $(shell dpkg-architecture -a'$(ARCH)' -qDEB_HOST_MULTIARCH)
+DEB_BUILD_ARCH    := $(shell dpkg-architecture -a'$(ARCH)' -qDEB_BUILD_ARCH)
+MAINTAINER        := $(shell sed -ne 's,^Maintainer: .[^<]*<\([^>]*\)>,\1,p' debian/control)
+DISTRIBUTION      := $(shell dpkg-parsechangelog | sed -ne 's,^Distribution: ,,p')
+SOURCE_DATE := $(shell dpkg-parsechangelog | sed -ne 's,^Date: ,,p')
+SOURCE_DATE_UTC_ISO := $(shell date -u -d '$(SOURCE_DATE)' +%Y-%m-%d)
+
+DISTRIBUTOR := $(shell lsb_release -is 2>/dev/null)
+ifeq ($(DISTRIBUTOR),)
+DISTRIBUTOR := Debian
+endif
+
+ifdef OVERRIDE_HOST_TYPE
+  CROSS_COMPILE := $(OVERRIDE_HOST_TYPE)-
+else ifneq ($(DEB_BUILD_ARCH),$(DEB_HOST_ARCH))
+  CROSS_COMPILE := $(DEB_HOST_GNU_TYPE)-
+else
+  CROSS_COMPILE :=
+endif
+
+export PYTHONPATH = $(CURDIR)/debian/lib/python
+export DH_OPTIONS
+export DEB_HOST_ARCH DEB_HOST_GNU_TYPE DEB_BUILD_ARCH
+
+include debian/rules.defs
+
+stamp = [ -d $(dir $@) ] || mkdir $(dir $@); touch $@
+
+setup_env := env -u ABINAME -u ABINAME_PART -u ARCH -u FEATURESET -u FLAVOUR -u VERSION -u LOCALVERSION
+setup_env += DISTRIBUTION_OFFICIAL_BUILD=1 DISTRIBUTOR="$(DISTRIBUTOR)" DISTRIBUTION_VERSION="$(SOURCEVERSION)" KBUILD_BUILD_TIMESTAMP="$(DISTRIBUTOR) $(SOURCEVERSION) ($(SOURCE_DATE_UTC_ISO))" KBUILD_BUILD_USER="$(word 1,$(subst @, ,$(MAINTAINER)))" KBUILD_BUILD_HOST="$(word 2,$(subst @, ,$(MAINTAINER)))"
+
+MAKE_CLEAN = $(setup_env) $(MAKE)
+MAKE_SELF := $(MAKE) -f debian/rules.real $(MAKEOVERRIDES)
+MAKEOVERRIDES =
+
+#
+# Targets
+#
+binary-arch-flavour: install-image_$(ARCH)_$(FEATURESET)_$(FLAVOUR)_$(TYPE)
+ifeq ($(DEBUG),True)
+  binary-arch-flavour: install-image-dbg_$(ARCH)_$(FEATURESET)_$(FLAVOUR)
+endif
+binary-arch-flavour: install-image-meta_$(ARCH)_$(FEATURESET)_$(FLAVOUR)
+ifeq ($(MODULES),True)
+  binary-arch-flavour: install-headers_$(ARCH)_$(FEATURESET)_$(FLAVOUR)
+  binary-arch-flavour: install-headers-meta_$(ARCH)_$(FEATURESET)_$(FLAVOUR)
+endif
+
+binary-indep:
+
+build-arch: $(STAMPS_DIR)/build_$(ARCH)_$(FEATURESET)_$(FLAVOUR)_$(TYPE)
+build-indep:
+
+setup-flavour: $(STAMPS_DIR)/setup_$(ARCH)_$(FEATURESET)_$(FLAVOUR)
+
+source-featureset: $(STAMPS_DIR)/source_$(FEATURESET)
+
+$(BUILD_DIR)/config.$(ARCH)_$(FEATURESET)_$(FLAVOUR): $(KCONFIG)
+	mkdir -p '$(dir $@)'
+	python debian/bin/kconfig.py '$@' $(KCONFIG) $(KCONFIG_OPTIONS)
+
+define copy_source
+mkdir -p '$(1)'
+cp -al $(filter-out debian .pc .svk .svn .git, $(wildcard * .[^.]*)) '$(1)'
+endef
+
+$(STAMPS_DIR)/source:
+	@$(stamp)
+
+$(STAMPS_DIR)/source_%: SOURCE_DIR=$(BUILD_DIR)/source
+$(STAMPS_DIR)/source_%: DIR=$(BUILD_DIR)/source_$*
+$(STAMPS_DIR)/source_%: $(STAMPS_DIR)/source
+	mkdir -p '$(BUILD_DIR)'
+	rm -rf '$(DIR)'
+	$(call copy_source,$(DIR))
+	@$(stamp)
+.PRECIOUS: $(STAMPS_DIR)/source_%
+
+$(STAMPS_DIR)/source_none: DIR=$(BUILD_DIR)/source_none
+$(STAMPS_DIR)/source_none: $(STAMPS_DIR)/source
+	mkdir -p '$(BUILD_DIR)'
+	rm -f '$(DIR)'
+	ln -s '$(CURDIR)' '$(DIR)'
+	@$(stamp)
+
+$(STAMPS_DIR)/setup_$(ARCH)_$(FEATURESET)_$(FLAVOUR): CONFIG=$(BUILD_DIR)/config.$(ARCH)_$(FEATURESET)_$(FLAVOUR)
+$(STAMPS_DIR)/setup_$(ARCH)_$(FEATURESET)_$(FLAVOUR): SOURCE_DIR=$(BUILD_DIR)/source_$(FEATURESET)
+$(STAMPS_DIR)/setup_$(ARCH)_$(FEATURESET)_$(FLAVOUR): DIR=$(BUILD_DIR)/build_$(ARCH)_$(FEATURESET)_$(FLAVOUR)
+$(STAMPS_DIR)/setup_$(ARCH)_$(FEATURESET)_$(FLAVOUR): $(STAMPS_DIR)/source_$(FEATURESET) $(BUILD_DIR)/config.$(ARCH)_$(FEATURESET)_$(FLAVOUR)
+	rm -rf '$(DIR)'
+	mkdir '$(DIR)'
+	cp '$(CONFIG)' '$(DIR)/.config'
+	echo 'override ARCH = $(KERNEL_ARCH)' >> '$(DIR)/.kernelvariables'
+	echo 'override KERNELRELEASE = $(ABINAME)$(LOCALVERSION_IMAGE)' >> '$(DIR)/.kernelvariables'
+	echo 'CCACHE = ccache' >> '$(DIR)/.kernelvariables'
+	echo 'CC = $$(if $$(DEBIAN_KERNEL_USE_CCACHE),$$(CCACHE)) $$(CROSS_COMPILE)$(COMPILER)' >> '$(DIR)/.kernelvariables'
+# TODO: Should we set CROSS_COMPILE always?
+ifdef OVERRIDE_HOST_TYPE
+	echo 'override CROSS_COMPILE = $(OVERRIDE_HOST_TYPE)-' >> '$(DIR)/.kernelvariables'
+else
+	echo 'ifneq ($$(DEB_BUILD_ARCH),$$(DEB_HOST_ARCH))' >> '$(DIR)/.kernelvariables'
+	echo 'override CROSS_COMPILE = $$(DEB_HOST_GNU_TYPE)-' >> '$(DIR)/.kernelvariables'
+	echo 'endif' >> '$(DIR)/.kernelvariables'
+endif
+ifdef CFLAGS_KERNEL
+	echo 'CFLAGS_KERNEL += $(CFLAGS_KERNEL)' >> '$(DIR)/.kernelvariables'
+	echo 'CFLAGS_MODULE += $(CFLAGS_KERNEL)' >> '$(DIR)/.kernelvariables'
+endif
+	+$(MAKE_CLEAN) -C '$(SOURCE_DIR)' O='$(CURDIR)/$(DIR)' V=1 listnewconfig
+	+yes "" | $(MAKE_CLEAN) -C '$(SOURCE_DIR)' O='$(CURDIR)/$(DIR)' oldconfig >/dev/null
+	@$(stamp)
+
+$(STAMPS_DIR)/build_$(ARCH)_$(FEATURESET)_$(FLAVOUR)_$(TYPE): DIR=$(BUILD_DIR)/build_$(ARCH)_$(FEATURESET)_$(FLAVOUR)
+$(STAMPS_DIR)/build_$(ARCH)_$(FEATURESET)_$(FLAVOUR)_$(TYPE): $(STAMPS_DIR)/setup_$(ARCH)_$(FEATURESET)_$(FLAVOUR)
+
+$(STAMPS_DIR)/build_$(ARCH)_$(FEATURESET)_$(FLAVOUR)_plain:
+	+$(MAKE_CLEAN) -C '$(DIR)' $(BUILD_TARGET)
+	@$(stamp)
+
+install-base:
+	dh_installdocs
+	dh_installchangelogs
+	dh_strip
+	dh_compress
+	dh_fixperms
+	dh_installdeb
+	dh_gencontrol -- $(GENCONTROL_ARGS)
+	dh_md5sums
+	dh_builddeb -- -Zxz $(BUILDDEB_ARGS)
+
+install-dummy:
+	dh_testdir
+	dh_testroot
+	dh_prep
+	+$(MAKE_SELF) install-base
+
+install-headers_$(ARCH)_$(FEATURESET)_$(FLAVOUR): REAL_VERSION = $(ABINAME)$(LOCALVERSION)
+install-headers_$(ARCH)_$(FEATURESET)_$(FLAVOUR): PACKAGE_NAME = linux-headers-$(REAL_VERSION)
+install-headers_$(ARCH)_$(FEATURESET)_$(FLAVOUR): DH_OPTIONS = -p$(PACKAGE_NAME)
+install-headers_$(ARCH)_$(FEATURESET)_$(FLAVOUR): BASE_DIR = /usr/src/$(PACKAGE_NAME)
+install-headers_$(ARCH)_$(FEATURESET)_$(FLAVOUR): IMAGE_BUILD_DIR = $(BUILD_DIR)/build_$(ARCH)_$(FEATURESET)_$(FLAVOUR)
+install-headers_$(ARCH)_$(FEATURESET)_$(FLAVOUR): SOURCE_DIR = $(BUILD_DIR)/source_$(FEATURESET)
+install-headers_$(ARCH)_$(FEATURESET)_$(FLAVOUR): REF_DIR = $(BUILD_DIR)/source_$(FEATURESET)
+install-headers_$(ARCH)_$(FEATURESET)_$(FLAVOUR): PACKAGE_DIR = debian/$(PACKAGE_NAME)
+install-headers_$(ARCH)_$(FEATURESET)_$(FLAVOUR): DIR = $(PACKAGE_DIR)/$(BASE_DIR)
+install-headers_$(ARCH)_$(FEATURESET)_$(FLAVOUR): $(STAMPS_DIR)/build_$(ARCH)_$(FEATURESET)_$(FLAVOUR)_$(TYPE)
+	dh_testdir
+	dh_testroot
+	dh_prep
+
+	mkdir -p $(DIR)/arch/$(KERNEL_ARCH)/kernel
+	mkdir -p $(DIR)/include
+	cp -a $(IMAGE_BUILD_DIR)/.config $(DIR)
+	cp -a $(IMAGE_BUILD_DIR)/.kernel* $(DIR)
+	cp -a $(IMAGE_BUILD_DIR)/Module.symvers $(DIR)
+
+	set -o pipefail; \
+	cd $(SOURCE_DIR); \
+	( \
+	  find . \
+		   -path './.git' -prune \
+		-o -path './.pc' -prune \
+		-o -path '*.gitignore' -prune \
+		-o -path '*.svn' -prune \
+		-o -path '.*.cmd' -prune \
+		-o -path './Documentation/*' -prune \
+		-o -path './arch/*' -prune \
+		-o -path './debian/*' -prune \
+		-o -path './include/asm*' -prune \
+		-o -path './scripts/*' -print \
+		-o -path './include/*' -print \
+		-o \( \
+			   -name 'Makefile*' \
+			-o -name 'Kconfig*' \
+			-o -name 'Rules.make' \
+		   \) -print; \
+	  find include/asm-generic -print; \
+	  for i in $(KERNEL_ARCH); do \
+		find arch/$$i \
+		\( \
+			   -name 'Makefile*' \
+			-o -name 'Kconfig*' \
+			-o -name 'Rules.make' \
+			-o -name 'module.lds' \
+			-o -name 'Kbuild.platforms' \
+			-o -name 'Platform' \
+		 \) -print; \
+	  done; \
+	) | cpio -pd --preserve-modification-time '$(CURDIR)/$(DIR)'
+
+	set -o pipefail; \
+	cd $(IMAGE_BUILD_DIR); \
+	( \
+	  find . \
+		   -path './.git' -prune \
+		-o -path './.pc' -prune \
+		-o -path '*.gitignore' -prune \
+		-o -path '*.svn' -prune \
+		-o -path '.*.cmd' -prune \
+		-o -path './scripts/*' -print \
+		-o -path './include/*' -print \
+		-o \( \
+			   -name 'Makefile*' \
+			-o -name 'Kconfig*' \
+			-o -name 'Rules.make' \
+		   \) -print; \
+	) | cpio -pd --preserve-modification-time '$(CURDIR)/$(DIR)'
+
+	find $(DIR)/scripts -type f -name \*\\.o -delete || :
+	cp -a $(SOURCE_DIR)/arch/$(KERNEL_ARCH)/include $(DIR)/arch/$(KERNEL_ARCH)/
+	cp -a $(SOURCE_DIR)/Makefile $(DIR)/
+	cp -a $(IMAGE_BUILD_DIR)/arch/$(KERNEL_ARCH)/kernel/asm-offsets.s $(DIR)/arch/$(KERNEL_ARCH)/kernel/
+	mkdir -p $(DIR)/arch/$(KERNEL_ARCH)/include/generated/asm/
+	cp -a $(IMAGE_BUILD_DIR)/arch/$(KERNEL_ARCH)/include/generated/asm/*.h $(DIR)/arch/$(KERNEL_ARCH)/include/generated/asm/
+	mkdir -p $(DIR)/arch/$(KERNEL_ARCH)/include/generated/uapi/asm/
+	cp -a $(IMAGE_BUILD_DIR)/arch/$(KERNEL_ARCH)/include/generated/uapi/asm/*.h $(DIR)/arch/$(KERNEL_ARCH)/include/generated/uapi/asm/
+	cp -a $(SOURCE_DIR)/arch/Kconfig $(DIR)/arch/
+
+	mkdir -p $(PACKAGE_DIR)/lib/modules/$(REAL_VERSION)
+	ln -s /usr/src/$(PACKAGE_NAME) $(PACKAGE_DIR)/lib/modules/$(REAL_VERSION)/build
+
+	+$(MAKE_SELF) install-base
+
+install-image-meta_$(ARCH)_$(FEATURESET)_$(FLAVOUR): PACKAGE_NAME = linux-image-$(FLAVOUR)
+install-image-meta_$(ARCH)_$(FEATURESET)_$(FLAVOUR): DH_OPTIONS = -p$(PACKAGE_NAME)
+install-image-meta_$(ARCH)_$(FEATURESET)_$(FLAVOUR): PACKAGE_DIR = debian/$(PACKAGE_NAME)
+install-image-meta_$(ARCH)_$(FEATURESET)_$(FLAVOUR):
+	dh_testdir
+	dh_testroot
+	dh_prep
+	+$(MAKE_SELF) install-base
+
+install-headers-meta_$(ARCH)_$(FEATURESET)_$(FLAVOUR): PACKAGE_NAME = linux-headers-$(FLAVOUR)
+install-headers-meta_$(ARCH)_$(FEATURESET)_$(FLAVOUR): DH_OPTIONS = -p$(PACKAGE_NAME)
+install-headers-meta_$(ARCH)_$(FEATURESET)_$(FLAVOUR): PACKAGE_DIR = debian/$(PACKAGE_NAME)
+install-headers-meta_$(ARCH)_$(FEATURESET)_$(FLAVOUR):
+	dh_testdir
+	dh_testroot
+	dh_prep
+	+$(MAKE_SELF) install-base
+
+install-image_$(ARCH)_$(FEATURESET)_$(FLAVOUR)_$(TYPE): REAL_VERSION = $(ABINAME)$(LOCALVERSION)
+install-image_$(ARCH)_$(FEATURESET)_$(FLAVOUR)_$(TYPE): PACKAGE_NAME = linux-image-$(REAL_VERSION)
+install-image_$(ARCH)_$(FEATURESET)_$(FLAVOUR)_$(TYPE): PACKAGE_DIR = debian/$(PACKAGE_NAME)
+install-image_$(ARCH)_$(FEATURESET)_$(FLAVOUR)_$(TYPE): INSTALL_DIR = $(PACKAGE_DIR)/boot
+install-image_$(ARCH)_$(FEATURESET)_$(FLAVOUR)_$(TYPE): DIR = $(BUILD_DIR)/build_$(ARCH)_$(FEATURESET)_$(FLAVOUR)
+install-image_$(ARCH)_$(FEATURESET)_$(FLAVOUR)_$(TYPE): DH_OPTIONS = -p$(PACKAGE_NAME)
+install-image_$(ARCH)_$(FEATURESET)_$(FLAVOUR)_$(TYPE): $(STAMPS_DIR)/build_$(ARCH)_$(FEATURESET)_$(FLAVOUR)_$(TYPE)
+
+install-image_$(ARCH)_$(FEATURESET)_$(FLAVOUR)_plain:
+	dh_testdir
+	dh_testroot
+	dh_prep
+	dh_installdirs 'boot'
+	install -m644 '$(DIR)/$(IMAGE_FILE)' $(INSTALL_DIR)/$(IMAGE_INSTALL_STEM)-$(REAL_VERSION)
+	+$(MAKE_SELF) \
+	  install-image_$(ARCH)_$(FEATURESET)_$(FLAVOUR)_plain_dt \
+	  DIR='$(DIR)' PACKAGE_DIR='$(PACKAGE_DIR)' REAL_VERSION='$(REAL_VERSION)'
+ifeq ($(MODULES),True)
+	+$(MAKE_CLEAN) -C $(DIR) modules_install DEPMOD='$(CURDIR)/debian/bin/no-depmod' INSTALL_MOD_PATH='$(CURDIR)'/$(PACKAGE_DIR) INSTALL_MOD_STRIP=1
+ifeq ($(DEBUG),True)
+	set -o pipefail; \
+	find $(PACKAGE_DIR) -name '*.ko' | sed 's|$(PACKAGE_DIR)/lib/modules/$(REAL_VERSION)/kernel/||' | while read module ; do \
+	  $(CROSS_COMPILE)objcopy --add-gnu-debuglink=$(DIR)/$$module $(PACKAGE_DIR)/lib/modules/$(REAL_VERSION)/kernel/$$module || exit; \
+	done
+endif
+	cp $(DIR)/.config $(PACKAGE_DIR)/boot/config-$(REAL_VERSION)
+	cp $(DIR)/System.map $(PACKAGE_DIR)/boot/System.map-$(REAL_VERSION)
+	rm -f $(PACKAGE_DIR)/lib/modules/$(REAL_VERSION)/build
+	rm -f $(PACKAGE_DIR)/lib/modules/$(REAL_VERSION)/source
+
+	# store extra firmware in its own folder - increases compatibility with Ubuntu
+	mkdir -m755 $(PACKAGE_DIR)/$(REAL_VERSION)
+	mv $(PACKAGE_DIR)/lib/firmware/* $(PACKAGE_DIR)/$(REAL_VERSION)/
+	mv $(PACKAGE_DIR)/$(REAL_VERSION) $(PACKAGE_DIR)/lib/firmware/
+endif
+	dh_installdebconf
+	+$(MAKE_SELF) \
+	  install-image_$(ARCH)_$(FEATURESET)_$(FLAVOUR)_plain_bug \
+	  PACKAGE_DIR='$(PACKAGE_DIR)' PACKAGE_NAME='$(PACKAGE_NAME)' REAL_VERSION='$(REAL_VERSION)'
+	+$(MAKE_SELF) install-base
+
+install-image_$(ARCH)_$(FEATURESET)_$(FLAVOUR)_plain_dt: DT_INSTALL_DIR = $(PACKAGE_DIR)/usr/lib/linux-image-$(REAL_VERSION)
+install-image_$(ARCH)_$(FEATURESET)_$(FLAVOUR)_plain_dt:
+ifneq ($(filter arm64 armel armhf,$(ARCH)),)
+	+$(MAKE_CLEAN) -C $(DIR) dtbs
+	shopt -s nullglob ; for i in $(DIR)/arch/$(KERNEL_ARCH)/boot/dts/*.dtb ; do \
+		install -D -m644 $$i '$(DT_INSTALL_DIR)'/$$(basename $$i) ; \
+	done
+endif
+
+install-image_$(ARCH)_$(FEATURESET)_$(FLAVOUR)_plain_bug:
+	dh_installdirs usr/share/bug/$(PACKAGE_NAME)
+	dh_install debian/templates/image.plain.bug/* usr/share/bug/$(PACKAGE_NAME)
+	chmod 755 $(PACKAGE_DIR)/usr/share/bug/$(PACKAGE_NAME)/script
+	echo "RELEASE='$(REAL_VERSION)'" > $(PACKAGE_DIR)/usr/share/bug/$(PACKAGE_NAME)/info
+
+install-image-dbg_$(ARCH)_$(FEATURESET)_$(FLAVOUR): REAL_VERSION = $(ABINAME)$(LOCALVERSION)
+install-image-dbg_$(ARCH)_$(FEATURESET)_$(FLAVOUR): PACKAGE_NAME = linux-image-$(REAL_VERSION)-dbg
+install-image-dbg_$(ARCH)_$(FEATURESET)_$(FLAVOUR): PACKAGE_DIR = debian/$(PACKAGE_NAME)
+install-image-dbg_$(ARCH)_$(FEATURESET)_$(FLAVOUR): DEBUG_DIR = $(PACKAGE_DIR)/usr/lib/debug
+install-image-dbg_$(ARCH)_$(FEATURESET)_$(FLAVOUR): DIR = $(BUILD_DIR)/build_$(ARCH)_$(FEATURESET)_$(FLAVOUR)
+install-image-dbg_$(ARCH)_$(FEATURESET)_$(FLAVOUR): DH_OPTIONS = -p$(PACKAGE_NAME)
+install-image-dbg_$(ARCH)_$(FEATURESET)_$(FLAVOUR): $(STAMPS_DIR)/build_$(ARCH)_$(FEATURESET)_$(FLAVOUR)_$(TYPE)
+	dh_testdir
+	dh_testroot
+	dh_prep
+	dh_installdirs usr/lib/debug usr/lib/debug/boot usr/share/lintian/overrides/
+	dh_lintian
+	install -m644 $(DIR)/vmlinux $(DEBUG_DIR)/boot/vmlinux-$(REAL_VERSION)
+ifeq ($(MODULES),True)
+	+$(MAKE_CLEAN) -C $(DIR) modules_install DEPMOD='$(CURDIR)/debian/bin/no-depmod' INSTALL_MOD_PATH='$(CURDIR)'/$(DEBUG_DIR)
+	find $(DEBUG_DIR)/lib/modules/$(REAL_VERSION)/ -mindepth 1 -maxdepth 1 \! -name kernel -exec rm {} \+
+	rm $(DEBUG_DIR)/lib/firmware -rf
+endif
+# Add symlinks to vmlinux from the locations expected by kdump-tools,
+# systemtap and others
+	ln -s boot/vmlinux-$(REAL_VERSION) $(DEBUG_DIR)/
+	mkdir -p $(DEBUG_DIR)/lib/modules/$(REAL_VERSION)
+	ln -s ../../../boot/vmlinux-$(REAL_VERSION) $(DEBUG_DIR)/lib/modules/$(REAL_VERSION)/vmlinux
+	+$(MAKE_SELF) install-base
+
+# vim: filetype=make

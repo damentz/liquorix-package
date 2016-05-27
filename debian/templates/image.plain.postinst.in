@@ -1,0 +1,649 @@
+#! /usr/bin/perl
+#
+use strict;
+use warnings;
+use Cwd 'abs_path';
+use Debconf::Client::ConfModule qw(:all);
+use POSIX ();
+version('2.0');
+my $capb = capb('backup', 'escape');
+
+$|=1;
+
+# Predefined values:
+my $version           = "@abiname@@localversion@";
+my $arch              = "@arch@";
+my $link_in_boot      = "";
+my $no_symlink        = "";
+my $do_symlink        = "Yes";  # target machine defined
+my $kimage            = "@image-stem@";
+my $mkimage           = "";     # command to generate the initrd image
+my $use_hard_links    = ''; # hardlinks do not work across fs boundaries
+my $postinst_hook     = '';          #Normally we do not
+my $minimal_swap      = '';          # Do not swap symlinks
+my $ignore_depmod_err = '';          # normally we do not
+my $package_name      = "linux-image-$version";
+
+#known variables
+my $image_dest      = "/";
+my $realimageloc    = "/boot/";
+my $have_conffile   = "";
+
+my $modules_base    = '/lib/modules';
+my $CONF_LOC        = '/etc/kernel-img.conf';
+
+# Ignore all invocations except when called on to configure.
+exit 0 unless $ARGV[0] =~ /configure/;
+
+my $DEBUG = 0;
+
+# Do some preliminary sanity checks here to ensure we actually have an
+# valid image dir
+chdir('/')           or die "could not chdir to /:$!\n";
+die "Internal Error: ($realimageloc) is not a directory!\n"
+  unless -d $realimageloc;
+
+if (-r "$CONF_LOC" && -f "$CONF_LOC"  ) {
+  if (open(CONF, "$CONF_LOC")) {
+    while (<CONF>) {
+      chomp;
+      s/\#.*$//g;
+      next if /^\s*$/;
+
+      $do_symlink      = "" if /do_symlinks\s*=\s*(no|false|0)\s*$/i;
+      $no_symlink      = "" if /no_symlinks\s*=\s*(no|false|0)\s*$/i;
+      $link_in_boot    = "" if /link_in_boot\s*=\s*(no|false|0)\s*$/i;
+      $use_hard_links  = '' if /use_hard_links\s*=\s*(no|false|0)\s*$/i;
+      $minimal_swap    = '' if /minimal_swap\s*=\s*(no|false|0)\s*$/i;
+      $ignore_depmod_err = '' if /ignore_depmod_err\s*=\s*(no|false|0)\s*$/i;
+
+      $do_symlink      = "Yes" if /do_symlinks\s*=\s*(yes|true|1)\s*$/i;
+      $no_symlink      = "Yes" if /no_symlinks\s*=\s*(yes|true|1)\s*$/i;
+      $link_in_boot    = "Yes" if /link_in_boot\s*=\s*(yes|true|1)\s*$/i;
+      $use_hard_links  = "Yes" if /use_hard_links\s*=\s*(yes|true|1)\s*$/i;
+      $minimal_swap    = 'Yes' if /minimal_swap\s*=\s*(yes|true|1)\s*$/i;
+      $ignore_depmod_err = 'Yes' if /ignore_depmod_err\s*=\s*(yes|true|1)\s*$/i;
+
+      $image_dest      = "$1"  if /image_dest\s*=\s*(\S+)/i;
+      $postinst_hook   = "$1"  if /postinst_hook\s*=\s*(\S+)/i;
+      $mkimage         = "$1"  if /mkimage\s*=\s*(.+)$/i;
+    }
+    close CONF;
+    $have_conffile = "Yes";
+  }
+}
+
+
+if ($link_in_boot) {
+  $image_dest = $realimageloc;
+}
+
+# Tack on at least one trainling /
+$image_dest = "$image_dest/";
+$image_dest =~ s|^/*|/|o;
+$image_dest =~ s|/+$|/|o;
+
+if (! -d "$image_dest") {
+  die "Expected Image Destination dir ($image_dest) to be a valid directory!\n";
+}
+
+# sanity
+if ($do_symlink && $no_symlink) {
+  warn "Both do_symlinks and no_symlinks options enabled; disabling no_symlinks\n";
+  $no_symlink = 0;
+}
+
+# most of our work is done in $image_dest (nominally /)
+chdir("$image_dest") or die "could not chdir to $image_dest:$!\n";
+
+
+die "Internal Error: Could not find image (" . $realimageloc
+  . "$kimage-$version)\n" unless -e $realimageloc
+  . "$kimage-$version";
+
+
+######################################################################
+######################################################################
+###########        Test whether a relative symlinkwould be OK #######
+######################################################################
+######################################################################
+sub test_relative {
+  my %params = @_;
+  my $cwd;
+
+  die "Internal Error: Missing Required paramater 'Old Dir' "
+    unless $params{'Old Dir'};
+  die "Internal Error: Missing Required paramater New Dir' "
+    unless $params{'New Dir'};
+
+
+  die "Internal Error: No such dir $params{'Old Dir'} "
+    unless -d $params{'Old Dir'};
+  die "Internal Error: No such dir $params{'New Dir'} "
+    unless -d $params{'New Dir'};
+
+  warn "Test relative: testing $params{'Old Dir'} -> $params{'New Dir'}"
+    if $DEBUG;
+  chomp($cwd = `pwd`);
+  chdir ($params{'New Dir'}) or die "Could not chdir to $params{'New Dir'}:$!";
+  my $ok = 0;
+  $params{'Old Dir'}  =~ s|^/*||o;
+  if (-d $params{'Old Dir'} ) {
+    if (defined $params{'Test File'}) {
+      if (-e $params{'Old Dir'} . $params{'Test File'}) {
+        $ok  = 1;
+      }
+    } else {
+      $ok = 1;                  # well, backward compatibility
+    }
+  }
+  chdir ($cwd) or die "Could not chdir to $params{'New Dir'}:$!";
+  return $ok;
+}
+
+
+sub spath {
+  my %params = @_;
+
+  die "Missing Required paramater 'Old'" unless $params{'Old'};
+  die "Missing Required paramater 'New'" unless  $params{'New'};
+
+  my @olddir  = split '/', `readlink -q -m $params{'Old'}`;
+  my @newdir  = split '/', `readlink -q -m $params{'New'}`;
+  my @outdir  = @olddir;
+
+  my $out = '';
+  my $i;
+  for ($i = 0; $i <= $#olddir && $i <= $#newdir; $i++) {
+    $out++ if ($olddir[$i] ne $newdir[$i]);
+    shift @outdir unless $out;
+    unshift @outdir, ".." if $out;
+  }
+  if ($#newdir > $#olddir) {
+    for ($i=0; $i < $#newdir; $i++) {
+      unshift @outdir, "..";
+    }
+  }
+  return join ('/', @outdir);
+}
+
+# This routine is invoked if there is a symbolic link in place
+# in $image_dest/$kimage -- so a symlink exists in the destination.
+# What we are trying to determine is if we need to move the symbolic link over
+# to the the .old location
+sub move_p {
+  my $kimage     = $_[0];       # Name of the symbolic link
+  my $image_dest = $_[1];       # The directory the links goes into
+  my $image_name = $_[2]; 
+  my $src_dir    = $_[3]; 
+  my $force_move = 0;
+  warn "Move?: kimage=$kimage, image_dest=$image_dest, \n" .
+    "\timage_name=$image_name, src_dir=$src_dir" if $DEBUG;
+
+  if ($no_symlink) {
+    # we do not want links, yet we have a symbolic link here!
+    warn "found a symbolic link in " . $image_dest . "$kimage \n" .
+      "even though no_symlink is defined\n" if $no_symlink;
+    # make sure we change this state of affairs
+    $force_move = 1;
+    return $force_move;
+  }
+
+  warn "DEBUG: OK. We found symlink, and we should have a symlink here.\n"
+    if $DEBUG;
+  my $vmlinuz_target = readlink "$kimage";
+  my $real_target = '';
+  my $target = `readlink -q -m "${realimageloc}${kimage}-$version"`;
+  $real_target = abs_path($vmlinuz_target) if defined($vmlinuz_target);
+
+  if (!defined($vmlinuz_target) || ! -f "$real_target") {
+    # what, a dangling symlink?
+    warn "The link "  . $image_dest . "$kimage is a dangling link" .
+      "to $real_target\n";
+    $force_move = 1;
+    return $force_move;
+  }
+
+
+  warn "DEBUG: The link $kimage points to ($vmlinuz_target)\n" if $DEBUG;
+  warn "DEBUG: ($vmlinuz_target) is really ($real_target)\n" if $DEBUG;
+  my $cwd;
+  chomp ($cwd=`pwd`);
+  if ($vmlinuz_target !~ m|^/|o) {
+    $vmlinuz_target = $cwd . "/" . $vmlinuz_target;
+    $vmlinuz_target =~ s|/+|/|o;
+  }
+  $vmlinuz_target = `readlink -q -m $vmlinuz_target`;
+
+  if ("$vmlinuz_target" ne "$target") {
+    warn "DEBUG: We need to handle this.\n" if $DEBUG;
+    if ($minimal_swap) {
+      warn "DEBUG: Minimal swap.\n" if $DEBUG;
+      if (-l "$kimage.old") {
+        warn "DEBUG: There is an old link at $kimage.old\n" if $DEBUG;
+        my $old_target = readlink "$kimage.old";
+        my $real_old_target = '';
+        $real_old_target=abs_path($old_target) if defined ($old_target);
+
+        if ($real_old_target  && -f "$real_old_target") {
+          if ($old_target !~ m|^/|o) {
+            $old_target = $cwd . "/" . $old_target;
+            $old_target =~ s|/+|/|o;
+          }
+          $old_target = `readlink -q -m $old_target`;
+          if ("$old_target"  ne "$target") {
+            $force_move = 1;
+            warn "DEBUG: Old link ($old_target) does not point to us ($target)\n"
+              if $DEBUG;
+          } 
+          else {            # The .old points to the current
+            warn "$kimage.old --> $target -- doing nothing";
+            $force_move = 0;
+          }
+        } 
+        else { 
+          warn "DEBUG: Well, the old link does not exist -- so we move\n"
+            if $DEBUG;
+          $force_move = 1;
+        }
+      } 
+      else {
+        warn "DEBUG: No .old link -- OK to move\n"
+          if $DEBUG;
+        $force_move = 1;
+      }
+    } 
+    else {
+      warn "DEBUG: ok, minimal swap is no-- so we move.\n"
+        if $DEBUG;
+      $force_move = 1;
+    }
+  }
+  else {                  # already have proper link
+    warn "$kimage($vmlinuz_target) points to $target ($real_target) -- doing nothing";
+    $force_move = 0;
+  }
+  return $force_move;
+}
+
+
+# This routine moves the symbolic link around (/vmlinuz -> /vmlinuz.old)
+# It pays attention to whether we should the fact whether we should be using
+# hard links or not.
+sub really_move_link {
+  my $kimage     = $_[0];       # Name of the symbolic link
+  my $image_dest = $_[1];       # The directory the links goes into
+  my $image_name = $_[2]; 
+  my $src_dir    = $_[3]; 
+  warn "really_move_link: kimage=$kimage, image_dest=$image_dest\n" .
+    "\t image_name=$image_name, src_dir=$src_dir" if $DEBUG;
+
+  # don't clobber $kimage.old quite yet
+  rename("$kimage", "$kimage.$$") ||
+    die "failed to move " . $image_dest . "$kimage:$!";
+  my $Old = $src_dir;
+  my $cwd;
+
+  chomp($cwd=`pwd`);
+  if (test_relative ('Old Dir' => $Old, 'New Dir' => $cwd,
+                     'Test File' => "$image_name")) {
+    $Old   =~ s|^/*||o;
+  }
+  # Special case is they are in the same dir
+  my $rel_path = spath('Old' => "$Old", 'New' => "$cwd" );
+  $Old ="" if $rel_path =~ m/^\s*$/o;
+
+  if ($use_hard_links =~ m/YES/i) {
+    if (! link("${Old}${image_name}", "$kimage")) {
+      rename("$kimage.$$", "$kimage");
+      die("Failed to link ${Old}${image_name} to " .
+          "${image_dest}${kimage}.\n");
+    }
+  } 
+  else {
+    if (! symlink("${Old}${image_name}", "$kimage")) {
+      rename("$kimage.$$", "$kimage");
+      die("Failed to symbolic-link ${Old}${image_name} to " .
+          "${image_dest}${kimage}.\n");
+    }
+  }
+
+  # Ok, now we may clobber the previous .old file
+  if (-l "$kimage.old" || ! -e "$kimage.old" ) {
+    rename("$kimage.$$", "$kimage.old");
+  }
+  else {
+    warn "$kimage.old is not a symlink, not clobbering\n";
+    warn "rm $kimage.$$";
+  }
+}
+
+# This routine handles a request to do symlinks, but there is no
+# symlink file already there.  Either we are supposed to use copy, or we are
+# installing on a pristine system, or the user does not want symbolic links at
+# all.  We use a configuration file to tell the last two cases apart, creating
+# a config file if needed.
+sub handle_missing_link {
+  my $kimage     = $_[0];       # Name of the symbolic link
+  my $image_dest = $_[1];       # The directory the links goes into
+  my $image_name = $_[2]; 
+  my $src_dir    = $_[3]; 
+  warn "handle_missing_link: kimage=$kimage, image_dest=$image_dest\n" .
+    "\t image_name=$image_name, src_dir=$src_dir" if $DEBUG;
+
+  if ($no_symlink) {
+    my $ret = system("cp -a --backup=t " . $realimageloc .
+                     "$image_name "   . " $kimage");
+    if ($ret) {
+      die("Failed to copy " . $realimageloc . "$image_name to "
+          . $image_dest . "$kimage .\n");
+    }
+  }
+
+  if (! $no_symlink && $do_symlink =~ /Yes/i) {
+    my $Old = $realimageloc;
+    my $New = $image_dest;
+    my $Name = "$image_name";
+    my $Link_Dest = "$kimage";
+
+    if (test_relative ('Old Dir' => $Old,
+                       'New Dir' => $New,
+                       'Test File' => $Name)) {
+      $Old   =~ s|^/*||o;
+    }
+    # Special case is they are in the same dir
+    my $rel_path = spath('Old' => "$Old", 'New' => "$New" );
+    $Old ="" if $rel_path =~ m/^\s*$/o;
+
+    symlink($Old . "$Name", "$Link_Dest") ||
+      die("Failed to symbolic-link ${Old}$Name to $Link_Dest.\n");
+
+  }
+}
+
+# This routine handles the rest of the cases, where the user has requested 
+# non-traditional handling, like using cp or hard links.
+sub handle_non_symlinks {
+  my $kimage     = $_[0];       # Name of the symbolic link
+  my $image_dest = $_[1];       # The directory the links goes into
+  my $image_name = $_[2]; 
+  my $src_dir    = $_[3]; 
+  warn "handle_non_link: kimage=$kimage, image_dest=$image_dest\n" .
+    "\t image_name=$image_name, src_dir=$src_dir" if $DEBUG;
+
+  # Save the current image. We do this in all four cases
+  rename("$kimage", "$kimage.$$") || 
+    die "failed to move " . $image_dest . "$kimage:$!";
+
+  ##,#### 
+  # case One
+  #`####
+  if ($no_symlink) {
+    # Maybe /$image_dest is on a dos system?
+    my $ret = system("cp -a --backup=t " . $realimageloc
+                     . "$image_name " . "$kimage");
+    if ($ret) {
+      if (-e "$kimage.$$") {
+        rename("$kimage.$$", "$kimage");
+      }
+      die("Failed to copy " . $realimageloc . "$image_name to "
+          . $image_dest . "$kimage .\n");
+    }
+  }
+  ##,#### 
+  # case Two
+  #`####
+  elsif ($use_hard_links =~ m/YES/i ) {
+    # Ok then. this ought to be a hard link, and hence fair game
+    # don't clobber $kimage.old quite yet
+    my $Old = $realimageloc;
+    my $cwd;
+    chomp($cwd=`pwd`);
+    if (test_relative ('Old Dir' => $Old, 'New Dir' => $cwd,
+                       'Test File' => "$image_name")) {
+      $Old   =~ s|^/*||o;
+    }
+    # Special case is they are in the same dir
+    my $rel_path = spath('Old' => "$Old", 'New' => "$cwd" );
+    $Old ="" if $rel_path =~ m/^\s*$/o;
+
+    if (! link($Old . "$image_name", "$kimage")) {
+      rename("$kimage.$$", "$kimage");
+      die("Failed to hard link " . $realimageloc . "$image_name to "
+          . $image_dest . "$kimage .\n");
+    }
+  }
+  ##,####
+  # case Three
+  #`####
+  else {
+    # We just use cp
+    my $ret = system("cp -a --backup=t " . $realimageloc
+                     . "$image_name " . "$kimage");
+    if ($ret) {
+      if (-e "$kimage.$$") {
+        rename("$kimage.$$", "$kimage");
+      }
+      die("Failed to copy " . $realimageloc . "$image_name to "
+          . $image_dest . "$kimage .\n");
+    }
+  }
+  # Ok, now we may clobber the previous .old file
+  rename("$kimage.$$", "$kimage.old") if -e "$kimage.$$";
+}
+
+# This routine is responsible for setting up the symbolic links
+# So, the actual kernel image lives in
+# $realimageloc/$image_name (/boot/vmlinuz-2.6.12).
+# This routine creates symbolic links in $image_dest/$kimage (/vmlinuz)
+sub image_magic {
+  my $kimage     = $_[0];       # Name of the symbolic link
+  my $image_dest = $_[1];       # The directory the links goes into
+  my $image_name = "$kimage-$version";
+  my $src_dir    = $realimageloc;
+  warn "image_magic: kimage=$kimage, image_dest=$image_dest\n" .
+    "\t image_name=$image_name, src_dir=$src_dir" if $DEBUG;
+
+  if (-l "$kimage") {           # There is a symbolic link
+    warn "DEBUG: There is a symlink for $kimage\n" if $DEBUG;
+    my $force_move = move_p($kimage, $image_dest, $image_name, $src_dir);
+
+    if ($force_move) {
+      really_move_link($kimage, $image_dest, $image_name, $src_dir);
+    }
+  }
+  elsif (! -e "$kimage") {
+    # Hmm. Pristine system? How can that be? Installing from scratch?
+    # Or maybe the user does not want a symbolic link here.
+    # Possibly they do not want a link here. (we should be in /
+    # here[$image_dest, really]
+    handle_missing_link($kimage, $image_dest, $image_name, $src_dir);
+  }
+  elsif (-e "$kimage" ) {
+    # OK, $kimage exists -- but is not a link
+    handle_non_symlinks($kimage, $image_dest, $image_name, $src_dir);
+  }
+}
+
+######################################################################
+######################################################################
+######################################################################
+######################################################################
+
+sub do_modules {
+  my $ret = system("depmod -a -F $realimageloc/System.map-$version $version");
+  my $exit_value  = $? >> 8;
+  my $signal_num  = $? & 127;
+  my $dumped_core = $? & 128;
+  if ($ret) {
+    my $seen;
+    my $answer;
+    my $question;
+    $question = "${package_name}/postinst/depmod-error-initrd-$version";
+
+    ($ret,$seen) = fset ("$question", 'seen', 'false');
+    die "Error setting debconf flags in $question: $seen" if $ret;
+
+    $ret = subst("$question", 'modules_base', "$modules_base");
+    die "Error setting debconf substitutions in $question: $seen" if $ret;
+
+    $ret = subst("$question", 'SIGNAL', ", and got a signal $signal_num");
+    die "Error setting debconf substitutions in $question: $seen" if $ret;
+
+    if ($dumped_core) {
+      $ret = subst("$question", 'CORE', ", and dumped core");
+      die "Error setting debconf substitutions in $question: $seen" if $ret;
+    }
+    else {
+      $ret = subst("$question", 'CORE', " ");
+      die "Error setting debconf substitutions in $question: $seen" if $ret;
+    }
+
+    ($ret,$seen) = input('medium', "$question");
+    if ($ret && $ret != 30 ) {
+      die "Error setting debconf question $question: $seen";
+    }
+
+    ($ret,$seen) = go ();
+    if ($ret && $ret != 30 ) {
+      die "Error asking debconf question $question: $seen";
+    }
+
+    ($ret,$answer) = get("$question");
+    die "Error retreiving answer for $question: $answer" if $ret;
+
+    if (! $ignore_depmod_err) {
+      if ($answer =~ /^(y|t)/i) {
+        exit(1);
+      }
+      else {
+        print STDERR "Ok, continuing as directed\n";
+      }
+    }
+  }
+}
+
+# We may not have any modules installed
+if (-d "$modules_base/$version") {
+  &do_modules();
+}
+
+
+# Only change the symlinks if we are not being upgraded
+if (! defined $ARGV[1] || ! $ARGV[1] || $ARGV[1] =~ m/<unknown>/o) {
+  image_magic($kimage, $image_dest);
+  image_magic("initrd.img", $image_dest);
+}
+else {
+  lstat($kimage);
+  if (! -e _) {
+    handle_missing_link($kimage, $image_dest, "$kimage-$version", 
+                        $realimageloc);
+  }
+  lstat("initrd.img");
+  if (! -e _) {
+    handle_missing_link("initrd.img", $image_dest, "initrd.img-$version",
+			$realimageloc);
+  }
+}
+
+# This routine detects chroots by checking if the devicenumber/inode pair
+# of / are the same as that of /sbin/init. This may fail if not running as
+# root or if /proc is not mounted, in which case 2 is returned.
+sub detect_chroot {
+  my ($dev1, $ino1) = stat("/") or return 2;
+  my ($dev2, $ino2) = stat("/proc/1/root") or return 2;
+  return ($dev1 != $dev2) || ($ino1 != $ino2);
+}
+
+sub is_package_installed {
+    my ($package) = @_;
+    for (`dpkg-query 2>/dev/null --showformat '\${status}\\n' -W '$package'`) {
+        return 1 if / installed\n$/;
+    }
+    return 0;
+}
+
+# On mips and mipsel warn users if they need to configure their boot loader
+# to load initramfs. mips64 and mips64el are ignored as they always had an
+# initramfs. For that look if the current kernel is booted using initramfs.
+# We ignore the chroot case, and we also ignore the GRUB case, as
+# update-grub will automatically add the initramfs to grub.cfg.
+if (($arch eq "mips" || $arch eq "mipsel")
+    && !is_package_installed("grub-yeeloong")
+    && detect_chroot() == 0) {
+  if (-r "/proc/cmdline" && -f "/proc/cmdline") {
+    if (open(CMDLINE, "/proc/cmdline")) {
+      if (<CMDLINE> !~ m/rd_start=/) {
+        my $ret;
+        my $seen;
+        my $question = "${package_name}/postinst/mips-initrd-$version";
+    
+        ($ret,$seen) = input('critical', "$question");
+        if ($ret && $ret != 30 ) {
+          die "Error setting debconf question $question: $seen";
+        }
+    
+        ($ret,$seen) = go();
+        if ($ret && $ret != 30 ) {
+          die "Error asking debconf question $question: $seen";
+        }
+      }
+      close CMDLINE;
+    }
+  }
+}
+
+# set the env var stem
+$ENV{'STEM'} = "linux";
+sub run_hook {
+  my $type   = shift;
+  my $script = shift;
+
+  print STDERR "Running $script.\n";
+  system ("$script $version $realimageloc$kimage-$version") &&
+    print STDERR "User $type hook script [$script] ";
+  if ($?) {
+    if ($? == -1) {
+      print STDERR "failed to execute: $!\n";
+    }
+    elsif ($? & 127) {
+      printf STDERR "died with signal %d, %s coredump\n",
+        ($? & 127),  ($? & 128) ? 'with' : 'without';
+    }
+    else {
+      printf STDERR "exited with value %d\n", $? >> 8;
+    }
+    exit $? >> 8;
+  }
+}
+
+my $options;
+for (@ARGV) {
+	s,','\\'',g;
+	$options .= " '$_'";
+}
+$ENV{'DEB_MAINT_PARAMS'}="$options";
+
+## Run user hook script here, if any
+if ($postinst_hook) {
+  &run_hook("postinst", $postinst_hook);
+}
+
+if (-d "/etc/kernel/postinst.d") {
+  system ("run-parts --report --exit-on-error --arg=$version " .
+          "--arg=$realimageloc$kimage-$version " .
+          "/etc/kernel/postinst.d") &&
+            die "Failed to process /etc/kernel/postinst.d";
+}
+
+if (-d "/etc/kernel/postinst.d/$version") {
+  system ("run-parts --report --exit-on-error --arg=$version " .
+          "--arg=$realimageloc$kimage-$version " .
+          "/etc/kernel/postinst.d/$version") &&
+            die "Failed to process /etc/kernel/postinst.d/$version";
+}
+
+exit 0;
+
+__END__

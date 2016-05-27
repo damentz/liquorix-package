@@ -1,0 +1,202 @@
+Index: linux-liquorix-2.6-2.6.37/scripts/kconfig/Makefile
+===================================================================
+--- linux-liquorix-2.6-2.6.37.orig/scripts/kconfig/Makefile	2011-01-04 18:50:19.000000000 -0600
++++ linux-liquorix-2.6-2.6.37/scripts/kconfig/Makefile	2011-01-09 01:43:02.340255286 -0600
+@@ -3,7 +3,7 @@
+ # These targets are used from top-level makefile
+ 
+ PHONY += oldconfig xconfig gconfig menuconfig config silentoldconfig update-po-config \
+-	localmodconfig localyesconfig
++	localmodconfig localyesconfig reportoldconfig updateoldconfig
+ 
+ ifdef KBUILD_KCONFIG
+ Kconfig := $(KBUILD_KCONFIG)
+@@ -29,10 +29,16 @@
+ oldconfig: $(obj)/conf
+ 	$< --$@ $(Kconfig)
+ 
++reportoldconfig: $(obj)/conf
++	$< --$@ $(Kconfig)
++
+ silentoldconfig: $(obj)/conf
+ 	$(Q)mkdir -p include/generated
+ 	$< --$@ $(Kconfig)
+ 
++updateoldconfig: $(obj)/conf
++	$< --$@ $(Kconfig)
++
+ # if no path is given, then use src directory to find file
+ ifdef LSMOD
+ LSMOD_F := $(LSMOD)
+Index: linux-liquorix-2.6-2.6.37/scripts/kconfig/conf.c
+===================================================================
+--- linux-liquorix-2.6-2.6.37.orig/scripts/kconfig/conf.c	2011-01-04 18:50:19.000000000 -0600
++++ linux-liquorix-2.6-2.6.37/scripts/kconfig/conf.c	2011-01-09 01:43:02.340255286 -0600
+@@ -33,6 +33,8 @@
+ 	savedefconfig,
+ 	listnewconfig,
+ 	oldnoconfig,
++	reportoldconfig,
++	updateoldconfig,
+ } input_mode = oldaskconfig;
+ 
+ char *defconfig_file;
+@@ -453,6 +455,8 @@
+ 	{"randconfig",      no_argument,       NULL, randconfig},
+ 	{"listnewconfig",   no_argument,       NULL, listnewconfig},
+ 	{"oldnoconfig",     no_argument,       NULL, oldnoconfig},
++	{"reportoldconfig", no_argument,       NULL, reportoldconfig},
++	{"updateoldconfig", no_argument,       NULL, updateoldconfig},
+ 	{NULL, 0, NULL, 0}
+ };
+ 
+@@ -529,6 +533,8 @@
+ 		}
+ 		break;
+ 	case savedefconfig:
++	case reportoldconfig:
++	case updateoldconfig:
+ 		conf_read(NULL);
+ 		break;
+ 	case silentoldconfig:
+@@ -594,6 +600,8 @@
+ 		conf_set_all_new_symbols(def_random);
+ 		break;
+ 	case defconfig:
++	case reportoldconfig:
++	case updateoldconfig:
+ 		conf_set_all_new_symbols(def_default);
+ 		break;
+ 	case savedefconfig:
+@@ -617,6 +625,9 @@
+ 		break;
+ 	}
+ 
++	if (input_mode == reportoldconfig)
++		conf_write_changes();
++
+ 	if (sync_kconfig) {
+ 		/* silentoldconfig is used during the build so we shall update autoconf.
+ 		 * All other commands are only used to generate a config.
+Index: linux-liquorix-2.6-2.6.37/scripts/kconfig/confdata.c
+===================================================================
+--- linux-liquorix-2.6-2.6.37.orig/scripts/kconfig/confdata.c	2011-01-04 18:50:19.000000000 -0600
++++ linux-liquorix-2.6-2.6.37/scripts/kconfig/confdata.c	2011-01-09 01:43:02.341255286 -0600
+@@ -911,6 +911,85 @@
+ 	return 0;
+ }
+ 
++void conf_write_changes(void)
++{
++	struct symbol *sym;
++	struct menu *menu;
++	int l;
++	const char *str;
++
++	fprintf(stdout, "\n#\n"
++			"# Changes:\n"
++			"#\n");
++	menu = rootmenu.list;
++	while (menu) {
++		sym = menu->sym;
++		if (sym &&
++		    !(sym->flags & SYMBOL_CHOICE) &&
++		    sym->flags & SYMBOL_WRITE &&
++		    sym->flags & SYMBOL_NEW &&
++		    sym->visible != no &&
++		    sym_is_changable(sym)) {
++			switch (sym->type) {
++			case S_BOOLEAN:
++			case S_TRISTATE:
++				switch (sym_get_tristate_value(sym)) {
++				case no:
++					fprintf(stdout, "# CONFIG_%s is not set\n", sym->name);
++					break;
++				case mod:
++					fprintf(stdout, "CONFIG_%s=m\n", sym->name);
++					break;
++				case yes:
++					fprintf(stdout, "CONFIG_%s=y\n", sym->name);
++					break;
++				}
++				break;
++			case S_STRING:
++				str = sym_get_string_value(sym);
++				fprintf(stdout, "CONFIG_%s=\"", sym->name);
++				while (1) {
++					l = strcspn(str, "\"\\");
++					if (l) {
++						fwrite(str, l, 1, stdout);
++						str += l;
++					}
++					if (!*str)
++						break;
++					fprintf(stdout, "\\%c", *str++);
++				}
++				fputs("\"\n", stdout);
++				break;
++			case S_HEX:
++				str = sym_get_string_value(sym);
++				if (str[0] != '0' || (str[1] != 'x' && str[1] != 'X')) {
++					fprintf(stdout, "CONFIG_%s=%s\n", sym->name, str);
++					break;
++				}
++			case S_INT:
++				str = sym_get_string_value(sym);
++				fprintf(stdout, "CONFIG_%s=%s\n", sym->name, str);
++				break;
++                        default:
++                                break;
++			}
++		}
++
++		if (menu->list) {
++			menu = menu->list;
++			continue;
++		}
++		if (menu->next)
++			menu = menu->next;
++		else while ((menu = menu->parent)) {
++			if (menu->next) {
++				menu = menu->next;
++				break;
++			}
++		}
++	}
++}
++
+ static int sym_change_count;
+ static void (*conf_changed_callback)(void);
+ 
+@@ -1009,6 +1088,7 @@
+ 	for_all_symbols(i, sym) {
+ 		if (sym_has_value(sym))
+ 			continue;
++		sym->flags |= SYMBOL_NEW;
+ 		switch (sym_get_type(sym)) {
+ 		case S_BOOLEAN:
+ 		case S_TRISTATE:
+Index: linux-liquorix-2.6-2.6.37/scripts/kconfig/expr.h
+===================================================================
+--- linux-liquorix-2.6-2.6.37.orig/scripts/kconfig/expr.h	2011-01-04 18:50:19.000000000 -0600
++++ linux-liquorix-2.6-2.6.37/scripts/kconfig/expr.h	2011-01-09 01:43:02.342255286 -0600
+@@ -107,6 +107,7 @@
+ #define SYMBOL_DEF_AUTO   0x20000  /* symbol.def[S_DEF_AUTO] is valid */
+ #define SYMBOL_DEF3       0x40000  /* symbol.def[S_DEF_3] is valid */
+ #define SYMBOL_DEF4       0x80000  /* symbol.def[S_DEF_4] is valid */
++#define SYMBOL_NEW        0x100000
+ 
+ #define SYMBOL_MAXLENGTH	256
+ #define SYMBOL_HASHSIZE		9973
+Index: linux-liquorix-2.6-2.6.37/scripts/kconfig/lkc_proto.h
+===================================================================
+--- linux-liquorix-2.6-2.6.37.orig/scripts/kconfig/lkc_proto.h	2011-01-04 18:50:19.000000000 -0600
++++ linux-liquorix-2.6-2.6.37/scripts/kconfig/lkc_proto.h	2011-01-09 01:43:02.343255286 -0600
+@@ -7,6 +7,7 @@
+ P(conf_write_defconfig,int,(const char *name));
+ P(conf_write,int,(const char *name));
+ P(conf_write_autoconf,int,(void));
++P(conf_write_changes,void,(void));
+ P(conf_get_changed,bool,(void));
+ P(conf_set_changed_callback, void,(void (*fn)(void)));
+ P(conf_set_message_callback, void,(void (*fn)(const char *fmt, va_list ap)));
