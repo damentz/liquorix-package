@@ -65,12 +65,17 @@ fi
 
 echo "[INFO ] Checking pbuilder bootstraps"
 for bootstrap in "${pbuilder_bootstraps[@]}"; do
+
+    # pbuilder likes to store native architectures without the arch in the
+    # file name.  Due to the requirements of this script, 32-bit bootstraps
+    # will contain "i386" while 64-bit bootstraps will not have arch in filename.
     bootstrap_arch=''
     if [[ "$bootstrap" =~ i386 ]]; then
         bootstrap_arch='i386'
     else
         bootstrap_arch='amd64'
     fi
+    echo "[DEBUG] bootstrap_arch = $bootstrap_arch"
 
     if [[ ! -f "${pbuilder_base}/${bootstrap}" ]]; then
         echo "[INFO ] Creating pbuilder base, ${bootstrap}"
