@@ -2372,7 +2372,7 @@ index 9c567a4..a62aea4 100644
  M:	Miguel Ojeda Sandonis <miguel.ojeda.sandonis@gmail.com>
  W:	http://miguelojeda.es/auxdisplay.htm
 diff --git a/Makefile b/Makefile
-index 0f9cb36..3b9a053 100644
+index 0f9cb36..155504e 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -1,8 +1,8 @@
@@ -2381,7 +2381,7 @@ index 0f9cb36..3b9a053 100644
 -SUBLEVEL = 0
 -EXTRAVERSION =
 -NAME = Charred Weasel
-+SUBLEVEL = 2
++SUBLEVEL = 4
 +EXTRAVERSION = -zen
 +NAME = Colonel Panic
  
@@ -4505,6 +4505,897 @@ index 3c0bfc1..2662fcc 100644
  			      STK_OFF_SKBP);
  }
  
+diff --git a/arch/sparc/include/asm/head_64.h b/arch/sparc/include/asm/head_64.h
+index 10e9dab..f0700cf 100644
+--- a/arch/sparc/include/asm/head_64.h
++++ b/arch/sparc/include/asm/head_64.h
+@@ -15,6 +15,10 @@
+ 
+ #define	PTREGS_OFF	(STACK_BIAS + STACKFRAME_SZ)
+ 
++#define	RTRAP_PSTATE		(PSTATE_TSO|PSTATE_PEF|PSTATE_PRIV|PSTATE_IE)
++#define	RTRAP_PSTATE_IRQOFF	(PSTATE_TSO|PSTATE_PEF|PSTATE_PRIV)
++#define RTRAP_PSTATE_AG_IRQOFF	(PSTATE_TSO|PSTATE_PEF|PSTATE_PRIV|PSTATE_AG)
++
+ #define __CHEETAH_ID	0x003e0014
+ #define __JALAPENO_ID	0x003e0016
+ #define __SERRANO_ID	0x003e0022
+diff --git a/arch/sparc/include/asm/pgtable_64.h b/arch/sparc/include/asm/pgtable_64.h
+index f089cfa..5a189bf 100644
+--- a/arch/sparc/include/asm/pgtable_64.h
++++ b/arch/sparc/include/asm/pgtable_64.h
+@@ -375,7 +375,7 @@ static inline pgprot_t pgprot_noncached(pgprot_t prot)
+ #define pgprot_noncached pgprot_noncached
+ 
+ #if defined(CONFIG_HUGETLB_PAGE) || defined(CONFIG_TRANSPARENT_HUGEPAGE)
+-static inline pte_t pte_mkhuge(pte_t pte)
++static inline unsigned long __pte_huge_mask(void)
+ {
+ 	unsigned long mask;
+ 
+@@ -390,8 +390,19 @@ static inline pte_t pte_mkhuge(pte_t pte)
+ 	: "=r" (mask)
+ 	: "i" (_PAGE_SZHUGE_4U), "i" (_PAGE_SZHUGE_4V));
+ 
+-	return __pte(pte_val(pte) | mask);
++	return mask;
++}
++
++static inline pte_t pte_mkhuge(pte_t pte)
++{
++	return __pte(pte_val(pte) | __pte_huge_mask());
++}
++
++static inline bool is_hugetlb_pte(pte_t pte)
++{
++	return !!(pte_val(pte) & __pte_huge_mask());
+ }
++
+ #ifdef CONFIG_TRANSPARENT_HUGEPAGE
+ static inline pmd_t pmd_mkhuge(pmd_t pmd)
+ {
+@@ -403,6 +414,11 @@ static inline pmd_t pmd_mkhuge(pmd_t pmd)
+ 	return __pmd(pte_val(pte));
+ }
+ #endif
++#else
++static inline bool is_hugetlb_pte(pte_t pte)
++{
++	return false;
++}
+ #endif
+ 
+ static inline pte_t pte_mkdirty(pte_t pte)
+@@ -858,6 +874,19 @@ static inline unsigned long pud_pfn(pud_t pud)
+ void tlb_batch_add(struct mm_struct *mm, unsigned long vaddr,
+ 		   pte_t *ptep, pte_t orig, int fullmm);
+ 
++static void maybe_tlb_batch_add(struct mm_struct *mm, unsigned long vaddr,
++				pte_t *ptep, pte_t orig, int fullmm)
++{
++	/* It is more efficient to let flush_tlb_kernel_range()
++	 * handle init_mm tlb flushes.
++	 *
++	 * SUN4V NOTE: _PAGE_VALID is the same value in both the SUN4U
++	 *             and SUN4V pte layout, so this inline test is fine.
++	 */
++	if (likely(mm != &init_mm) && pte_accessible(mm, orig))
++		tlb_batch_add(mm, vaddr, ptep, orig, fullmm);
++}
++
+ #define __HAVE_ARCH_PMDP_HUGE_GET_AND_CLEAR
+ static inline pmd_t pmdp_huge_get_and_clear(struct mm_struct *mm,
+ 					    unsigned long addr,
+@@ -874,15 +903,7 @@ static inline void __set_pte_at(struct mm_struct *mm, unsigned long addr,
+ 	pte_t orig = *ptep;
+ 
+ 	*ptep = pte;
+-
+-	/* It is more efficient to let flush_tlb_kernel_range()
+-	 * handle init_mm tlb flushes.
+-	 *
+-	 * SUN4V NOTE: _PAGE_VALID is the same value in both the SUN4U
+-	 *             and SUN4V pte layout, so this inline test is fine.
+-	 */
+-	if (likely(mm != &init_mm) && pte_accessible(mm, orig))
+-		tlb_batch_add(mm, addr, ptep, orig, fullmm);
++	maybe_tlb_batch_add(mm, addr, ptep, orig, fullmm);
+ }
+ 
+ #define set_pte_at(mm,addr,ptep,pte)	\
+diff --git a/arch/sparc/include/asm/tlbflush_64.h b/arch/sparc/include/asm/tlbflush_64.h
+index dea1cfa..a8e192e 100644
+--- a/arch/sparc/include/asm/tlbflush_64.h
++++ b/arch/sparc/include/asm/tlbflush_64.h
+@@ -8,6 +8,7 @@
+ #define TLB_BATCH_NR	192
+ 
+ struct tlb_batch {
++	bool huge;
+ 	struct mm_struct *mm;
+ 	unsigned long tlb_nr;
+ 	unsigned long active;
+@@ -16,7 +17,7 @@ struct tlb_batch {
+ 
+ void flush_tsb_kernel_range(unsigned long start, unsigned long end);
+ void flush_tsb_user(struct tlb_batch *tb);
+-void flush_tsb_user_page(struct mm_struct *mm, unsigned long vaddr);
++void flush_tsb_user_page(struct mm_struct *mm, unsigned long vaddr, bool huge);
+ 
+ /* TLB flush operations. */
+ 
+diff --git a/arch/sparc/include/asm/ttable.h b/arch/sparc/include/asm/ttable.h
+index 71b5a67..781b9f1 100644
+--- a/arch/sparc/include/asm/ttable.h
++++ b/arch/sparc/include/asm/ttable.h
+@@ -589,8 +589,8 @@ user_rtt_fill_64bit:					\
+ 	 restored;					\
+ 	nop; nop; nop; nop; nop; nop;			\
+ 	nop; nop; nop; nop; nop;			\
+-	ba,a,pt	%xcc, user_rtt_fill_fixup;		\
+-	ba,a,pt	%xcc, user_rtt_fill_fixup;		\
++	ba,a,pt	%xcc, user_rtt_fill_fixup_dax;		\
++	ba,a,pt	%xcc, user_rtt_fill_fixup_mna;		\
+ 	ba,a,pt	%xcc, user_rtt_fill_fixup;
+ 
+ 
+@@ -652,8 +652,8 @@ user_rtt_fill_32bit:					\
+ 	 restored;					\
+ 	nop; nop; nop; nop; nop;			\
+ 	nop; nop; nop;					\
+-	ba,a,pt	%xcc, user_rtt_fill_fixup;		\
+-	ba,a,pt	%xcc, user_rtt_fill_fixup;		\
++	ba,a,pt	%xcc, user_rtt_fill_fixup_dax;		\
++	ba,a,pt	%xcc, user_rtt_fill_fixup_mna;		\
+ 	ba,a,pt	%xcc, user_rtt_fill_fixup;
+ 
+ 
+diff --git a/arch/sparc/kernel/Makefile b/arch/sparc/kernel/Makefile
+index 7cf9c6e..fdb1332 100644
+--- a/arch/sparc/kernel/Makefile
++++ b/arch/sparc/kernel/Makefile
+@@ -21,6 +21,7 @@ CFLAGS_REMOVE_perf_event.o := -pg
+ CFLAGS_REMOVE_pcr.o := -pg
+ endif
+ 
++obj-$(CONFIG_SPARC64)   += urtt_fill.o
+ obj-$(CONFIG_SPARC32)   += entry.o wof.o wuf.o
+ obj-$(CONFIG_SPARC32)   += etrap_32.o
+ obj-$(CONFIG_SPARC32)   += rtrap_32.o
+diff --git a/arch/sparc/kernel/rtrap_64.S b/arch/sparc/kernel/rtrap_64.S
+index d08bdaf..216948c 100644
+--- a/arch/sparc/kernel/rtrap_64.S
++++ b/arch/sparc/kernel/rtrap_64.S
+@@ -14,10 +14,6 @@
+ #include <asm/visasm.h>
+ #include <asm/processor.h>
+ 
+-#define		RTRAP_PSTATE		(PSTATE_TSO|PSTATE_PEF|PSTATE_PRIV|PSTATE_IE)
+-#define		RTRAP_PSTATE_IRQOFF	(PSTATE_TSO|PSTATE_PEF|PSTATE_PRIV)
+-#define		RTRAP_PSTATE_AG_IRQOFF	(PSTATE_TSO|PSTATE_PEF|PSTATE_PRIV|PSTATE_AG)
+-
+ #ifdef CONFIG_CONTEXT_TRACKING
+ # define SCHEDULE_USER schedule_user
+ #else
+@@ -242,52 +238,17 @@ rt_continue:	ldx			[%sp + PTREGS_OFF + PT_V9_G1], %g1
+ 		 wrpr			%g1, %cwp
+ 		ba,a,pt			%xcc, user_rtt_fill_64bit
+ 
+-user_rtt_fill_fixup:
+-		rdpr	%cwp, %g1
+-		add	%g1, 1, %g1
+-		wrpr	%g1, 0x0, %cwp
+-
+-		rdpr	%wstate, %g2
+-		sll	%g2, 3, %g2
+-		wrpr	%g2, 0x0, %wstate
+-
+-		/* We know %canrestore and %otherwin are both zero.  */
+-
+-		sethi	%hi(sparc64_kern_pri_context), %g2
+-		ldx	[%g2 + %lo(sparc64_kern_pri_context)], %g2
+-		mov	PRIMARY_CONTEXT, %g1
+-
+-661:		stxa	%g2, [%g1] ASI_DMMU
+-		.section .sun4v_1insn_patch, "ax"
+-		.word	661b
+-		stxa	%g2, [%g1] ASI_MMU
+-		.previous
+-
+-		sethi	%hi(KERNBASE), %g1
+-		flush	%g1
++user_rtt_fill_fixup_dax:
++		ba,pt	%xcc, user_rtt_fill_fixup_common
++		 mov	1, %g3
+ 
+-		or	%g4, FAULT_CODE_WINFIXUP, %g4
+-		stb	%g4, [%g6 + TI_FAULT_CODE]
+-		stx	%g5, [%g6 + TI_FAULT_ADDR]
++user_rtt_fill_fixup_mna:
++		ba,pt	%xcc, user_rtt_fill_fixup_common
++		 mov	2, %g3
+ 
+-		mov	%g6, %l1
+-		wrpr	%g0, 0x0, %tl
+-
+-661:		nop
+-		.section		.sun4v_1insn_patch, "ax"
+-		.word			661b
+-		SET_GL(0)
+-		.previous
+-
+-		wrpr	%g0, RTRAP_PSTATE, %pstate
+-
+-		mov	%l1, %g6
+-		ldx	[%g6 + TI_TASK], %g4
+-		LOAD_PER_CPU_BASE(%g5, %g6, %g1, %g2, %g3)
+-		call	do_sparc64_fault
+-		 add	%sp, PTREGS_OFF, %o0
+-		ba,pt	%xcc, rtrap
+-		 nop
++user_rtt_fill_fixup:
++		ba,pt	%xcc, user_rtt_fill_fixup_common
++		 clr	%g3
+ 
+ user_rtt_pre_restore:
+ 		add			%g1, 1, %g1
+diff --git a/arch/sparc/kernel/signal32.c b/arch/sparc/kernel/signal32.c
+index 3c25241..ebd0bfe 100644
+--- a/arch/sparc/kernel/signal32.c
++++ b/arch/sparc/kernel/signal32.c
+@@ -138,12 +138,24 @@ int copy_siginfo_from_user32(siginfo_t *to, compat_siginfo_t __user *from)
+ 	return 0;
+ }
+ 
++/* Checks if the fp is valid.  We always build signal frames which are
++ * 16-byte aligned, therefore we can always enforce that the restore
++ * frame has that property as well.
++ */
++static bool invalid_frame_pointer(void __user *fp, int fplen)
++{
++	if ((((unsigned long) fp) & 15) ||
++	    ((unsigned long)fp) > 0x100000000ULL - fplen)
++		return true;
++	return false;
++}
++
+ void do_sigreturn32(struct pt_regs *regs)
+ {
+ 	struct signal_frame32 __user *sf;
+ 	compat_uptr_t fpu_save;
+ 	compat_uptr_t rwin_save;
+-	unsigned int psr;
++	unsigned int psr, ufp;
+ 	unsigned int pc, npc;
+ 	sigset_t set;
+ 	compat_sigset_t seta;
+@@ -158,11 +170,16 @@ void do_sigreturn32(struct pt_regs *regs)
+ 	sf = (struct signal_frame32 __user *) regs->u_regs[UREG_FP];
+ 
+ 	/* 1. Make sure we are not getting garbage from the user */
+-	if (!access_ok(VERIFY_READ, sf, sizeof(*sf)) ||
+-	    (((unsigned long) sf) & 3))
++	if (invalid_frame_pointer(sf, sizeof(*sf)))
++		goto segv;
++
++	if (get_user(ufp, &sf->info.si_regs.u_regs[UREG_FP]))
++		goto segv;
++
++	if (ufp & 0x7)
+ 		goto segv;
+ 
+-	if (get_user(pc, &sf->info.si_regs.pc) ||
++	if (__get_user(pc, &sf->info.si_regs.pc) ||
+ 	    __get_user(npc, &sf->info.si_regs.npc))
+ 		goto segv;
+ 
+@@ -227,7 +244,7 @@ segv:
+ asmlinkage void do_rt_sigreturn32(struct pt_regs *regs)
+ {
+ 	struct rt_signal_frame32 __user *sf;
+-	unsigned int psr, pc, npc;
++	unsigned int psr, pc, npc, ufp;
+ 	compat_uptr_t fpu_save;
+ 	compat_uptr_t rwin_save;
+ 	sigset_t set;
+@@ -242,11 +259,16 @@ asmlinkage void do_rt_sigreturn32(struct pt_regs *regs)
+ 	sf = (struct rt_signal_frame32 __user *) regs->u_regs[UREG_FP];
+ 
+ 	/* 1. Make sure we are not getting garbage from the user */
+-	if (!access_ok(VERIFY_READ, sf, sizeof(*sf)) ||
+-	    (((unsigned long) sf) & 3))
++	if (invalid_frame_pointer(sf, sizeof(*sf)))
+ 		goto segv;
+ 
+-	if (get_user(pc, &sf->regs.pc) || 
++	if (get_user(ufp, &sf->regs.u_regs[UREG_FP]))
++		goto segv;
++
++	if (ufp & 0x7)
++		goto segv;
++
++	if (__get_user(pc, &sf->regs.pc) ||
+ 	    __get_user(npc, &sf->regs.npc))
+ 		goto segv;
+ 
+@@ -307,14 +329,6 @@ segv:
+ 	force_sig(SIGSEGV, current);
+ }
+ 
+-/* Checks if the fp is valid */
+-static int invalid_frame_pointer(void __user *fp, int fplen)
+-{
+-	if ((((unsigned long) fp) & 7) || ((unsigned long)fp) > 0x100000000ULL - fplen)
+-		return 1;
+-	return 0;
+-}
+-
+ static void __user *get_sigframe(struct ksignal *ksig, struct pt_regs *regs, unsigned long framesize)
+ {
+ 	unsigned long sp;
+diff --git a/arch/sparc/kernel/signal_32.c b/arch/sparc/kernel/signal_32.c
+index 52aa5e4..c3c12ef 100644
+--- a/arch/sparc/kernel/signal_32.c
++++ b/arch/sparc/kernel/signal_32.c
+@@ -60,10 +60,22 @@ struct rt_signal_frame {
+ #define SF_ALIGNEDSZ  (((sizeof(struct signal_frame) + 7) & (~7)))
+ #define RT_ALIGNEDSZ  (((sizeof(struct rt_signal_frame) + 7) & (~7)))
+ 
++/* Checks if the fp is valid.  We always build signal frames which are
++ * 16-byte aligned, therefore we can always enforce that the restore
++ * frame has that property as well.
++ */
++static inline bool invalid_frame_pointer(void __user *fp, int fplen)
++{
++	if ((((unsigned long) fp) & 15) || !__access_ok((unsigned long)fp, fplen))
++		return true;
++
++	return false;
++}
++
+ asmlinkage void do_sigreturn(struct pt_regs *regs)
+ {
++	unsigned long up_psr, pc, npc, ufp;
+ 	struct signal_frame __user *sf;
+-	unsigned long up_psr, pc, npc;
+ 	sigset_t set;
+ 	__siginfo_fpu_t __user *fpu_save;
+ 	__siginfo_rwin_t __user *rwin_save;
+@@ -77,10 +89,13 @@ asmlinkage void do_sigreturn(struct pt_regs *regs)
+ 	sf = (struct signal_frame __user *) regs->u_regs[UREG_FP];
+ 
+ 	/* 1. Make sure we are not getting garbage from the user */
+-	if (!access_ok(VERIFY_READ, sf, sizeof(*sf)))
++	if (!invalid_frame_pointer(sf, sizeof(*sf)))
++		goto segv_and_exit;
++
++	if (get_user(ufp, &sf->info.si_regs.u_regs[UREG_FP]))
+ 		goto segv_and_exit;
+ 
+-	if (((unsigned long) sf) & 3)
++	if (ufp & 0x7)
+ 		goto segv_and_exit;
+ 
+ 	err = __get_user(pc,  &sf->info.si_regs.pc);
+@@ -127,7 +142,7 @@ segv_and_exit:
+ asmlinkage void do_rt_sigreturn(struct pt_regs *regs)
+ {
+ 	struct rt_signal_frame __user *sf;
+-	unsigned int psr, pc, npc;
++	unsigned int psr, pc, npc, ufp;
+ 	__siginfo_fpu_t __user *fpu_save;
+ 	__siginfo_rwin_t __user *rwin_save;
+ 	sigset_t set;
+@@ -135,8 +150,13 @@ asmlinkage void do_rt_sigreturn(struct pt_regs *regs)
+ 
+ 	synchronize_user_stack();
+ 	sf = (struct rt_signal_frame __user *) regs->u_regs[UREG_FP];
+-	if (!access_ok(VERIFY_READ, sf, sizeof(*sf)) ||
+-	    (((unsigned long) sf) & 0x03))
++	if (!invalid_frame_pointer(sf, sizeof(*sf)))
++		goto segv;
++
++	if (get_user(ufp, &sf->regs.u_regs[UREG_FP]))
++		goto segv;
++
++	if (ufp & 0x7)
+ 		goto segv;
+ 
+ 	err = __get_user(pc, &sf->regs.pc);
+@@ -178,15 +198,6 @@ segv:
+ 	force_sig(SIGSEGV, current);
+ }
+ 
+-/* Checks if the fp is valid */
+-static inline int invalid_frame_pointer(void __user *fp, int fplen)
+-{
+-	if ((((unsigned long) fp) & 7) || !__access_ok((unsigned long)fp, fplen))
+-		return 1;
+-
+-	return 0;
+-}
+-
+ static inline void __user *get_sigframe(struct ksignal *ksig, struct pt_regs *regs, unsigned long framesize)
+ {
+ 	unsigned long sp = regs->u_regs[UREG_FP];
+diff --git a/arch/sparc/kernel/signal_64.c b/arch/sparc/kernel/signal_64.c
+index 39aaec1..5ee930c 100644
+--- a/arch/sparc/kernel/signal_64.c
++++ b/arch/sparc/kernel/signal_64.c
+@@ -234,6 +234,17 @@ do_sigsegv:
+ 	goto out;
+ }
+ 
++/* Checks if the fp is valid.  We always build rt signal frames which
++ * are 16-byte aligned, therefore we can always enforce that the
++ * restore frame has that property as well.
++ */
++static bool invalid_frame_pointer(void __user *fp)
++{
++	if (((unsigned long) fp) & 15)
++		return true;
++	return false;
++}
++
+ struct rt_signal_frame {
+ 	struct sparc_stackf	ss;
+ 	siginfo_t		info;
+@@ -246,8 +257,8 @@ struct rt_signal_frame {
+ 
+ void do_rt_sigreturn(struct pt_regs *regs)
+ {
++	unsigned long tpc, tnpc, tstate, ufp;
+ 	struct rt_signal_frame __user *sf;
+-	unsigned long tpc, tnpc, tstate;
+ 	__siginfo_fpu_t __user *fpu_save;
+ 	__siginfo_rwin_t __user *rwin_save;
+ 	sigset_t set;
+@@ -261,10 +272,16 @@ void do_rt_sigreturn(struct pt_regs *regs)
+ 		(regs->u_regs [UREG_FP] + STACK_BIAS);
+ 
+ 	/* 1. Make sure we are not getting garbage from the user */
+-	if (((unsigned long) sf) & 3)
++	if (invalid_frame_pointer(sf))
++		goto segv;
++
++	if (get_user(ufp, &sf->regs.u_regs[UREG_FP]))
+ 		goto segv;
+ 
+-	err = get_user(tpc, &sf->regs.tpc);
++	if ((ufp + STACK_BIAS) & 0x7)
++		goto segv;
++
++	err = __get_user(tpc, &sf->regs.tpc);
+ 	err |= __get_user(tnpc, &sf->regs.tnpc);
+ 	if (test_thread_flag(TIF_32BIT)) {
+ 		tpc &= 0xffffffff;
+@@ -308,14 +325,6 @@ segv:
+ 	force_sig(SIGSEGV, current);
+ }
+ 
+-/* Checks if the fp is valid */
+-static int invalid_frame_pointer(void __user *fp)
+-{
+-	if (((unsigned long) fp) & 15)
+-		return 1;
+-	return 0;
+-}
+-
+ static inline void __user *get_sigframe(struct ksignal *ksig, struct pt_regs *regs, unsigned long framesize)
+ {
+ 	unsigned long sp = regs->u_regs[UREG_FP] + STACK_BIAS;
+diff --git a/arch/sparc/kernel/sigutil_32.c b/arch/sparc/kernel/sigutil_32.c
+index 0f6eebe..e5fe8ce 100644
+--- a/arch/sparc/kernel/sigutil_32.c
++++ b/arch/sparc/kernel/sigutil_32.c
+@@ -48,6 +48,10 @@ int save_fpu_state(struct pt_regs *regs, __siginfo_fpu_t __user *fpu)
+ int restore_fpu_state(struct pt_regs *regs, __siginfo_fpu_t __user *fpu)
+ {
+ 	int err;
++
++	if (((unsigned long) fpu) & 3)
++		return -EFAULT;
++
+ #ifdef CONFIG_SMP
+ 	if (test_tsk_thread_flag(current, TIF_USEDFPU))
+ 		regs->psr &= ~PSR_EF;
+@@ -97,7 +101,10 @@ int restore_rwin_state(__siginfo_rwin_t __user *rp)
+ 	struct thread_info *t = current_thread_info();
+ 	int i, wsaved, err;
+ 
+-	__get_user(wsaved, &rp->wsaved);
++	if (((unsigned long) rp) & 3)
++		return -EFAULT;
++
++	get_user(wsaved, &rp->wsaved);
+ 	if (wsaved > NSWINS)
+ 		return -EFAULT;
+ 
+diff --git a/arch/sparc/kernel/sigutil_64.c b/arch/sparc/kernel/sigutil_64.c
+index 387834a..36aadcb 100644
+--- a/arch/sparc/kernel/sigutil_64.c
++++ b/arch/sparc/kernel/sigutil_64.c
+@@ -37,7 +37,10 @@ int restore_fpu_state(struct pt_regs *regs, __siginfo_fpu_t __user *fpu)
+ 	unsigned long fprs;
+ 	int err;
+ 
+-	err = __get_user(fprs, &fpu->si_fprs);
++	if (((unsigned long) fpu) & 7)
++		return -EFAULT;
++
++	err = get_user(fprs, &fpu->si_fprs);
+ 	fprs_write(0);
+ 	regs->tstate &= ~TSTATE_PEF;
+ 	if (fprs & FPRS_DL)
+@@ -72,7 +75,10 @@ int restore_rwin_state(__siginfo_rwin_t __user *rp)
+ 	struct thread_info *t = current_thread_info();
+ 	int i, wsaved, err;
+ 
+-	__get_user(wsaved, &rp->wsaved);
++	if (((unsigned long) rp) & 7)
++		return -EFAULT;
++
++	get_user(wsaved, &rp->wsaved);
+ 	if (wsaved > NSWINS)
+ 		return -EFAULT;
+ 
+diff --git a/arch/sparc/kernel/urtt_fill.S b/arch/sparc/kernel/urtt_fill.S
+new file mode 100644
+index 0000000..5604a2b
+--- /dev/null
++++ b/arch/sparc/kernel/urtt_fill.S
+@@ -0,0 +1,98 @@
++#include <asm/thread_info.h>
++#include <asm/trap_block.h>
++#include <asm/spitfire.h>
++#include <asm/ptrace.h>
++#include <asm/head.h>
++
++		.text
++		.align	8
++		.globl	user_rtt_fill_fixup_common
++user_rtt_fill_fixup_common:
++		rdpr	%cwp, %g1
++		add	%g1, 1, %g1
++		wrpr	%g1, 0x0, %cwp
++
++		rdpr	%wstate, %g2
++		sll	%g2, 3, %g2
++		wrpr	%g2, 0x0, %wstate
++
++		/* We know %canrestore and %otherwin are both zero.  */
++
++		sethi	%hi(sparc64_kern_pri_context), %g2
++		ldx	[%g2 + %lo(sparc64_kern_pri_context)], %g2
++		mov	PRIMARY_CONTEXT, %g1
++
++661:		stxa	%g2, [%g1] ASI_DMMU
++		.section .sun4v_1insn_patch, "ax"
++		.word	661b
++		stxa	%g2, [%g1] ASI_MMU
++		.previous
++
++		sethi	%hi(KERNBASE), %g1
++		flush	%g1
++
++		mov	%g4, %l4
++		mov	%g5, %l5
++		brnz,pn	%g3, 1f
++		 mov	%g3, %l3
++
++		or	%g4, FAULT_CODE_WINFIXUP, %g4
++		stb	%g4, [%g6 + TI_FAULT_CODE]
++		stx	%g5, [%g6 + TI_FAULT_ADDR]
++1:
++		mov	%g6, %l1
++		wrpr	%g0, 0x0, %tl
++
++661:		nop
++		.section		.sun4v_1insn_patch, "ax"
++		.word			661b
++		SET_GL(0)
++		.previous
++
++		wrpr	%g0, RTRAP_PSTATE, %pstate
++
++		mov	%l1, %g6
++		ldx	[%g6 + TI_TASK], %g4
++		LOAD_PER_CPU_BASE(%g5, %g6, %g1, %g2, %g3)
++
++		brnz,pn	%l3, 1f
++		 nop
++
++		call	do_sparc64_fault
++		 add	%sp, PTREGS_OFF, %o0
++		ba,pt	%xcc, rtrap
++		 nop
++
++1:		cmp	%g3, 2
++		bne,pn	%xcc, 2f
++		 nop
++
++		sethi	%hi(tlb_type), %g1
++		lduw	[%g1 + %lo(tlb_type)], %g1
++		cmp	%g1, 3
++		bne,pt	%icc, 1f
++		 add	%sp, PTREGS_OFF, %o0
++		mov	%l4, %o2
++		call	sun4v_do_mna
++		 mov	%l5, %o1
++		ba,a,pt	%xcc, rtrap
++1:		mov	%l4, %o1
++		mov	%l5, %o2
++		call	mem_address_unaligned
++		 nop
++		ba,a,pt	%xcc, rtrap
++
++2:		sethi	%hi(tlb_type), %g1
++		mov	%l4, %o1
++		lduw	[%g1 + %lo(tlb_type)], %g1
++		mov	%l5, %o2
++		cmp	%g1, 3
++		bne,pt	%icc, 1f
++		 add	%sp, PTREGS_OFF, %o0
++		call	sun4v_data_access_exception
++		 nop
++		ba,a,pt	%xcc, rtrap
++
++1:		call	spitfire_data_access_exception
++		 nop
++		ba,a,pt	%xcc, rtrap
+diff --git a/arch/sparc/mm/hugetlbpage.c b/arch/sparc/mm/hugetlbpage.c
+index 4977800..ba52e64 100644
+--- a/arch/sparc/mm/hugetlbpage.c
++++ b/arch/sparc/mm/hugetlbpage.c
+@@ -176,17 +176,31 @@ void set_huge_pte_at(struct mm_struct *mm, unsigned long addr,
+ 		     pte_t *ptep, pte_t entry)
+ {
+ 	int i;
++	pte_t orig[2];
++	unsigned long nptes;
+ 
+ 	if (!pte_present(*ptep) && pte_present(entry))
+ 		mm->context.huge_pte_count++;
+ 
+ 	addr &= HPAGE_MASK;
+-	for (i = 0; i < (1 << HUGETLB_PAGE_ORDER); i++) {
+-		set_pte_at(mm, addr, ptep, entry);
++
++	nptes = 1 << HUGETLB_PAGE_ORDER;
++	orig[0] = *ptep;
++	orig[1] = *(ptep + nptes / 2);
++	for (i = 0; i < nptes; i++) {
++		*ptep = entry;
+ 		ptep++;
+ 		addr += PAGE_SIZE;
+ 		pte_val(entry) += PAGE_SIZE;
+ 	}
++
++	/* Issue TLB flush at REAL_HPAGE_SIZE boundaries */
++	addr -= REAL_HPAGE_SIZE;
++	ptep -= nptes / 2;
++	maybe_tlb_batch_add(mm, addr, ptep, orig[1], 0);
++	addr -= REAL_HPAGE_SIZE;
++	ptep -= nptes / 2;
++	maybe_tlb_batch_add(mm, addr, ptep, orig[0], 0);
+ }
+ 
+ pte_t huge_ptep_get_and_clear(struct mm_struct *mm, unsigned long addr,
+@@ -194,19 +208,28 @@ pte_t huge_ptep_get_and_clear(struct mm_struct *mm, unsigned long addr,
+ {
+ 	pte_t entry;
+ 	int i;
++	unsigned long nptes;
+ 
+ 	entry = *ptep;
+ 	if (pte_present(entry))
+ 		mm->context.huge_pte_count--;
+ 
+ 	addr &= HPAGE_MASK;
+-
+-	for (i = 0; i < (1 << HUGETLB_PAGE_ORDER); i++) {
+-		pte_clear(mm, addr, ptep);
++	nptes = 1 << HUGETLB_PAGE_ORDER;
++	for (i = 0; i < nptes; i++) {
++		*ptep = __pte(0UL);
+ 		addr += PAGE_SIZE;
+ 		ptep++;
+ 	}
+ 
++	/* Issue TLB flush at REAL_HPAGE_SIZE boundaries */
++	addr -= REAL_HPAGE_SIZE;
++	ptep -= nptes / 2;
++	maybe_tlb_batch_add(mm, addr, ptep, entry, 0);
++	addr -= REAL_HPAGE_SIZE;
++	ptep -= nptes / 2;
++	maybe_tlb_batch_add(mm, addr, ptep, entry, 0);
++
+ 	return entry;
+ }
+ 
+diff --git a/arch/sparc/mm/init_64.c b/arch/sparc/mm/init_64.c
+index 09e8388..14bb0d5 100644
+--- a/arch/sparc/mm/init_64.c
++++ b/arch/sparc/mm/init_64.c
+@@ -324,18 +324,6 @@ static void __update_mmu_tsb_insert(struct mm_struct *mm, unsigned long tsb_inde
+ 	tsb_insert(tsb, tag, tte);
+ }
+ 
+-#if defined(CONFIG_HUGETLB_PAGE) || defined(CONFIG_TRANSPARENT_HUGEPAGE)
+-static inline bool is_hugetlb_pte(pte_t pte)
+-{
+-	if ((tlb_type == hypervisor &&
+-	     (pte_val(pte) & _PAGE_SZALL_4V) == _PAGE_SZHUGE_4V) ||
+-	    (tlb_type != hypervisor &&
+-	     (pte_val(pte) & _PAGE_SZALL_4U) == _PAGE_SZHUGE_4U))
+-		return true;
+-	return false;
+-}
+-#endif
+-
+ void update_mmu_cache(struct vm_area_struct *vma, unsigned long address, pte_t *ptep)
+ {
+ 	struct mm_struct *mm;
+@@ -2836,9 +2824,10 @@ void hugetlb_setup(struct pt_regs *regs)
+ 	 * the Data-TLB for huge pages.
+ 	 */
+ 	if (tlb_type == cheetah_plus) {
++		bool need_context_reload = false;
+ 		unsigned long ctx;
+ 
+-		spin_lock(&ctx_alloc_lock);
++		spin_lock_irq(&ctx_alloc_lock);
+ 		ctx = mm->context.sparc64_ctx_val;
+ 		ctx &= ~CTX_PGSZ_MASK;
+ 		ctx |= CTX_PGSZ_BASE << CTX_PGSZ0_SHIFT;
+@@ -2857,9 +2846,12 @@ void hugetlb_setup(struct pt_regs *regs)
+ 			 * also executing in this address space.
+ 			 */
+ 			mm->context.sparc64_ctx_val = ctx;
+-			on_each_cpu(context_reload, mm, 0);
++			need_context_reload = true;
+ 		}
+-		spin_unlock(&ctx_alloc_lock);
++		spin_unlock_irq(&ctx_alloc_lock);
++
++		if (need_context_reload)
++			on_each_cpu(context_reload, mm, 0);
+ 	}
+ }
+ #endif
+diff --git a/arch/sparc/mm/tlb.c b/arch/sparc/mm/tlb.c
+index 9df2190..f81cd97 100644
+--- a/arch/sparc/mm/tlb.c
++++ b/arch/sparc/mm/tlb.c
+@@ -67,7 +67,7 @@ void arch_leave_lazy_mmu_mode(void)
+ }
+ 
+ static void tlb_batch_add_one(struct mm_struct *mm, unsigned long vaddr,
+-			      bool exec)
++			      bool exec, bool huge)
+ {
+ 	struct tlb_batch *tb = &get_cpu_var(tlb_batch);
+ 	unsigned long nr;
+@@ -84,13 +84,21 @@ static void tlb_batch_add_one(struct mm_struct *mm, unsigned long vaddr,
+ 	}
+ 
+ 	if (!tb->active) {
+-		flush_tsb_user_page(mm, vaddr);
++		flush_tsb_user_page(mm, vaddr, huge);
+ 		global_flush_tlb_page(mm, vaddr);
+ 		goto out;
+ 	}
+ 
+-	if (nr == 0)
++	if (nr == 0) {
+ 		tb->mm = mm;
++		tb->huge = huge;
++	}
++
++	if (tb->huge != huge) {
++		flush_tlb_pending();
++		tb->huge = huge;
++		nr = 0;
++	}
+ 
+ 	tb->vaddrs[nr] = vaddr;
+ 	tb->tlb_nr = ++nr;
+@@ -104,6 +112,8 @@ out:
+ void tlb_batch_add(struct mm_struct *mm, unsigned long vaddr,
+ 		   pte_t *ptep, pte_t orig, int fullmm)
+ {
++	bool huge = is_hugetlb_pte(orig);
++
+ 	if (tlb_type != hypervisor &&
+ 	    pte_dirty(orig)) {
+ 		unsigned long paddr, pfn = pte_pfn(orig);
+@@ -129,7 +139,7 @@ void tlb_batch_add(struct mm_struct *mm, unsigned long vaddr,
+ 
+ no_cache_flush:
+ 	if (!fullmm)
+-		tlb_batch_add_one(mm, vaddr, pte_exec(orig));
++		tlb_batch_add_one(mm, vaddr, pte_exec(orig), huge);
+ }
+ 
+ #ifdef CONFIG_TRANSPARENT_HUGEPAGE
+@@ -145,7 +155,7 @@ static void tlb_batch_pmd_scan(struct mm_struct *mm, unsigned long vaddr,
+ 		if (pte_val(*pte) & _PAGE_VALID) {
+ 			bool exec = pte_exec(*pte);
+ 
+-			tlb_batch_add_one(mm, vaddr, exec);
++			tlb_batch_add_one(mm, vaddr, exec, false);
+ 		}
+ 		pte++;
+ 		vaddr += PAGE_SIZE;
+@@ -185,8 +195,9 @@ void set_pmd_at(struct mm_struct *mm, unsigned long addr,
+ 			pte_t orig_pte = __pte(pmd_val(orig));
+ 			bool exec = pte_exec(orig_pte);
+ 
+-			tlb_batch_add_one(mm, addr, exec);
+-			tlb_batch_add_one(mm, addr + REAL_HPAGE_SIZE, exec);
++			tlb_batch_add_one(mm, addr, exec, true);
++			tlb_batch_add_one(mm, addr + REAL_HPAGE_SIZE, exec,
++					true);
+ 		} else {
+ 			tlb_batch_pmd_scan(mm, addr, orig);
+ 		}
+diff --git a/arch/sparc/mm/tsb.c b/arch/sparc/mm/tsb.c
+index a065766..a0604a4 100644
+--- a/arch/sparc/mm/tsb.c
++++ b/arch/sparc/mm/tsb.c
+@@ -76,14 +76,15 @@ void flush_tsb_user(struct tlb_batch *tb)
+ 
+ 	spin_lock_irqsave(&mm->context.lock, flags);
+ 
+-	base = (unsigned long) mm->context.tsb_block[MM_TSB_BASE].tsb;
+-	nentries = mm->context.tsb_block[MM_TSB_BASE].tsb_nentries;
+-	if (tlb_type == cheetah_plus || tlb_type == hypervisor)
+-		base = __pa(base);
+-	__flush_tsb_one(tb, PAGE_SHIFT, base, nentries);
+-
++	if (!tb->huge) {
++		base = (unsigned long) mm->context.tsb_block[MM_TSB_BASE].tsb;
++		nentries = mm->context.tsb_block[MM_TSB_BASE].tsb_nentries;
++		if (tlb_type == cheetah_plus || tlb_type == hypervisor)
++			base = __pa(base);
++		__flush_tsb_one(tb, PAGE_SHIFT, base, nentries);
++	}
+ #if defined(CONFIG_HUGETLB_PAGE) || defined(CONFIG_TRANSPARENT_HUGEPAGE)
+-	if (mm->context.tsb_block[MM_TSB_HUGE].tsb) {
++	if (tb->huge && mm->context.tsb_block[MM_TSB_HUGE].tsb) {
+ 		base = (unsigned long) mm->context.tsb_block[MM_TSB_HUGE].tsb;
+ 		nentries = mm->context.tsb_block[MM_TSB_HUGE].tsb_nentries;
+ 		if (tlb_type == cheetah_plus || tlb_type == hypervisor)
+@@ -94,20 +95,21 @@ void flush_tsb_user(struct tlb_batch *tb)
+ 	spin_unlock_irqrestore(&mm->context.lock, flags);
+ }
+ 
+-void flush_tsb_user_page(struct mm_struct *mm, unsigned long vaddr)
++void flush_tsb_user_page(struct mm_struct *mm, unsigned long vaddr, bool huge)
+ {
+ 	unsigned long nentries, base, flags;
+ 
+ 	spin_lock_irqsave(&mm->context.lock, flags);
+ 
+-	base = (unsigned long) mm->context.tsb_block[MM_TSB_BASE].tsb;
+-	nentries = mm->context.tsb_block[MM_TSB_BASE].tsb_nentries;
+-	if (tlb_type == cheetah_plus || tlb_type == hypervisor)
+-		base = __pa(base);
+-	__flush_tsb_one_entry(base, vaddr, PAGE_SHIFT, nentries);
+-
++	if (!huge) {
++		base = (unsigned long) mm->context.tsb_block[MM_TSB_BASE].tsb;
++		nentries = mm->context.tsb_block[MM_TSB_BASE].tsb_nentries;
++		if (tlb_type == cheetah_plus || tlb_type == hypervisor)
++			base = __pa(base);
++		__flush_tsb_one_entry(base, vaddr, PAGE_SHIFT, nentries);
++	}
+ #if defined(CONFIG_HUGETLB_PAGE) || defined(CONFIG_TRANSPARENT_HUGEPAGE)
+-	if (mm->context.tsb_block[MM_TSB_HUGE].tsb) {
++	if (huge && mm->context.tsb_block[MM_TSB_HUGE].tsb) {
+ 		base = (unsigned long) mm->context.tsb_block[MM_TSB_HUGE].tsb;
+ 		nentries = mm->context.tsb_block[MM_TSB_HUGE].tsb_nentries;
+ 		if (tlb_type == cheetah_plus || tlb_type == hypervisor)
 diff --git a/arch/x86/Kconfig b/arch/x86/Kconfig
 index 2dc18605..ebd5a46 100644
 --- a/arch/x86/Kconfig
@@ -4556,7 +5447,7 @@ index 2dc18605..ebd5a46 100644
  	  Enabling this option offlines CPU0 (if CPU0 can be offlined) as
  	  soon as possible and boots up userspace with CPU0 offlined. User
 diff --git a/arch/x86/Kconfig.cpu b/arch/x86/Kconfig.cpu
-index 3ba5ff2..ee3e7d4 100644
+index 3ba5ff2..f7b4016 100644
 --- a/arch/x86/Kconfig.cpu
 +++ b/arch/x86/Kconfig.cpu
 @@ -147,9 +147,8 @@ config MPENTIUM4
@@ -4767,24 +5658,7 @@ index 3ba5ff2..ee3e7d4 100644
  endchoice
  
  config X86_GENERIC
-@@ -300,6 +435,16 @@ config X86_GENERIC
- 	  This is really intended for distributors who need more
- 	  generic optimizations.
- 
-+config X86_MARCH_NATIVE
-+	bool "Use -march=native cflag (EXPERIMENTAL)"
-+	help
-+	  Setting Y here, will result in passing the -march=native and
-+	  -mtune=native cflags to GCC while compiling the kernel, which
-+	  makes GCC check the CPU capabilities and use the best cflags
-+	  for your computer.
-+
-+	  Set Y here only if you use >=gcc-4.2.0.
-+
- #
- # Define implied options from the CPU selection here
- config X86_INTERNODE_CACHE_SHIFT
-@@ -310,7 +455,7 @@ config X86_INTERNODE_CACHE_SHIFT
+@@ -310,7 +445,7 @@ config X86_INTERNODE_CACHE_SHIFT
  config X86_L1_CACHE_SHIFT
  	int
  	default "7" if MPENTIUM4 || MPSC
@@ -4793,7 +5667,7 @@ index 3ba5ff2..ee3e7d4 100644
  	default "4" if MELAN || M486 || MGEODEGX1
  	default "5" if MWINCHIP3D || MWINCHIPC6 || MCRUSOE || MEFFICEON || MCYRIXIII || MK6 || MPENTIUMIII || MPENTIUMII || M686 || M586MMX || M586TSC || M586 || MVIAC3_2 || MGEODE_LX
  
-@@ -341,11 +486,11 @@ config X86_ALIGNMENT_16
+@@ -341,11 +476,11 @@ config X86_ALIGNMENT_16
  
  config X86_INTEL_USERCOPY
  	def_bool y
@@ -4807,7 +5681,7 @@ index 3ba5ff2..ee3e7d4 100644
  
  config X86_USE_3DNOW
  	def_bool y
-@@ -369,17 +514,17 @@ config X86_P6_NOP
+@@ -369,17 +504,17 @@ config X86_P6_NOP
  
  config X86_TSC
  	def_bool y
@@ -4875,20 +5749,10 @@ index 4086abc..f728a7c 100644
          KBUILD_CFLAGS += $(cflags-y)
  
 diff --git a/arch/x86/Makefile_32.cpu b/arch/x86/Makefile_32.cpu
-index 6647ed4..6b71290 100644
+index 6647ed4..56aa88a 100644
 --- a/arch/x86/Makefile_32.cpu
 +++ b/arch/x86/Makefile_32.cpu
-@@ -10,6 +10,9 @@ tune		= $(call cc-option,-mcpu=$(1),$(2))
- endif
- 
- align := $(cc-option-align)
-+ifeq ($(CONFIG_X86_MARCH_NATIVE),y)
-+cflags-y			+= -march=native
-+else
- cflags-$(CONFIG_M486)		+= -march=i486
- cflags-$(CONFIG_M586)		+= -march=i586
- cflags-$(CONFIG_M586TSC)	+= -march=i586
-@@ -23,7 +26,16 @@ cflags-$(CONFIG_MK6)		+= -march=k6
+@@ -23,7 +23,16 @@ cflags-$(CONFIG_MK6)		+= -march=k6
  # Please note, that patches that add -march=athlon-xp and friends are pointless.
  # They make zero difference whatsosever to performance at this time.
  cflags-$(CONFIG_MK7)		+= -march=athlon
@@ -4905,7 +5769,7 @@ index 6647ed4..6b71290 100644
  cflags-$(CONFIG_MCRUSOE)	+= -march=i686 $(align)-functions=0 $(align)-jumps=0 $(align)-loops=0
  cflags-$(CONFIG_MEFFICEON)	+= -march=i686 $(call tune,pentium3) $(align)-functions=0 $(align)-jumps=0 $(align)-loops=0
  cflags-$(CONFIG_MWINCHIPC6)	+= $(call cc-option,-march=winchip-c6,-march=i586)
-@@ -32,8 +44,16 @@ cflags-$(CONFIG_MCYRIXIII)	+= $(call cc-option,-march=c3,-march=i486) $(align)-f
+@@ -32,8 +41,16 @@ cflags-$(CONFIG_MCYRIXIII)	+= $(call cc-option,-march=c3,-march=i486) $(align)-f
  cflags-$(CONFIG_MVIAC3_2)	+= $(call cc-option,-march=c3-2,-march=i686)
  cflags-$(CONFIG_MVIAC7)		+= -march=i686
  cflags-$(CONFIG_MCORE2)		+= -march=i686 $(call tune,core2)
@@ -4924,15 +5788,6 @@ index 6647ed4..6b71290 100644
  
  # AMD Elan support
  cflags-$(CONFIG_MELAN)		+= -march=i486
-@@ -41,6 +61,8 @@ cflags-$(CONFIG_MELAN)		+= -march=i486
- # Geode GX1 support
- cflags-$(CONFIG_MGEODEGX1)	+= -march=pentium-mmx
- cflags-$(CONFIG_MGEODE_LX)	+= $(call cc-option,-march=geode,-march=pentium-mmx)
-+endif
-+
- # add at the end to overwrite eventual tuning options from earlier
- # cpu entries
- cflags-$(CONFIG_X86_GENERIC) 	+= $(call tune,generic,$(call tune,i686))
 diff --git a/arch/x86/crypto/sha-mb/sha1_x8_avx2.S b/arch/x86/crypto/sha-mb/sha1_x8_avx2.S
 index 8e1b477..c9dae1c 100644
 --- a/arch/x86/crypto/sha-mb/sha1_x8_avx2.S
@@ -13201,6 +14056,18 @@ index 40de03f..bdd0d753 100644
  	default:
  		printk("Unsupported digest algo: %u\n", ctx->last_oid);
  		return -ENOPKG;
+diff --git a/crypto/crypto_user.c b/crypto/crypto_user.c
+index 43fe85f..7097a33 100644
+--- a/crypto/crypto_user.c
++++ b/crypto/crypto_user.c
+@@ -455,6 +455,7 @@ static const int crypto_msg_min[CRYPTO_NR_MSGTYPES] = {
+ 	[CRYPTO_MSG_NEWALG	- CRYPTO_MSG_BASE] = MSGSIZE(crypto_user_alg),
+ 	[CRYPTO_MSG_DELALG	- CRYPTO_MSG_BASE] = MSGSIZE(crypto_user_alg),
+ 	[CRYPTO_MSG_UPDATEALG	- CRYPTO_MSG_BASE] = MSGSIZE(crypto_user_alg),
++	[CRYPTO_MSG_GETALG	- CRYPTO_MSG_BASE] = MSGSIZE(crypto_user_alg),
+ 	[CRYPTO_MSG_DELRNG	- CRYPTO_MSG_BASE] = 0,
+ };
+ 
 diff --git a/drivers/acpi/device_pm.c b/drivers/acpi/device_pm.c
 index cd2c3d6..993fd31 100644
 --- a/drivers/acpi/device_pm.c
@@ -14075,6 +14942,54 @@ index aae0554..b7ee8d3 100644
  
  		if (!(priv->features & TALITOS_FTR_HMAC_OK) &&
  		    !strncmp(alg->cra_name, "hmac", 4)) {
+diff --git a/drivers/crypto/ux500/hash/hash_core.c b/drivers/crypto/ux500/hash/hash_core.c
+index 574e87c..9acccad 100644
+--- a/drivers/crypto/ux500/hash/hash_core.c
++++ b/drivers/crypto/ux500/hash/hash_core.c
+@@ -781,7 +781,7 @@ static int hash_process_data(struct hash_device_data *device_data,
+ 						&device_data->state);
+ 				memmove(req_ctx->state.buffer,
+ 					device_data->state.buffer,
+-					HASH_BLOCK_SIZE / sizeof(u32));
++					HASH_BLOCK_SIZE);
+ 				if (ret) {
+ 					dev_err(device_data->dev,
+ 						"%s: hash_resume_state() failed!\n",
+@@ -832,7 +832,7 @@ static int hash_process_data(struct hash_device_data *device_data,
+ 
+ 			memmove(device_data->state.buffer,
+ 				req_ctx->state.buffer,
+-				HASH_BLOCK_SIZE / sizeof(u32));
++				HASH_BLOCK_SIZE);
+ 			if (ret) {
+ 				dev_err(device_data->dev, "%s: hash_save_state() failed!\n",
+ 					__func__);
+diff --git a/drivers/crypto/vmx/aes_cbc.c b/drivers/crypto/vmx/aes_cbc.c
+index 495577b..94ad5c0 100644
+--- a/drivers/crypto/vmx/aes_cbc.c
++++ b/drivers/crypto/vmx/aes_cbc.c
+@@ -182,7 +182,7 @@ struct crypto_alg p8_aes_cbc_alg = {
+ 	.cra_name = "cbc(aes)",
+ 	.cra_driver_name = "p8_aes_cbc",
+ 	.cra_module = THIS_MODULE,
+-	.cra_priority = 1000,
++	.cra_priority = 2000,
+ 	.cra_type = &crypto_blkcipher_type,
+ 	.cra_flags = CRYPTO_ALG_TYPE_BLKCIPHER | CRYPTO_ALG_NEED_FALLBACK,
+ 	.cra_alignmask = 0,
+diff --git a/drivers/crypto/vmx/aes_ctr.c b/drivers/crypto/vmx/aes_ctr.c
+index 0a3c1b0..38ed10d 100644
+--- a/drivers/crypto/vmx/aes_ctr.c
++++ b/drivers/crypto/vmx/aes_ctr.c
+@@ -166,7 +166,7 @@ struct crypto_alg p8_aes_ctr_alg = {
+ 	.cra_name = "ctr(aes)",
+ 	.cra_driver_name = "p8_aes_ctr",
+ 	.cra_module = THIS_MODULE,
+-	.cra_priority = 1000,
++	.cra_priority = 2000,
+ 	.cra_type = &crypto_blkcipher_type,
+ 	.cra_flags = CRYPTO_ALG_TYPE_BLKCIPHER | CRYPTO_ALG_NEED_FALLBACK,
+ 	.cra_alignmask = 0,
 diff --git a/drivers/gpio/gpio-bcm-kona.c b/drivers/gpio/gpio-bcm-kona.c
 index 2fd38d5..3c5e832 100644
 --- a/drivers/gpio/gpio-bcm-kona.c
@@ -14093,8 +15008,41 @@ index 2fd38d5..3c5e832 100644
  	}
  }
  
+diff --git a/drivers/gpio/gpio-zynq.c b/drivers/gpio/gpio-zynq.c
+index 66d3d24..e72794e 100644
+--- a/drivers/gpio/gpio-zynq.c
++++ b/drivers/gpio/gpio-zynq.c
+@@ -709,11 +709,17 @@ static int zynq_gpio_probe(struct platform_device *pdev)
+ 		dev_err(&pdev->dev, "input clock not found.\n");
+ 		return PTR_ERR(gpio->clk);
+ 	}
++	ret = clk_prepare_enable(gpio->clk);
++	if (ret) {
++		dev_err(&pdev->dev, "Unable to enable clock.\n");
++		return ret;
++	}
+ 
++	pm_runtime_set_active(&pdev->dev);
+ 	pm_runtime_enable(&pdev->dev);
+ 	ret = pm_runtime_get_sync(&pdev->dev);
+ 	if (ret < 0)
+-		return ret;
++		goto err_pm_dis;
+ 
+ 	/* report a bug if gpio chip registration fails */
+ 	ret = gpiochip_add_data(chip, gpio);
+@@ -745,6 +751,9 @@ err_rm_gpiochip:
+ 	gpiochip_remove(chip);
+ err_pm_put:
+ 	pm_runtime_put(&pdev->dev);
++err_pm_dis:
++	pm_runtime_disable(&pdev->dev);
++	clk_disable_unprepare(gpio->clk);
+ 
+ 	return ret;
+ }
 diff --git a/drivers/gpio/gpiolib.c b/drivers/gpio/gpiolib.c
-index b747c76..719d111 100644
+index b747c76..cf3e712 100644
 --- a/drivers/gpio/gpiolib.c
 +++ b/drivers/gpio/gpiolib.c
 @@ -438,7 +438,6 @@ static void gpiodevice_release(struct device *dev)
@@ -14158,6 +15106,22 @@ index b747c76..719d111 100644
  		pr_warn("%s: invalid GPIO\n", __func__); \
  		return; \
  	} \
+@@ -2001,7 +2006,14 @@ int gpiod_to_irq(const struct gpio_desc *desc)
+ 	struct gpio_chip	*chip;
+ 	int			offset;
+ 
+-	VALIDATE_DESC(desc);
++	/*
++	 * Cannot VALIDATE_DESC() here as gpiod_to_irq() consumer semantics
++	 * requires this function to not return zero on an invalid descriptor
++	 * but rather a negative error number.
++	 */
++	if (!desc || !desc->gdev || !desc->gdev->chip)
++		return -EINVAL;
++
+ 	chip = desc->gdev->chip;
+ 	offset = gpio_chip_hwgpio(desc);
+ 	return chip->to_irq ? chip->to_irq(chip, offset) : -ENXIO;
 diff --git a/drivers/gpu/drm/Makefile b/drivers/gpu/drm/Makefile
 index 6eb94fc..22228ef 100644
 --- a/drivers/gpu/drm/Makefile
@@ -14219,6 +15183,106 @@ index 8ee1db8..d307d96 100644
  			continue;
  
  		/*
+diff --git a/drivers/gpu/drm/drm_crtc.c b/drivers/gpu/drm/drm_crtc.c
+index e08f962..f30de80 100644
+--- a/drivers/gpu/drm/drm_crtc.c
++++ b/drivers/gpu/drm/drm_crtc.c
+@@ -3434,6 +3434,24 @@ int drm_mode_addfb2(struct drm_device *dev,
+ 	return 0;
+ }
+ 
++struct drm_mode_rmfb_work {
++	struct work_struct work;
++	struct list_head fbs;
++};
++
++static void drm_mode_rmfb_work_fn(struct work_struct *w)
++{
++	struct drm_mode_rmfb_work *arg = container_of(w, typeof(*arg), work);
++
++	while (!list_empty(&arg->fbs)) {
++		struct drm_framebuffer *fb =
++			list_first_entry(&arg->fbs, typeof(*fb), filp_head);
++
++		list_del_init(&fb->filp_head);
++		drm_framebuffer_remove(fb);
++	}
++}
++
+ /**
+  * drm_mode_rmfb - remove an FB from the configuration
+  * @dev: drm device for the ioctl
+@@ -3474,7 +3492,25 @@ int drm_mode_rmfb(struct drm_device *dev,
+ 	mutex_unlock(&dev->mode_config.fb_lock);
+ 	mutex_unlock(&file_priv->fbs_lock);
+ 
+-	drm_framebuffer_unreference(fb);
++	/*
++	 * we now own the reference that was stored in the fbs list
++	 *
++	 * drm_framebuffer_remove may fail with -EINTR on pending signals,
++	 * so run this in a separate stack as there's no way to correctly
++	 * handle this after the fb is already removed from the lookup table.
++	 */
++	if (atomic_read(&fb->refcount.refcount) > 1) {
++		struct drm_mode_rmfb_work arg;
++
++		INIT_WORK_ONSTACK(&arg.work, drm_mode_rmfb_work_fn);
++		INIT_LIST_HEAD(&arg.fbs);
++		list_add_tail(&fb->filp_head, &arg.fbs);
++
++		schedule_work(&arg.work);
++		flush_work(&arg.work);
++		destroy_work_on_stack(&arg.work);
++	} else
++		drm_framebuffer_unreference(fb);
+ 
+ 	return 0;
+ 
+@@ -3627,7 +3663,6 @@ out_err1:
+ 	return ret;
+ }
+ 
+-
+ /**
+  * drm_fb_release - remove and free the FBs on this file
+  * @priv: drm file for the ioctl
+@@ -3642,6 +3677,9 @@ out_err1:
+ void drm_fb_release(struct drm_file *priv)
+ {
+ 	struct drm_framebuffer *fb, *tfb;
++	struct drm_mode_rmfb_work arg;
++
++	INIT_LIST_HEAD(&arg.fbs);
+ 
+ 	/*
+ 	 * When the file gets released that means no one else can access the fb
+@@ -3654,10 +3692,22 @@ void drm_fb_release(struct drm_file *priv)
+ 	 * at it any more.
+ 	 */
+ 	list_for_each_entry_safe(fb, tfb, &priv->fbs, filp_head) {
+-		list_del_init(&fb->filp_head);
++		if (atomic_read(&fb->refcount.refcount) > 1) {
++			list_move_tail(&fb->filp_head, &arg.fbs);
++		} else {
++			list_del_init(&fb->filp_head);
+ 
+-		/* This drops the fpriv->fbs reference. */
+-		drm_framebuffer_unreference(fb);
++			/* This drops the fpriv->fbs reference. */
++			drm_framebuffer_unreference(fb);
++		}
++	}
++
++	if (!list_empty(&arg.fbs)) {
++		INIT_WORK_ONSTACK(&arg.work, drm_mode_rmfb_work_fn);
++
++		schedule_work(&arg.work);
++		flush_work(&arg.work);
++		destroy_work_on_stack(&arg.work);
+ 	}
+ }
+ 
 diff --git a/drivers/gpu/drm/drm_dp_dual_mode_helper.c b/drivers/gpu/drm/drm_dp_dual_mode_helper.c
 new file mode 100644
 index 0000000..a7b2a75
@@ -14634,6 +15698,28 @@ index 6b43ae3..1616af2 100644
  	"Special Packet Sent",
  	"Tearing Effect",
  };
+diff --git a/drivers/gpu/drm/i915/i915_irq.c b/drivers/gpu/drm/i915/i915_irq.c
+index 1c21220..d1a46ef 100644
+--- a/drivers/gpu/drm/i915/i915_irq.c
++++ b/drivers/gpu/drm/i915/i915_irq.c
+@@ -1829,7 +1829,7 @@ static irqreturn_t cherryview_irq_handler(int irq, void *arg)
+ 	/* IRQs are synced during runtime_suspend, we don't require a wakeref */
+ 	disable_rpm_wakeref_asserts(dev_priv);
+ 
+-	do {
++	for (;;) {
+ 		master_ctl = I915_READ(GEN8_MASTER_IRQ) & ~GEN8_MASTER_IRQ_CONTROL;
+ 		iir = I915_READ(VLV_IIR);
+ 
+@@ -1857,7 +1857,7 @@ static irqreturn_t cherryview_irq_handler(int irq, void *arg)
+ 
+ 		I915_WRITE(GEN8_MASTER_IRQ, DE_MASTER_IRQ_CONTROL);
+ 		POSTING_READ(GEN8_MASTER_IRQ);
+-	} while (0);
++	}
+ 
+ 	enable_rpm_wakeref_asserts(dev_priv);
+ 
 diff --git a/drivers/gpu/drm/i915/intel_atomic.c b/drivers/gpu/drm/i915/intel_atomic.c
 index 8e579a8..e7c1686 100644
 --- a/drivers/gpu/drm/i915/intel_atomic.c
@@ -22977,6 +24063,113 @@ index 38cc4ba..1ab42bf 100644
  	return retval;
  }
  
+diff --git a/drivers/usb/core/quirks.c b/drivers/usb/core/quirks.c
+index 6dc810b..944a6dc 100644
+--- a/drivers/usb/core/quirks.c
++++ b/drivers/usb/core/quirks.c
+@@ -44,6 +44,9 @@ static const struct usb_device_id usb_quirk_list[] = {
+ 	/* Creative SB Audigy 2 NX */
+ 	{ USB_DEVICE(0x041e, 0x3020), .driver_info = USB_QUIRK_RESET_RESUME },
+ 
++	/* USB3503 */
++	{ USB_DEVICE(0x0424, 0x3503), .driver_info = USB_QUIRK_RESET_RESUME },
++
+ 	/* Microsoft Wireless Laser Mouse 6000 Receiver */
+ 	{ USB_DEVICE(0x045e, 0x00e1), .driver_info = USB_QUIRK_RESET_RESUME },
+ 
+@@ -173,6 +176,10 @@ static const struct usb_device_id usb_quirk_list[] = {
+ 	/* MAYA44USB sound device */
+ 	{ USB_DEVICE(0x0a92, 0x0091), .driver_info = USB_QUIRK_RESET_RESUME },
+ 
++	/* ASUS Base Station(T100) */
++	{ USB_DEVICE(0x0b05, 0x17e0), .driver_info =
++			USB_QUIRK_IGNORE_REMOTE_WAKEUP },
++
+ 	/* Action Semiconductor flash disk */
+ 	{ USB_DEVICE(0x10d6, 0x2200), .driver_info =
+ 			USB_QUIRK_STRING_FETCH_255 },
+@@ -188,26 +195,22 @@ static const struct usb_device_id usb_quirk_list[] = {
+ 	{ USB_DEVICE(0x1908, 0x1315), .driver_info =
+ 			USB_QUIRK_HONOR_BNUMINTERFACES },
+ 
+-	/* INTEL VALUE SSD */
+-	{ USB_DEVICE(0x8086, 0xf1a5), .driver_info = USB_QUIRK_RESET_RESUME },
+-
+-	/* USB3503 */
+-	{ USB_DEVICE(0x0424, 0x3503), .driver_info = USB_QUIRK_RESET_RESUME },
+-
+-	/* ASUS Base Station(T100) */
+-	{ USB_DEVICE(0x0b05, 0x17e0), .driver_info =
+-			USB_QUIRK_IGNORE_REMOTE_WAKEUP },
+-
+ 	/* Protocol and OTG Electrical Test Device */
+ 	{ USB_DEVICE(0x1a0a, 0x0200), .driver_info =
+ 			USB_QUIRK_LINEAR_UFRAME_INTR_BINTERVAL },
+ 
++	/* Acer C120 LED Projector */
++	{ USB_DEVICE(0x1de1, 0xc102), .driver_info = USB_QUIRK_NO_LPM },
++
+ 	/* Blackmagic Design Intensity Shuttle */
+ 	{ USB_DEVICE(0x1edb, 0xbd3b), .driver_info = USB_QUIRK_NO_LPM },
+ 
+ 	/* Blackmagic Design UltraStudio SDI */
+ 	{ USB_DEVICE(0x1edb, 0xbd4f), .driver_info = USB_QUIRK_NO_LPM },
+ 
++	/* INTEL VALUE SSD */
++	{ USB_DEVICE(0x8086, 0xf1a5), .driver_info = USB_QUIRK_RESET_RESUME },
++
+ 	{ }  /* terminating entry must be last */
+ };
+ 
+diff --git a/drivers/usb/dwc3/dwc3-exynos.c b/drivers/usb/dwc3/dwc3-exynos.c
+index dd5cb55..2f1fb7e 100644
+--- a/drivers/usb/dwc3/dwc3-exynos.c
++++ b/drivers/usb/dwc3/dwc3-exynos.c
+@@ -128,12 +128,6 @@ static int dwc3_exynos_probe(struct platform_device *pdev)
+ 
+ 	platform_set_drvdata(pdev, exynos);
+ 
+-	ret = dwc3_exynos_register_phys(exynos);
+-	if (ret) {
+-		dev_err(dev, "couldn't register PHYs\n");
+-		return ret;
+-	}
+-
+ 	exynos->dev	= dev;
+ 
+ 	exynos->clk = devm_clk_get(dev, "usbdrd30");
+@@ -183,20 +177,29 @@ static int dwc3_exynos_probe(struct platform_device *pdev)
+ 		goto err3;
+ 	}
+ 
++	ret = dwc3_exynos_register_phys(exynos);
++	if (ret) {
++		dev_err(dev, "couldn't register PHYs\n");
++		goto err4;
++	}
++
+ 	if (node) {
+ 		ret = of_platform_populate(node, NULL, NULL, dev);
+ 		if (ret) {
+ 			dev_err(dev, "failed to add dwc3 core\n");
+-			goto err4;
++			goto err5;
+ 		}
+ 	} else {
+ 		dev_err(dev, "no device node, failed to add dwc3 core\n");
+ 		ret = -ENODEV;
+-		goto err4;
++		goto err5;
+ 	}
+ 
+ 	return 0;
+ 
++err5:
++	platform_device_unregister(exynos->usb2_phy);
++	platform_device_unregister(exynos->usb3_phy);
+ err4:
+ 	regulator_disable(exynos->vdd10);
+ err3:
 diff --git a/drivers/usb/gadget/function/f_fs.c b/drivers/usb/gadget/function/f_fs.c
 index 15b648c..73515d5 100644
 --- a/drivers/usb/gadget/function/f_fs.c
@@ -23080,6 +24273,53 @@ index c16089e..c39de65 100644
  	status = usb_add_function(c, f_msg);
  	if (status)
  		goto remove_acm;
+diff --git a/drivers/usb/gadget/legacy/inode.c b/drivers/usb/gadget/legacy/inode.c
+index e64479f..aa3707b 100644
+--- a/drivers/usb/gadget/legacy/inode.c
++++ b/drivers/usb/gadget/legacy/inode.c
+@@ -938,8 +938,11 @@ ep0_read (struct file *fd, char __user *buf, size_t len, loff_t *ptr)
+ 			struct usb_ep		*ep = dev->gadget->ep0;
+ 			struct usb_request	*req = dev->req;
+ 
+-			if ((retval = setup_req (ep, req, 0)) == 0)
+-				retval = usb_ep_queue (ep, req, GFP_ATOMIC);
++			if ((retval = setup_req (ep, req, 0)) == 0) {
++				spin_unlock_irq (&dev->lock);
++				retval = usb_ep_queue (ep, req, GFP_KERNEL);
++				spin_lock_irq (&dev->lock);
++			}
+ 			dev->state = STATE_DEV_CONNECTED;
+ 
+ 			/* assume that was SET_CONFIGURATION */
+@@ -1457,8 +1460,11 @@ delegate:
+ 							w_length);
+ 				if (value < 0)
+ 					break;
++
++				spin_unlock (&dev->lock);
+ 				value = usb_ep_queue (gadget->ep0, dev->req,
+-							GFP_ATOMIC);
++							GFP_KERNEL);
++				spin_lock (&dev->lock);
+ 				if (value < 0) {
+ 					clean_req (gadget->ep0, dev->req);
+ 					break;
+@@ -1481,11 +1487,14 @@ delegate:
+ 	if (value >= 0 && dev->state != STATE_DEV_SETUP) {
+ 		req->length = value;
+ 		req->zero = value < w_length;
+-		value = usb_ep_queue (gadget->ep0, req, GFP_ATOMIC);
++
++		spin_unlock (&dev->lock);
++		value = usb_ep_queue (gadget->ep0, req, GFP_KERNEL);
+ 		if (value < 0) {
+ 			DBG (dev, "ep_queue --> %d\n", value);
+ 			req->status = 0;
+ 		}
++		return value;
+ 	}
+ 
+ 	/* device stalls when value < 0 */
 diff --git a/drivers/usb/gadget/legacy/mass_storage.c b/drivers/usb/gadget/legacy/mass_storage.c
 index e61af53..125974f 100644
 --- a/drivers/usb/gadget/legacy/mass_storage.c
@@ -23198,6 +24438,176 @@ index 3050b18..e9d4dde 100644
  	depends on ARCH_RENESAS || COMPILE_TEST
  	---help---
  	  Say 'Y' to enable the support for the xHCI host controller
+diff --git a/drivers/usb/host/ehci-tegra.c b/drivers/usb/host/ehci-tegra.c
+index 4031b37..c1c1024 100644
+--- a/drivers/usb/host/ehci-tegra.c
++++ b/drivers/usb/host/ehci-tegra.c
+@@ -89,7 +89,7 @@ static int tegra_reset_usb_controller(struct platform_device *pdev)
+ 	if (!usb1_reset_attempted) {
+ 		struct reset_control *usb1_reset;
+ 
+-		usb1_reset = of_reset_control_get(phy_np, "usb");
++		usb1_reset = of_reset_control_get(phy_np, "utmi-pads");
+ 		if (IS_ERR(usb1_reset)) {
+ 			dev_warn(&pdev->dev,
+ 				 "can't get utmi-pads reset from the PHY\n");
+diff --git a/drivers/usb/host/xhci-pci.c b/drivers/usb/host/xhci-pci.c
+index 48672fa..c10972f 100644
+--- a/drivers/usb/host/xhci-pci.c
++++ b/drivers/usb/host/xhci-pci.c
+@@ -37,6 +37,7 @@
+ /* Device for a quirk */
+ #define PCI_VENDOR_ID_FRESCO_LOGIC	0x1b73
+ #define PCI_DEVICE_ID_FRESCO_LOGIC_PDK	0x1000
++#define PCI_DEVICE_ID_FRESCO_LOGIC_FL1009	0x1009
+ #define PCI_DEVICE_ID_FRESCO_LOGIC_FL1400	0x1400
+ 
+ #define PCI_VENDOR_ID_ETRON		0x1b6f
+@@ -114,6 +115,10 @@ static void xhci_pci_quirks(struct device *dev, struct xhci_hcd *xhci)
+ 		xhci->quirks |= XHCI_TRUST_TX_LENGTH;
+ 	}
+ 
++	if (pdev->vendor == PCI_VENDOR_ID_FRESCO_LOGIC &&
++			pdev->device == PCI_DEVICE_ID_FRESCO_LOGIC_FL1009)
++		xhci->quirks |= XHCI_BROKEN_STREAMS;
++
+ 	if (pdev->vendor == PCI_VENDOR_ID_NEC)
+ 		xhci->quirks |= XHCI_NEC_HOST;
+ 
+diff --git a/drivers/usb/host/xhci-plat.c b/drivers/usb/host/xhci-plat.c
+index 474b5fa..d6e2b27 100644
+--- a/drivers/usb/host/xhci-plat.c
++++ b/drivers/usb/host/xhci-plat.c
+@@ -194,6 +194,9 @@ static int xhci_plat_probe(struct platform_device *pdev)
+ 		ret = clk_prepare_enable(clk);
+ 		if (ret)
+ 			goto put_hcd;
++	} else if (PTR_ERR(clk) == -EPROBE_DEFER) {
++		ret = -EPROBE_DEFER;
++		goto put_hcd;
+ 	}
+ 
+ 	xhci = hcd_to_xhci(hcd);
+diff --git a/drivers/usb/host/xhci-ring.c b/drivers/usb/host/xhci-ring.c
+index 99b4ff4..8b5b2ac 100644
+--- a/drivers/usb/host/xhci-ring.c
++++ b/drivers/usb/host/xhci-ring.c
+@@ -290,6 +290,14 @@ static int xhci_abort_cmd_ring(struct xhci_hcd *xhci)
+ 
+ 	temp_64 = xhci_read_64(xhci, &xhci->op_regs->cmd_ring);
+ 	xhci->cmd_ring_state = CMD_RING_STATE_ABORTED;
++
++	/*
++	 * Writing the CMD_RING_ABORT bit should cause a cmd completion event,
++	 * however on some host hw the CMD_RING_RUNNING bit is correctly cleared
++	 * but the completion event in never sent. Use the cmd timeout timer to
++	 * handle those cases. Use twice the time to cover the bit polling retry
++	 */
++	mod_timer(&xhci->cmd_timer, jiffies + (2 * XHCI_CMD_DEFAULT_TIMEOUT));
+ 	xhci_write_64(xhci, temp_64 | CMD_RING_ABORT,
+ 			&xhci->op_regs->cmd_ring);
+ 
+@@ -314,6 +322,7 @@ static int xhci_abort_cmd_ring(struct xhci_hcd *xhci)
+ 
+ 		xhci_err(xhci, "Stopped the command ring failed, "
+ 				"maybe the host is dead\n");
++		del_timer(&xhci->cmd_timer);
+ 		xhci->xhc_state |= XHCI_STATE_DYING;
+ 		xhci_quiesce(xhci);
+ 		xhci_halt(xhci);
+@@ -1253,22 +1262,21 @@ void xhci_handle_command_timeout(unsigned long data)
+ 	int ret;
+ 	unsigned long flags;
+ 	u64 hw_ring_state;
+-	struct xhci_command *cur_cmd = NULL;
++	bool second_timeout = false;
+ 	xhci = (struct xhci_hcd *) data;
+ 
+ 	/* mark this command to be cancelled */
+ 	spin_lock_irqsave(&xhci->lock, flags);
+ 	if (xhci->current_cmd) {
+-		cur_cmd = xhci->current_cmd;
+-		cur_cmd->status = COMP_CMD_ABORT;
++		if (xhci->current_cmd->status == COMP_CMD_ABORT)
++			second_timeout = true;
++		xhci->current_cmd->status = COMP_CMD_ABORT;
+ 	}
+ 
+-
+ 	/* Make sure command ring is running before aborting it */
+ 	hw_ring_state = xhci_read_64(xhci, &xhci->op_regs->cmd_ring);
+ 	if ((xhci->cmd_ring_state & CMD_RING_STATE_RUNNING) &&
+ 	    (hw_ring_state & CMD_RING_RUNNING))  {
+-
+ 		spin_unlock_irqrestore(&xhci->lock, flags);
+ 		xhci_dbg(xhci, "Command timeout\n");
+ 		ret = xhci_abort_cmd_ring(xhci);
+@@ -1280,6 +1288,15 @@ void xhci_handle_command_timeout(unsigned long data)
+ 		}
+ 		return;
+ 	}
++
++	/* command ring failed to restart, or host removed. Bail out */
++	if (second_timeout || xhci->xhc_state & XHCI_STATE_REMOVING) {
++		spin_unlock_irqrestore(&xhci->lock, flags);
++		xhci_dbg(xhci, "command timed out twice, ring start fail?\n");
++		xhci_cleanup_command_queue(xhci);
++		return;
++	}
++
+ 	/* command timeout on stopped ring, ring can't be aborted */
+ 	xhci_dbg(xhci, "Command timeout on stopped ring\n");
+ 	xhci_handle_stopped_cmd_ring(xhci, xhci->current_cmd);
+@@ -2728,7 +2745,8 @@ hw_died:
+ 		writel(irq_pending, &xhci->ir_set->irq_pending);
+ 	}
+ 
+-	if (xhci->xhc_state & XHCI_STATE_DYING) {
++	if (xhci->xhc_state & XHCI_STATE_DYING ||
++	    xhci->xhc_state & XHCI_STATE_HALTED) {
+ 		xhci_dbg(xhci, "xHCI dying, ignoring interrupt. "
+ 				"Shouldn't IRQs be disabled?\n");
+ 		/* Clear the event handler busy flag (RW1C);
+diff --git a/drivers/usb/host/xhci.c b/drivers/usb/host/xhci.c
+index 9e71c96..3272805 100644
+--- a/drivers/usb/host/xhci.c
++++ b/drivers/usb/host/xhci.c
+@@ -685,20 +685,23 @@ void xhci_stop(struct usb_hcd *hcd)
+ 	u32 temp;
+ 	struct xhci_hcd *xhci = hcd_to_xhci(hcd);
+ 
+-	if (xhci->xhc_state & XHCI_STATE_HALTED)
+-		return;
+-
+ 	mutex_lock(&xhci->mutex);
+-	spin_lock_irq(&xhci->lock);
+-	xhci->xhc_state |= XHCI_STATE_HALTED;
+-	xhci->cmd_ring_state = CMD_RING_STATE_STOPPED;
+ 
+-	/* Make sure the xHC is halted for a USB3 roothub
+-	 * (xhci_stop() could be called as part of failed init).
+-	 */
+-	xhci_halt(xhci);
+-	xhci_reset(xhci);
+-	spin_unlock_irq(&xhci->lock);
++	if (!(xhci->xhc_state & XHCI_STATE_HALTED)) {
++		spin_lock_irq(&xhci->lock);
++
++		xhci->xhc_state |= XHCI_STATE_HALTED;
++		xhci->cmd_ring_state = CMD_RING_STATE_STOPPED;
++		xhci_halt(xhci);
++		xhci_reset(xhci);
++
++		spin_unlock_irq(&xhci->lock);
++	}
++
++	if (!usb_hcd_is_primary_hcd(hcd)) {
++		mutex_unlock(&xhci->mutex);
++		return;
++	}
+ 
+ 	xhci_cleanup_msix(xhci);
+ 
 diff --git a/drivers/usb/misc/usbtest.c b/drivers/usb/misc/usbtest.c
 index 92fdb6e..c78ff95 100644
 --- a/drivers/usb/misc/usbtest.c
@@ -23220,6 +24630,71 @@ index 92fdb6e..c78ff95 100644
  			break;
  		}
  
+diff --git a/drivers/usb/musb/musb_core.c b/drivers/usb/musb/musb_core.c
+index 39fd958..c84f4d0 100644
+--- a/drivers/usb/musb/musb_core.c
++++ b/drivers/usb/musb/musb_core.c
+@@ -2429,7 +2429,8 @@ static void musb_restore_context(struct musb *musb)
+ 	musb_writew(musb_base, MUSB_INTRTXE, musb->intrtxe);
+ 	musb_writew(musb_base, MUSB_INTRRXE, musb->intrrxe);
+ 	musb_writeb(musb_base, MUSB_INTRUSBE, musb->context.intrusbe);
+-	musb_writeb(musb_base, MUSB_DEVCTL, musb->context.devctl);
++	if (musb->context.devctl & MUSB_DEVCTL_SESSION)
++		musb_writeb(musb_base, MUSB_DEVCTL, musb->context.devctl);
+ 
+ 	for (i = 0; i < musb->config->num_eps; ++i) {
+ 		struct musb_hw_ep	*hw_ep;
+diff --git a/drivers/usb/musb/musb_host.c b/drivers/usb/musb/musb_host.c
+index 2f8ad7f..8ff0322 100644
+--- a/drivers/usb/musb/musb_host.c
++++ b/drivers/usb/musb/musb_host.c
+@@ -594,14 +594,13 @@ musb_rx_reinit(struct musb *musb, struct musb_qh *qh, u8 epnum)
+ 		musb_writew(ep->regs, MUSB_TXCSR, 0);
+ 
+ 	/* scrub all previous state, clearing toggle */
+-	} else {
+-		csr = musb_readw(ep->regs, MUSB_RXCSR);
+-		if (csr & MUSB_RXCSR_RXPKTRDY)
+-			WARNING("rx%d, packet/%d ready?\n", ep->epnum,
+-				musb_readw(ep->regs, MUSB_RXCOUNT));
+-
+-		musb_h_flush_rxfifo(ep, MUSB_RXCSR_CLRDATATOG);
+ 	}
++	csr = musb_readw(ep->regs, MUSB_RXCSR);
++	if (csr & MUSB_RXCSR_RXPKTRDY)
++		WARNING("rx%d, packet/%d ready?\n", ep->epnum,
++			musb_readw(ep->regs, MUSB_RXCOUNT));
++
++	musb_h_flush_rxfifo(ep, MUSB_RXCSR_CLRDATATOG);
+ 
+ 	/* target addr and (for multipoint) hub addr/port */
+ 	if (musb->is_multipoint) {
+@@ -995,9 +994,15 @@ static void musb_bulk_nak_timeout(struct musb *musb, struct musb_hw_ep *ep,
+ 	if (is_in) {
+ 		dma = is_dma_capable() ? ep->rx_channel : NULL;
+ 
+-		/* clear nak timeout bit */
++		/*
++		 * Need to stop the transaction by clearing REQPKT first
++		 * then the NAK Timeout bit ref MUSBMHDRC USB 2.0 HIGH-SPEED
++		 * DUAL-ROLE CONTROLLER Programmer's Guide, section 9.2.2
++		 */
+ 		rx_csr = musb_readw(epio, MUSB_RXCSR);
+ 		rx_csr |= MUSB_RXCSR_H_WZC_BITS;
++		rx_csr &= ~MUSB_RXCSR_H_REQPKT;
++		musb_writew(epio, MUSB_RXCSR, rx_csr);
+ 		rx_csr &= ~MUSB_RXCSR_DATAERROR;
+ 		musb_writew(epio, MUSB_RXCSR, rx_csr);
+ 
+@@ -1551,7 +1556,7 @@ static int musb_rx_dma_iso_cppi41(struct dma_controller *dma,
+ 				  struct urb *urb,
+ 				  size_t len)
+ {
+-	struct dma_channel *channel = hw_ep->tx_channel;
++	struct dma_channel *channel = hw_ep->rx_channel;
+ 	void __iomem *epio = hw_ep->regs;
+ 	dma_addr_t *buf;
+ 	u32 length, res;
 diff --git a/drivers/usb/serial/cp210x.c b/drivers/usb/serial/cp210x.c
 index 7c9f25e..a7c8d26 100644
 --- a/drivers/usb/serial/cp210x.c
@@ -23355,6 +24830,18 @@ index b6bd8e4..1cf0588 100644
  	usb_free_urb(s_priv->instat_urb);
  	usb_free_urb(s_priv->indat_urb);
  	usb_free_urb(s_priv->glocont_urb);
+diff --git a/drivers/usb/serial/mos7720.c b/drivers/usb/serial/mos7720.c
+index 2eddbe5..5608af4 100644
+--- a/drivers/usb/serial/mos7720.c
++++ b/drivers/usb/serial/mos7720.c
+@@ -2007,6 +2007,7 @@ static void mos7720_release(struct usb_serial *serial)
+ 				    urblist_entry)
+ 			usb_unlink_urb(urbtrack->urb);
+ 		spin_unlock_irqrestore(&mos_parport->listlock, flags);
++		parport_del_port(mos_parport->pp);
+ 
+ 		kref_put(&mos_parport->ref_count, destroy_mos_parport);
+ 	}
 diff --git a/drivers/usb/serial/mxuport.c b/drivers/usb/serial/mxuport.c
 index 31a8b47..c6596cb 100644
 --- a/drivers/usb/serial/mxuport.c
@@ -23596,6 +25083,18 @@ index 2df8ad5..85acb50 100644
  	usb_free_urb(serial_priv->read_urb);
  	kfree(serial_priv->read_buffer);
  	kfree(serial_priv);
+diff --git a/drivers/usb/storage/uas.c b/drivers/usb/storage/uas.c
+index 16bc679..ecc7d4b 100644
+--- a/drivers/usb/storage/uas.c
++++ b/drivers/usb/storage/uas.c
+@@ -835,6 +835,7 @@ static int uas_slave_configure(struct scsi_device *sdev)
+ 	if (devinfo->flags & US_FL_BROKEN_FUA)
+ 		sdev->broken_fua = 1;
+ 
++	scsi_change_queue_depth(sdev, devinfo->qdepth - 2);
+ 	return 0;
+ }
+ 
 diff --git a/drivers/video/logo/Kconfig b/drivers/video/logo/Kconfig
 index 0037104..2dae131 100644
 --- a/drivers/video/logo/Kconfig
@@ -82904,7 +84403,7 @@ index 0000000..49f43b4
 +#endif /* __AUFS_H__ */
 diff --git a/fs/aufs/branch.c b/fs/aufs/branch.c
 new file mode 100644
-index 0000000..0bf9062
+index 0000000..07c842d
 --- /dev/null
 +++ b/fs/aufs/branch.c
 @@ -0,0 +1,1392 @@
@@ -83210,7 +84709,7 @@ index 0000000..0bf9062
 +	bindex = au_br_index(sb, br->br_id);
 +	if (0 <= bindex) {
 +		hdir = au_hi(d_inode(sb->s_root), bindex);
-+		au_hn_imtx_lock_nested(hdir, AuLsc_I_PARENT);
++		au_hn_inode_lock_nested(hdir, AuLsc_I_PARENT);
 +	} else {
 +		h_dentry = au_br_dentry(br);
 +		h_inode = d_inode(h_dentry);
@@ -83224,7 +84723,7 @@ index 0000000..0bf9062
 +		wbr_wh_write_unlock(wbr);
 +	}
 +	if (hdir)
-+		au_hn_imtx_unlock(hdir);
++		au_hn_inode_unlock(hdir);
 +	else
 +		inode_unlock(h_inode);
 +	vfsub_mnt_drop_write(au_br_mnt(br));
@@ -86879,10 +88378,10 @@ index 0000000..5d2cf66
 +#endif /* __AUFS_DCSUB_H__ */
 diff --git a/fs/aufs/debug.c b/fs/aufs/debug.c
 new file mode 100644
-index 0000000..4fdc9d4
+index 0000000..44bdb5f
 --- /dev/null
 +++ b/fs/aufs/debug.c
-@@ -0,0 +1,427 @@
+@@ -0,0 +1,428 @@
 +/*
 + * Copyright (C) 2005-2016 Junjiro R. Okajima
 + */
@@ -87048,9 +88547,9 @@ index 0000000..4fdc9d4
 +{
 +	struct dentry *wh = NULL;
 +	int hn;
++	struct inode *inode;
 +	struct au_iinfo *iinfo;
 +	struct au_hinode *hi;
-+	struct inode *inode;
 +
 +	if (!dentry || IS_ERR(dentry)) {
 +		dpri("d%d: err %ld\n", bindex, PTR_ERR(dentry));
@@ -87065,11 +88564,12 @@ index 0000000..4fdc9d4
 +	     d_unhashed(dentry) ? "un" : "");
 +	hn = -1;
 +	inode = NULL;
-+	if (bindex >= 0
-+	    && d_is_positive(dentry)
-+	    && au_test_aufs(dentry->d_sb))
++	if (d_is_positive(dentry))
 +		inode = d_inode(dentry);
-+	if (inode && !au_is_bad_inode(inode)) {
++	if (inode
++	    && au_test_aufs(dentry->d_sb)
++	    && bindex >= 0
++	    && !au_is_bad_inode(inode)) {
 +		iinfo = au_ii(inode);
 +		hi = au_hinode(iinfo, bindex);
 +		hn = !!au_hn(hi);
@@ -87530,10 +89030,10 @@ index 0000000..0567f31
 +#endif /* __AUFS_DEBUG_H__ */
 diff --git a/fs/aufs/dentry.c b/fs/aufs/dentry.c
 new file mode 100644
-index 0000000..d1d7de8
+index 0000000..4bb1530
 --- /dev/null
 +++ b/fs/aufs/dentry.c
-@@ -0,0 +1,1126 @@
+@@ -0,0 +1,1115 @@
 +/*
 + * Copyright (C) 2005-2016 Junjiro R. Okajima
 + */
@@ -87544,14 +89044,6 @@ index 0000000..d1d7de8
 +
 +#include <linux/namei.h>
 +#include "aufs.h"
-+
-+#define AuLkup_ALLOW_NEG	1
-+#define AuLkup_IGNORE_PERM	(1 << 1)
-+#define au_ftest_lkup(flags, name)	((flags) & AuLkup_##name)
-+#define au_fset_lkup(flags, name) \
-+	do { (flags) |= AuLkup_##name; } while (0)
-+#define au_fclr_lkup(flags, name) \
-+	do { (flags) &= ~AuLkup_##name; } while (0)
 +
 +struct au_do_lookup_args {
 +	unsigned int		flags;
@@ -87655,15 +89147,15 @@ index 0000000..d1d7de8
 + * otherwise an error.
 + * can be called at unlinking with @type is zero.
 + */
-+int au_lkup_dentry(struct dentry *dentry, aufs_bindex_t btop, mode_t type)
++int au_lkup_dentry(struct dentry *dentry, aufs_bindex_t btop,
++		   unsigned int flags)
 +{
 +	int npositive, err;
 +	aufs_bindex_t bindex, btail, bdiropq;
 +	unsigned char isdir, dirperm1;
 +	struct qstr whname;
 +	struct au_do_lookup_args args = {
-+		.flags		= 0,
-+		.type		= type
++		.flags		= flags
 +	};
 +	const struct qstr *name = &dentry->d_name;
 +	struct dentry *parent;
@@ -87679,8 +89171,6 @@ index 0000000..d1d7de8
 +		goto out;
 +
 +	isdir = !!d_is_dir(dentry);
-+	if (!type)
-+		au_fset_lkup(args.flags, ALLOW_NEG);
 +	dirperm1 = !!au_opt_test(au_mntflags(sb), DIRPERM1);
 +
 +	npositive = 0;
@@ -87694,9 +89184,7 @@ index 0000000..d1d7de8
 +		if (h_dentry) {
 +			if (d_is_positive(h_dentry))
 +				npositive++;
-+			if (type != S_IFDIR)
-+				break;
-+			continue;
++			break;
 +		}
 +		h_parent = au_h_dptr(parent, bindex);
 +		if (!h_parent || !d_is_dir(h_parent))
@@ -88207,7 +89695,8 @@ index 0000000..d1d7de8
 +					au_set_h_dptr(dentry, bindex,
 +						      dget(h_dentry));
 +				}
-+				err = au_refresh_hinode(inode, dentry);
++				if (inode)
++					err = au_refresh_hinode(inode, dentry);
 +				au_dbg_verify_dinode(dentry);
 +			}
 +		} else {
@@ -88296,7 +89785,7 @@ index 0000000..d1d7de8
 +	 * if current working dir is removed, it returns an error.
 +	 * but the dentry is legal.
 +	 */
-+	err = au_lkup_dentry(dentry, /*btop*/0, /*type*/0);
++	err = au_lkup_dentry(dentry, /*btop*/0, AuLkup_ALLOW_NEG);
 +	AuDbgDentry(dentry);
 +	au_di_swap(tmp, dinfo);
 +	if (err == -ENOENT)
@@ -88662,10 +90151,10 @@ index 0000000..d1d7de8
 +};
 diff --git a/fs/aufs/dentry.h b/fs/aufs/dentry.h
 new file mode 100644
-index 0000000..c52fe58
+index 0000000..bdc1af6
 --- /dev/null
 +++ b/fs/aufs/dentry.h
-@@ -0,0 +1,227 @@
+@@ -0,0 +1,239 @@
 +/*
 + * Copyright (C) 2005-2016 Junjiro R. Okajima
 + */
@@ -88698,6 +90187,17 @@ index 0000000..c52fe58
 +
 +/* ---------------------------------------------------------------------- */
 +
++/* flags for au_lkup_dentry() */
++#define AuLkup_ALLOW_NEG	1
++#define AuLkup_IGNORE_PERM	(1 << 1)
++#define au_ftest_lkup(flags, name)	((flags) & AuLkup_##name)
++#define au_fset_lkup(flags, name) \
++	do { (flags) |= AuLkup_##name; } while (0)
++#define au_fclr_lkup(flags, name) \
++	do { (flags) &= ~AuLkup_##name; } while (0)
++
++/* ---------------------------------------------------------------------- */
++
 +/* dentry.c */
 +extern const struct dentry_operations aufs_dop, aufs_dop_noreval;
 +struct au_branch;
@@ -88705,7 +90205,8 @@ index 0000000..c52fe58
 +int au_h_verify(struct dentry *h_dentry, unsigned int udba, struct inode *h_dir,
 +		struct dentry *h_parent, struct au_branch *br);
 +
-+int au_lkup_dentry(struct dentry *dentry, aufs_bindex_t btop, mode_t type);
++int au_lkup_dentry(struct dentry *dentry, aufs_bindex_t btop,
++		   unsigned int flags);
 +int au_lkup_neg(struct dentry *dentry, aufs_bindex_t bindex, int wh);
 +int au_refresh_dentry(struct dentry *dentry, struct dentry *parent);
 +int au_reval_dpath(struct dentry *dentry, unsigned int sigen);
@@ -89440,7 +90941,7 @@ index 0000000..43b5509
 +}
 diff --git a/fs/aufs/dir.c b/fs/aufs/dir.c
 new file mode 100644
-index 0000000..4dc666e
+index 0000000..716158c
 --- /dev/null
 +++ b/fs/aufs/dir.c
 @@ -0,0 +1,743 @@
@@ -89573,14 +91074,14 @@ index 0000000..4dc666e
 +	if (err)
 +		goto out_unlock;
 +	hdir = au_hi(dir, btop);
-+	au_hn_imtx_lock_nested(hdir, AuLsc_I_PARENT);
++	au_hn_inode_lock_nested(hdir, AuLsc_I_PARENT);
 +	h_dir = au_h_iptr(dir, btop);
 +	if (h_dir->i_nlink
 +	    && timespec_compare(&h_dir->i_mtime, &dt.dt_mtime) < 0) {
 +		dt.dt_h_path = h_path;
 +		au_dtime_revert(&dt);
 +	}
-+	au_hn_imtx_unlock(hdir);
++	au_hn_inode_unlock(hdir);
 +	vfsub_mnt_drop_write(h_path.mnt);
 +	au_cpup_attr_timesizes(dir);
 +
@@ -95441,10 +96942,10 @@ index 0000000..3016c5e
 +}
 diff --git a/fs/aufs/i_op.c b/fs/aufs/i_op.c
 new file mode 100644
-index 0000000..1572a7d
+index 0000000..c274958
 --- /dev/null
 +++ b/fs/aufs/i_op.c
-@@ -0,0 +1,1394 @@
+@@ -0,0 +1,1400 @@
 +/*
 + * Copyright (C) 2005-2016 Junjiro R. Okajima
 + */
@@ -95631,8 +97132,9 @@ index 0000000..1572a7d
 +	if (!err)
 +		err = au_digen_test(parent, au_sigen(sb));
 +	if (!err) {
++		/* regardless LOOKUP_CREATE, always ALLOW_NEG */
 +		npositive = au_lkup_dentry(dentry, au_dbtop(parent),
-+					   /*type*/0);
++					   AuLkup_ALLOW_NEG);
 +		err = npositive;
 +	}
 +	di_read_unlock(parent, AuLock_IR);
@@ -95713,6 +97215,7 @@ index 0000000..1572a7d
 +			    umode_t create_mode, int *opened)
 +{
 +	int err, h_opened = *opened;
++	unsigned int lkup_flags;
 +	struct dentry *parent;
 +	struct dentry *d;
 +	struct au_sphlhead *aopen;
@@ -95726,14 +97229,18 @@ index 0000000..1572a7d
 +	};
 +
 +	IMustLock(dir);
-+	AuDbg("open_flag 0x%x\n", open_flag);
++	AuDbg("open_flag 0%o\n", open_flag);
 +	AuDbgDentry(dentry);
 +
 +	err = 0;
 +	if (!au_di(dentry)) {
-+		d = aufs_lookup(dir, dentry, /*flags*/0);
++		lkup_flags = LOOKUP_OPEN;
++		if (open_flag & O_CREAT)
++			lkup_flags |= LOOKUP_CREATE;
++		d = aufs_lookup(dir, dentry, lkup_flags);
 +		if (IS_ERR(d)) {
 +			err = PTR_ERR(d);
++			AuTraceErr(err);
 +			goto out;
 +		} else if (d) {
 +			/*
@@ -95741,8 +97248,8 @@ index 0000000..1572a7d
 +			 * another error will be returned later.
 +			 */
 +			d_drop(d);
-+			dput(d);
 +			AuDbgDentry(d);
++			dput(d);
 +		}
 +		AuDbgDentry(dentry);
 +	}
@@ -95759,7 +97266,7 @@ index 0000000..1572a7d
 +
 +	parent = dentry->d_parent;	/* dir is locked */
 +	di_write_lock_parent(parent);
-+	err = au_lkup_dentry(dentry, /*btop*/0, /*type*/0);
++	err = au_lkup_dentry(dentry, /*btop*/0, AuLkup_ALLOW_NEG);
 +	if (unlikely(err))
 +		goto out_unlock;
 +
@@ -95955,7 +97462,7 @@ index 0000000..1572a7d
 +void au_pin_hdir_unlock(struct au_pin *p)
 +{
 +	if (p->hdir)
-+		au_hn_imtx_unlock(p->hdir);
++		au_hn_inode_unlock(p->hdir);
 +}
 +
 +int au_pin_hdir_lock(struct au_pin *p)
@@ -95967,7 +97474,7 @@ index 0000000..1572a7d
 +		goto out;
 +
 +	/* even if an error happens later, keep this lock */
-+	au_hn_imtx_lock_nested(p->hdir, p->lsc_hi);
++	au_hn_inode_lock_nested(p->hdir, p->lsc_hi);
 +
 +	err = -EBUSY;
 +	if (unlikely(p->hdir->hi_inode != d_inode(p->h_parent)))
@@ -97758,10 +99265,10 @@ index 0000000..8e3fb61
 +}
 diff --git a/fs/aufs/i_op_del.c b/fs/aufs/i_op_del.c
 new file mode 100644
-index 0000000..bda70b0
+index 0000000..35b923c
 --- /dev/null
 +++ b/fs/aufs/i_op_del.c
-@@ -0,0 +1,497 @@
+@@ -0,0 +1,498 @@
 +/*
 + * Copyright (C) 2005-2016 Junjiro R. Okajima
 + */
@@ -97818,7 +99325,8 @@ index 0000000..bda70b0
 +			au_di_cp(tmp, dinfo);
 +			au_di_swap(tmp, dinfo);
 +			/* returns the number of positive dentries */
-+			need_wh = au_lkup_dentry(dentry, btop + 1, /*type*/0);
++			need_wh = au_lkup_dentry(dentry, btop + 1,
++						 /* AuLkup_IGNORE_PERM */ 0);
 +			au_di_swap(tmp, dinfo);
 +			au_rw_write_unlock(&tmp->di_rwsem);
 +			au_di_free(tmp);
@@ -98261,7 +99769,7 @@ index 0000000..bda70b0
 +}
 diff --git a/fs/aufs/i_op_ren.c b/fs/aufs/i_op_ren.c
 new file mode 100644
-index 0000000..fdc2992
+index 0000000..df697de
 --- /dev/null
 +++ b/fs/aufs/i_op_ren.c
 @@ -0,0 +1,1002 @@
@@ -98359,9 +99867,9 @@ index 0000000..fdc2992
 +{
 +	int rerr;
 +
-+	au_hn_imtx_lock_nested(a->src_hinode, AuLsc_I_CHILD);
++	au_hn_inode_lock_nested(a->src_hinode, AuLsc_I_CHILD);
 +	rerr = au_diropq_remove(a->src_dentry, a->btgt);
-+	au_hn_imtx_unlock(a->src_hinode);
++	au_hn_inode_unlock(a->src_hinode);
 +	au_set_dbdiropq(a->src_dentry, a->src_bdiropq);
 +	if (rerr)
 +		RevertFailure("remove diropq %pd", a->src_dentry);
@@ -98516,9 +100024,9 @@ index 0000000..fdc2992
 +	err = 0;
 +	a->src_bdiropq = au_dbdiropq(a->src_dentry);
 +	a->src_hinode = au_hi(a->src_inode, a->btgt);
-+	au_hn_imtx_lock_nested(a->src_hinode, AuLsc_I_CHILD);
++	au_hn_inode_lock_nested(a->src_hinode, AuLsc_I_CHILD);
 +	diropq = au_diropq_create(a->src_dentry, a->btgt);
-+	au_hn_imtx_unlock(a->src_hinode);
++	au_hn_inode_unlock(a->src_hinode);
 +	if (IS_ERR(diropq))
 +		err = PTR_ERR(diropq);
 +	else
@@ -100056,7 +101564,7 @@ index 0000000..a4b994e
 +}
 diff --git a/fs/aufs/inode.h b/fs/aufs/inode.h
 new file mode 100644
-index 0000000..73cddce
+index 0000000..14f7882
 --- /dev/null
 +++ b/fs/aufs/inode.h
 @@ -0,0 +1,681 @@
@@ -100720,20 +102228,20 @@ index 0000000..73cddce
 +	au_hn_ctl(hdir, /*do_set*/1);
 +}
 +
-+static inline void au_hn_imtx_lock(struct au_hinode *hdir)
++static inline void au_hn_inode_lock(struct au_hinode *hdir)
 +{
 +	inode_lock(hdir->hi_inode);
 +	au_hn_suspend(hdir);
 +}
 +
-+static inline void au_hn_imtx_lock_nested(struct au_hinode *hdir,
++static inline void au_hn_inode_lock_nested(struct au_hinode *hdir,
 +					  unsigned int sc __maybe_unused)
 +{
 +	inode_lock_nested(hdir->hi_inode, sc);
 +	au_hn_suspend(hdir);
 +}
 +
-+static inline void au_hn_imtx_unlock(struct au_hinode *hdir)
++static inline void au_hn_inode_unlock(struct au_hinode *hdir)
 +{
 +	au_hn_resume(hdir);
 +	inode_unlock(hdir->hi_inode);
@@ -101472,10 +102980,10 @@ index 0000000..1383e3d
 +#endif /* __AUFS_MODULE_H__ */
 diff --git a/fs/aufs/mvdown.c b/fs/aufs/mvdown.c
 new file mode 100644
-index 0000000..334f25c
+index 0000000..a48aa1c
 --- /dev/null
 +++ b/fs/aufs/mvdown.c
-@@ -0,0 +1,690 @@
+@@ -0,0 +1,691 @@
 +/*
 + * Copyright (C) 2011-2016 Junjiro R. Okajima
 + */
@@ -101929,7 +103437,8 @@ index 0000000..334f25c
 +	au_di_swap(tmp, dinfo);
 +
 +	/* returns the number of positive dentries */
-+	err = au_lkup_dentry(a->dentry, a->mvd_bsrc + 1, /*type*/0);
++	err = au_lkup_dentry(a->dentry, a->mvd_bsrc + 1,
++			     /* AuLkup_IGNORE_PERM */ 0);
 +	if (!err)
 +		a->bwh = au_dbwh(a->dentry);
 +	else if (err > 0)
@@ -102168,7 +103677,7 @@ index 0000000..334f25c
 +}
 diff --git a/fs/aufs/opts.c b/fs/aufs/opts.c
 new file mode 100644
-index 0000000..23a146d
+index 0000000..79c7d71
 --- /dev/null
 +++ b/fs/aufs/opts.c
 @@ -0,0 +1,1846 @@
@@ -103830,13 +105339,13 @@ index 0000000..23a146d
 +			continue;
 +
 +		hdir = au_hi(dir, bindex);
-+		au_hn_imtx_lock_nested(hdir, AuLsc_I_PARENT);
++		au_hn_inode_lock_nested(hdir, AuLsc_I_PARENT);
 +		if (wbr)
 +			wbr_wh_write_lock(wbr);
 +		err = au_wh_init(br, sb);
 +		if (wbr)
 +			wbr_wh_write_unlock(wbr);
-+		au_hn_imtx_unlock(hdir);
++		au_hn_inode_unlock(hdir);
 +
 +		if (!err && do_free) {
 +			kfree(wbr);
@@ -110148,7 +111657,7 @@ index 0000000..2e54bad
 +}
 diff --git a/fs/aufs/vfsub.h b/fs/aufs/vfsub.h
 new file mode 100644
-index 0000000..4e08d33
+index 0000000..291bfae
 --- /dev/null
 +++ b/fs/aufs/vfsub.h
 @@ -0,0 +1,297 @@
@@ -110361,7 +111870,7 @@ index 0000000..4e08d33
 +static inline int vfsub_update_time(struct inode *h_inode, struct timespec *ts,
 +				    int flags)
 +{
-+	return generic_update_time(h_inode, ts, flags);
++	return update_time(h_inode, ts, flags);
 +	/* no vfsub_update_h_iattr() since we don't have struct path */
 +}
 +
@@ -111209,7 +112718,7 @@ index 0000000..91a010a
 +};
 diff --git a/fs/aufs/whout.c b/fs/aufs/whout.c
 new file mode 100644
-index 0000000..78f97ed
+index 0000000..16a96f88
 --- /dev/null
 +++ b/fs/aufs/whout.c
 @@ -0,0 +1,1047 @@
@@ -111768,7 +113277,7 @@ index 0000000..78f97ed
 +	h_root = au_h_dptr(a->sb->s_root, bindex);
 +	AuDebugOn(h_root != au_br_dentry(a->br));
 +
-+	au_hn_imtx_lock_nested(hdir, AuLsc_I_PARENT);
++	au_hn_inode_lock_nested(hdir, AuLsc_I_PARENT);
 +	wbr_wh_write_lock(wbr);
 +	err = au_h_verify(wbr->wbr_whbase, au_opt_udba(a->sb), hdir->hi_inode,
 +			  h_root, a->br);
@@ -111792,7 +113301,7 @@ index 0000000..78f97ed
 +	if (!err)
 +		err = au_wh_init(a->br, a->sb);
 +	wbr_wh_write_unlock(wbr);
-+	au_hn_imtx_unlock(hdir);
++	au_hn_inode_unlock(hdir);
 +	di_read_unlock(a->sb->s_root, AuLock_IR);
 +	if (!err)
 +		au_fhsm_wrote(a->sb, bindex, /*force*/0);
@@ -112220,12 +113729,12 @@ index 0000000..78f97ed
 +	err = vfsub_mnt_want_write(au_br_mnt(a->br));
 +	if (unlikely(err))
 +		goto out_mnt;
-+	au_hn_imtx_lock_nested(hdir, AuLsc_I_PARENT);
++	au_hn_inode_lock_nested(hdir, AuLsc_I_PARENT);
 +	err = au_h_verify(a->wh_dentry, au_opt_udba(sb), h_dir, h_parent,
 +			  a->br);
 +	if (!err)
 +		err = au_whtmp_rmdir(a->dir, bindex, a->wh_dentry, &a->whlist);
-+	au_hn_imtx_unlock(hdir);
++	au_hn_inode_unlock(hdir);
 +	vfsub_mnt_drop_write(au_br_mnt(a->br));
 +
 +out_mnt:
@@ -112974,7 +114483,7 @@ index 0000000..890c107
 +#endif
 diff --git a/fs/aufs/xino.c b/fs/aufs/xino.c
 new file mode 100644
-index 0000000..3acec9d
+index 0000000..4d1d5d4
 --- /dev/null
 +++ b/fs/aufs/xino.c
 @@ -0,0 +1,1304 @@
@@ -113212,7 +114721,7 @@ index 0000000..3acec9d
 +		bindex = au_br_index(sb, brid);
 +	if (bindex >= 0) {
 +		ldir->hdir = au_hi(d_inode(sb->s_root), bindex);
-+		au_hn_imtx_lock_nested(ldir->hdir, AuLsc_I_PARENT);
++		au_hn_inode_lock_nested(ldir->hdir, AuLsc_I_PARENT);
 +	} else {
 +		ldir->parent = dget_parent(xino->f_path.dentry);
 +		ldir->dir = d_inode(ldir->parent);
@@ -113223,7 +114732,7 @@ index 0000000..3acec9d
 +static void au_xino_unlock_dir(struct au_xino_lock_dir *ldir)
 +{
 +	if (ldir->hdir)
-+		au_hn_imtx_unlock(ldir->hdir);
++		au_hn_inode_unlock(ldir->hdir);
 +	else {
 +		inode_unlock(ldir->dir);
 +		dput(ldir->parent);
@@ -128020,6 +129529,27 @@ index 458cf46..82067ca 100644
  	sbi = kzalloc(sizeof(*sbi), GFP_KERNEL);
  	if (!sbi) {
  		return -ENOMEM;
+diff --git a/fs/inode.c b/fs/inode.c
+index 69b8b52..a41481e 100644
+--- a/fs/inode.c
++++ b/fs/inode.c
+@@ -1590,7 +1590,7 @@ EXPORT_SYMBOL(generic_update_time);
+  * This does the actual work of updating an inodes time or version.  Must have
+  * had called mnt_want_write() before calling this.
+  */
+-static int update_time(struct inode *inode, struct timespec *time, int flags)
++int update_time(struct inode *inode, struct timespec *time, int flags)
+ {
+ 	int (*update_time)(struct inode *, struct timespec *, int);
+ 
+@@ -1599,6 +1599,7 @@ static int update_time(struct inode *inode, struct timespec *time, int flags)
+ 
+ 	return update_time(inode, time, flags);
+ }
++EXPORT_SYMBOL_GPL(update_time);
+ 
+ /**
+  *	touch_atime	-	update the access time
 diff --git a/fs/namespace.c b/fs/namespace.c
 index 4fb1691..97654d2 100644
 --- a/fs/namespace.c
@@ -128773,6 +130303,21 @@ index 669e419..4852f97 100644
  
  struct request;
  typedef void (rq_end_io_fn)(struct request *, int);
+diff --git a/include/linux/bpf.h b/include/linux/bpf.h
+index f1d5c5ac..ca80d58 100644
+--- a/include/linux/bpf.h
++++ b/include/linux/bpf.h
+@@ -229,6 +229,10 @@ static inline struct bpf_prog *bpf_prog_get(u32 ufd)
+ static inline void bpf_prog_put(struct bpf_prog *prog)
+ {
+ }
++
++static inline void bpf_prog_put_rcu(struct bpf_prog *prog)
++{
++}
+ #endif /* CONFIG_BPF_SYSCALL */
+ 
+ /* verifier prototypes for helper functions called from eBPF programs */
 diff --git a/include/linux/can/dev.h b/include/linux/can/dev.h
 index 735f9f8..5261751 100644
 --- a/include/linux/can/dev.h
@@ -128826,7 +130371,7 @@ index f87d308..9a290b3 100644
  static inline void fput_light(struct file *file, int fput_needed)
  {
 diff --git a/include/linux/fs.h b/include/linux/fs.h
-index 70e61b5..351bb05 100644
+index 70e61b5..7abbbe4 100644
 --- a/include/linux/fs.h
 +++ b/include/linux/fs.h
 @@ -1277,6 +1277,7 @@ extern void fasync_free(struct fasync_struct *);
@@ -128858,6 +130403,14 @@ index 70e61b5..351bb05 100644
  extern ssize_t __vfs_read(struct file *, char __user *, size_t, loff_t *);
  extern ssize_t __vfs_write(struct file *, const char __user *, size_t, loff_t *);
  extern ssize_t vfs_read(struct file *, char __user *, size_t, loff_t *);
+@@ -2073,6 +2081,7 @@ extern int current_umask(void);
+ extern void ihold(struct inode * inode);
+ extern void iput(struct inode *);
+ extern int generic_update_time(struct inode *, struct timespec *, int);
++extern int update_time(struct inode *, struct timespec *, int);
+ 
+ /* /sys/fs */
+ extern struct kobject *fs_kobj;
 diff --git a/include/linux/fscrypto.h b/include/linux/fscrypto.h
 index 6027f6b..cfa6cde 100644
 --- a/include/linux/fscrypto.h
@@ -129098,6 +130651,62 @@ index c2d75b4..9e324fe 100644
  	void * vm_private_data;		/* was vm_pte (shared mem) */
  
  #ifndef CONFIG_MMU
+diff --git a/include/linux/net.h b/include/linux/net.h
+index f840d77..9d90efe6 100644
+--- a/include/linux/net.h
++++ b/include/linux/net.h
+@@ -252,7 +252,8 @@ do {									\
+ 	DEFINE_DYNAMIC_DEBUG_METADATA(descriptor, fmt);			\
+ 	if (unlikely(descriptor.flags & _DPRINTK_FLAGS_PRINT) &&	\
+ 	    net_ratelimit())						\
+-		__dynamic_pr_debug(&descriptor, fmt, ##__VA_ARGS__);	\
++		__dynamic_pr_debug(&descriptor, pr_fmt(fmt),		\
++		                   ##__VA_ARGS__);			\
+ } while (0)
+ #elif defined(DEBUG)
+ #define net_dbg_ratelimited(fmt, ...)				\
+diff --git a/include/linux/netfilter/x_tables.h b/include/linux/netfilter/x_tables.h
+index 80a305b..4dd9306 100644
+--- a/include/linux/netfilter/x_tables.h
++++ b/include/linux/netfilter/x_tables.h
+@@ -242,11 +242,18 @@ void xt_unregister_match(struct xt_match *target);
+ int xt_register_matches(struct xt_match *match, unsigned int n);
+ void xt_unregister_matches(struct xt_match *match, unsigned int n);
+ 
++int xt_check_entry_offsets(const void *base, const char *elems,
++			   unsigned int target_offset,
++			   unsigned int next_offset);
++
+ int xt_check_match(struct xt_mtchk_param *, unsigned int size, u_int8_t proto,
+ 		   bool inv_proto);
+ int xt_check_target(struct xt_tgchk_param *, unsigned int size, u_int8_t proto,
+ 		    bool inv_proto);
+ 
++void *xt_copy_counters_from_user(const void __user *user, unsigned int len,
++				 struct xt_counters_info *info, bool compat);
++
+ struct xt_table *xt_register_table(struct net *net,
+ 				   const struct xt_table *table,
+ 				   struct xt_table_info *bootstrap,
+@@ -480,7 +487,7 @@ void xt_compat_init_offsets(u_int8_t af, unsigned int number);
+ int xt_compat_calc_jump(u_int8_t af, unsigned int offset);
+ 
+ int xt_compat_match_offset(const struct xt_match *match);
+-int xt_compat_match_from_user(struct xt_entry_match *m, void **dstptr,
++void xt_compat_match_from_user(struct xt_entry_match *m, void **dstptr,
+ 			      unsigned int *size);
+ int xt_compat_match_to_user(const struct xt_entry_match *m,
+ 			    void __user **dstptr, unsigned int *size);
+@@ -490,6 +497,9 @@ void xt_compat_target_from_user(struct xt_entry_target *t, void **dstptr,
+ 				unsigned int *size);
+ int xt_compat_target_to_user(const struct xt_entry_target *t,
+ 			     void __user **dstptr, unsigned int *size);
++int xt_compat_check_entry_offsets(const void *base, const char *elems,
++				  unsigned int target_offset,
++				  unsigned int next_offset);
+ 
+ #endif /* CONFIG_COMPAT */
+ #endif /* _X_TABLES_H */
 diff --git a/include/linux/sched.h b/include/linux/sched.h
 index 52c4847..c37f48c 100644
 --- a/include/linux/sched.h
@@ -129307,6 +130916,30 @@ index 92557bb..d80259a 100644
  /*
   * Define some primitives to manipulate sigset_t.
   */
+diff --git a/include/linux/sock_diag.h b/include/linux/sock_diag.h
+index 4018b48..a0596ca0 100644
+--- a/include/linux/sock_diag.h
++++ b/include/linux/sock_diag.h
+@@ -36,6 +36,9 @@ enum sknetlink_groups sock_diag_destroy_group(const struct sock *sk)
+ {
+ 	switch (sk->sk_family) {
+ 	case AF_INET:
++		if (sk->sk_type == SOCK_RAW)
++			return SKNLGRP_NONE;
++
+ 		switch (sk->sk_protocol) {
+ 		case IPPROTO_TCP:
+ 			return SKNLGRP_INET_TCP_DESTROY;
+@@ -45,6 +48,9 @@ enum sknetlink_groups sock_diag_destroy_group(const struct sock *sk)
+ 			return SKNLGRP_NONE;
+ 		}
+ 	case AF_INET6:
++		if (sk->sk_type == SOCK_RAW)
++			return SKNLGRP_NONE;
++
+ 		switch (sk->sk_protocol) {
+ 		case IPPROTO_TCP:
+ 			return SKNLGRP_INET6_TCP_DESTROY;
 diff --git a/include/linux/splice.h b/include/linux/splice.h
 index da2751d..2e0fca6 100644
 --- a/include/linux/splice.h
@@ -130266,6 +131899,19 @@ index 435c14a..a80d56dc 100644
 +	t3 = tsk_seruntime(tsk);
  
  	d->cpu_count += t1;
+ 
+diff --git a/kernel/events/core.c b/kernel/events/core.c
+index c0ded24..a69c90c 100644
+--- a/kernel/events/core.c
++++ b/kernel/events/core.c
+@@ -7143,7 +7143,7 @@ static void perf_event_free_bpf_prog(struct perf_event *event)
+ 	prog = event->tp_event->prog;
+ 	if (prog) {
+ 		event->tp_event->prog = NULL;
+-		bpf_prog_put(prog);
++		bpf_prog_put_rcu(prog);
+ 	}
+ }
  
 diff --git a/kernel/exit.c b/kernel/exit.c
 index fd90195..11c33c5 100644
@@ -139151,6 +140797,94 @@ index 366ce35..1155a68 100644
  }
  
  /*
+diff --git a/net/ax25/af_ax25.c b/net/ax25/af_ax25.c
+index fbd0acf..2fdebab 100644
+--- a/net/ax25/af_ax25.c
++++ b/net/ax25/af_ax25.c
+@@ -976,7 +976,8 @@ static int ax25_release(struct socket *sock)
+ 			release_sock(sk);
+ 			ax25_disconnect(ax25, 0);
+ 			lock_sock(sk);
+-			ax25_destroy_socket(ax25);
++			if (!sock_flag(ax25->sk, SOCK_DESTROY))
++				ax25_destroy_socket(ax25);
+ 			break;
+ 
+ 		case AX25_STATE_3:
+diff --git a/net/ax25/ax25_ds_timer.c b/net/ax25/ax25_ds_timer.c
+index 951cd57..5237dff 100644
+--- a/net/ax25/ax25_ds_timer.c
++++ b/net/ax25/ax25_ds_timer.c
+@@ -102,6 +102,7 @@ void ax25_ds_heartbeat_expiry(ax25_cb *ax25)
+ 	switch (ax25->state) {
+ 
+ 	case AX25_STATE_0:
++	case AX25_STATE_2:
+ 		/* Magic here: If we listen() and a new link dies before it
+ 		   is accepted() it isn't 'dead' so doesn't get removed. */
+ 		if (!sk || sock_flag(sk, SOCK_DESTROY) ||
+@@ -111,6 +112,7 @@ void ax25_ds_heartbeat_expiry(ax25_cb *ax25)
+ 				sock_hold(sk);
+ 				ax25_destroy_socket(ax25);
+ 				bh_unlock_sock(sk);
++				/* Ungrab socket and destroy it */
+ 				sock_put(sk);
+ 			} else
+ 				ax25_destroy_socket(ax25);
+@@ -213,7 +215,8 @@ void ax25_ds_t1_timeout(ax25_cb *ax25)
+ 	case AX25_STATE_2:
+ 		if (ax25->n2count == ax25->n2) {
+ 			ax25_send_control(ax25, AX25_DISC, AX25_POLLON, AX25_COMMAND);
+-			ax25_disconnect(ax25, ETIMEDOUT);
++			if (!sock_flag(ax25->sk, SOCK_DESTROY))
++				ax25_disconnect(ax25, ETIMEDOUT);
+ 			return;
+ 		} else {
+ 			ax25->n2count++;
+diff --git a/net/ax25/ax25_std_timer.c b/net/ax25/ax25_std_timer.c
+index 004467c9..2c0d6ef 100644
+--- a/net/ax25/ax25_std_timer.c
++++ b/net/ax25/ax25_std_timer.c
+@@ -38,6 +38,7 @@ void ax25_std_heartbeat_expiry(ax25_cb *ax25)
+ 
+ 	switch (ax25->state) {
+ 	case AX25_STATE_0:
++	case AX25_STATE_2:
+ 		/* Magic here: If we listen() and a new link dies before it
+ 		   is accepted() it isn't 'dead' so doesn't get removed. */
+ 		if (!sk || sock_flag(sk, SOCK_DESTROY) ||
+@@ -47,6 +48,7 @@ void ax25_std_heartbeat_expiry(ax25_cb *ax25)
+ 				sock_hold(sk);
+ 				ax25_destroy_socket(ax25);
+ 				bh_unlock_sock(sk);
++				/* Ungrab socket and destroy it */
+ 				sock_put(sk);
+ 			} else
+ 				ax25_destroy_socket(ax25);
+@@ -144,7 +146,8 @@ void ax25_std_t1timer_expiry(ax25_cb *ax25)
+ 	case AX25_STATE_2:
+ 		if (ax25->n2count == ax25->n2) {
+ 			ax25_send_control(ax25, AX25_DISC, AX25_POLLON, AX25_COMMAND);
+-			ax25_disconnect(ax25, ETIMEDOUT);
++			if (!sock_flag(ax25->sk, SOCK_DESTROY))
++				ax25_disconnect(ax25, ETIMEDOUT);
+ 			return;
+ 		} else {
+ 			ax25->n2count++;
+diff --git a/net/ax25/ax25_subr.c b/net/ax25/ax25_subr.c
+index 3b78e84..655a7d4 100644
+--- a/net/ax25/ax25_subr.c
++++ b/net/ax25/ax25_subr.c
+@@ -264,7 +264,8 @@ void ax25_disconnect(ax25_cb *ax25, int reason)
+ {
+ 	ax25_clear_queues(ax25);
+ 
+-	ax25_stop_heartbeat(ax25);
++	if (!sock_flag(ax25->sk, SOCK_DESTROY))
++		ax25_stop_heartbeat(ax25);
+ 	ax25_stop_t1timer(ax25);
+ 	ax25_stop_t2timer(ax25);
+ 	ax25_stop_t3timer(ax25);
 diff --git a/net/batman-adv/bat_v_ogm.c b/net/batman-adv/bat_v_ogm.c
 index d9bcbe6..91df28a 100644
 --- a/net/batman-adv/bat_v_ogm.c
@@ -139220,6 +140954,82 @@ index dcea4f4..c18080a 100644
  		f = __br_fdb_get(br, br->dev->dev_addr, v->vid);
  		if (f && f->is_local && !f->dst)
  			fdb_delete_local(br, NULL, f);
+diff --git a/net/bridge/br_multicast.c b/net/bridge/br_multicast.c
+index 6852f3c..4384414 100644
+--- a/net/bridge/br_multicast.c
++++ b/net/bridge/br_multicast.c
+@@ -464,8 +464,11 @@ static struct sk_buff *br_ip6_multicast_alloc_query(struct net_bridge *br,
+ 	if (ipv6_dev_get_saddr(dev_net(br->dev), br->dev, &ip6h->daddr, 0,
+ 			       &ip6h->saddr)) {
+ 		kfree_skb(skb);
++		br->has_ipv6_addr = 0;
+ 		return NULL;
+ 	}
++
++	br->has_ipv6_addr = 1;
+ 	ipv6_eth_mc_map(&ip6h->daddr, eth->h_dest);
+ 
+ 	hopopt = (u8 *)(ip6h + 1);
+@@ -1745,6 +1748,7 @@ void br_multicast_init(struct net_bridge *br)
+ 	br->ip6_other_query.delay_time = 0;
+ 	br->ip6_querier.port = NULL;
+ #endif
++	br->has_ipv6_addr = 1;
+ 
+ 	spin_lock_init(&br->multicast_lock);
+ 	setup_timer(&br->multicast_router_timer,
+diff --git a/net/bridge/br_private.h b/net/bridge/br_private.h
+index d9da857..f516c53 100644
+--- a/net/bridge/br_private.h
++++ b/net/bridge/br_private.h
+@@ -304,6 +304,7 @@ struct net_bridge
+ 	u8				multicast_disabled:1;
+ 	u8				multicast_querier:1;
+ 	u8				multicast_query_use_ifaddr:1;
++	u8				has_ipv6_addr:1;
+ 
+ 	u32				hash_elasticity;
+ 	u32				hash_max;
+@@ -577,10 +578,22 @@ static inline bool br_multicast_is_router(struct net_bridge *br)
+ 
+ static inline bool
+ __br_multicast_querier_exists(struct net_bridge *br,
+-			      struct bridge_mcast_other_query *querier)
++				struct bridge_mcast_other_query *querier,
++				const bool is_ipv6)
+ {
++	bool own_querier_enabled;
++
++	if (br->multicast_querier) {
++		if (is_ipv6 && !br->has_ipv6_addr)
++			own_querier_enabled = false;
++		else
++			own_querier_enabled = true;
++	} else {
++		own_querier_enabled = false;
++	}
++
+ 	return time_is_before_jiffies(querier->delay_time) &&
+-	       (br->multicast_querier || timer_pending(&querier->timer));
++	       (own_querier_enabled || timer_pending(&querier->timer));
+ }
+ 
+ static inline bool br_multicast_querier_exists(struct net_bridge *br,
+@@ -588,10 +601,12 @@ static inline bool br_multicast_querier_exists(struct net_bridge *br,
+ {
+ 	switch (eth->h_proto) {
+ 	case (htons(ETH_P_IP)):
+-		return __br_multicast_querier_exists(br, &br->ip4_other_query);
++		return __br_multicast_querier_exists(br,
++			&br->ip4_other_query, false);
+ #if IS_ENABLED(CONFIG_IPV6)
+ 	case (htons(ETH_P_IPV6)):
+-		return __br_multicast_querier_exists(br, &br->ip6_other_query);
++		return __br_multicast_querier_exists(br,
++			&br->ip6_other_query, true);
+ #endif
+ 	default:
+ 		return false;
 diff --git a/net/core/hwbm.c b/net/core/hwbm.c
 index 941c284..2cab489 100644
 --- a/net/core/hwbm.c
@@ -139246,6 +141056,29 @@ index 941c284..2cab489 100644
  		return 0;
  	}
  
+diff --git a/net/core/neighbour.c b/net/core/neighbour.c
+index f18ae91..769cece 100644
+--- a/net/core/neighbour.c
++++ b/net/core/neighbour.c
+@@ -2467,13 +2467,17 @@ int neigh_xmit(int index, struct net_device *dev,
+ 		tbl = neigh_tables[index];
+ 		if (!tbl)
+ 			goto out;
++		rcu_read_lock_bh();
+ 		neigh = __neigh_lookup_noref(tbl, addr, dev);
+ 		if (!neigh)
+ 			neigh = __neigh_create(tbl, addr, dev, false);
+ 		err = PTR_ERR(neigh);
+-		if (IS_ERR(neigh))
++		if (IS_ERR(neigh)) {
++			rcu_read_unlock_bh();
+ 			goto out_kfree_skb;
++		}
+ 		err = neigh->output(neigh, skb);
++		rcu_read_unlock_bh();
+ 	}
+ 	else if (index == NEIGH_LINK_TABLE) {
+ 		err = dev_hard_header(skb, dev, ntohs(skb->protocol),
 diff --git a/net/ipv4/Kconfig b/net/ipv4/Kconfig
 index 238225b..3d3d85d 100644
 --- a/net/ipv4/Kconfig
@@ -139286,6 +141119,1178 @@ index 9e48199..7ad0e56 100644
 +
  	return 0;
  }
+ 
+diff --git a/net/ipv4/esp4.c b/net/ipv4/esp4.c
+index 4779374..d95631d 100644
+--- a/net/ipv4/esp4.c
++++ b/net/ipv4/esp4.c
+@@ -23,6 +23,11 @@ struct esp_skb_cb {
+ 	void *tmp;
+ };
+ 
++struct esp_output_extra {
++	__be32 seqhi;
++	u32 esphoff;
++};
++
+ #define ESP_SKB_CB(__skb) ((struct esp_skb_cb *)&((__skb)->cb[0]))
+ 
+ static u32 esp4_get_mtu(struct xfrm_state *x, int mtu);
+@@ -35,11 +40,11 @@ static u32 esp4_get_mtu(struct xfrm_state *x, int mtu);
+  *
+  * TODO: Use spare space in skb for this where possible.
+  */
+-static void *esp_alloc_tmp(struct crypto_aead *aead, int nfrags, int seqhilen)
++static void *esp_alloc_tmp(struct crypto_aead *aead, int nfrags, int extralen)
+ {
+ 	unsigned int len;
+ 
+-	len = seqhilen;
++	len = extralen;
+ 
+ 	len += crypto_aead_ivsize(aead);
+ 
+@@ -57,15 +62,16 @@ static void *esp_alloc_tmp(struct crypto_aead *aead, int nfrags, int seqhilen)
+ 	return kmalloc(len, GFP_ATOMIC);
+ }
+ 
+-static inline __be32 *esp_tmp_seqhi(void *tmp)
++static inline void *esp_tmp_extra(void *tmp)
+ {
+-	return PTR_ALIGN((__be32 *)tmp, __alignof__(__be32));
++	return PTR_ALIGN(tmp, __alignof__(struct esp_output_extra));
+ }
+-static inline u8 *esp_tmp_iv(struct crypto_aead *aead, void *tmp, int seqhilen)
++
++static inline u8 *esp_tmp_iv(struct crypto_aead *aead, void *tmp, int extralen)
+ {
+ 	return crypto_aead_ivsize(aead) ?
+-	       PTR_ALIGN((u8 *)tmp + seqhilen,
+-			 crypto_aead_alignmask(aead) + 1) : tmp + seqhilen;
++	       PTR_ALIGN((u8 *)tmp + extralen,
++			 crypto_aead_alignmask(aead) + 1) : tmp + extralen;
+ }
+ 
+ static inline struct aead_request *esp_tmp_req(struct crypto_aead *aead, u8 *iv)
+@@ -99,7 +105,7 @@ static void esp_restore_header(struct sk_buff *skb, unsigned int offset)
+ {
+ 	struct ip_esp_hdr *esph = (void *)(skb->data + offset);
+ 	void *tmp = ESP_SKB_CB(skb)->tmp;
+-	__be32 *seqhi = esp_tmp_seqhi(tmp);
++	__be32 *seqhi = esp_tmp_extra(tmp);
+ 
+ 	esph->seq_no = esph->spi;
+ 	esph->spi = *seqhi;
+@@ -107,7 +113,11 @@ static void esp_restore_header(struct sk_buff *skb, unsigned int offset)
+ 
+ static void esp_output_restore_header(struct sk_buff *skb)
+ {
+-	esp_restore_header(skb, skb_transport_offset(skb) - sizeof(__be32));
++	void *tmp = ESP_SKB_CB(skb)->tmp;
++	struct esp_output_extra *extra = esp_tmp_extra(tmp);
++
++	esp_restore_header(skb, skb_transport_offset(skb) + extra->esphoff -
++				sizeof(__be32));
+ }
+ 
+ static void esp_output_done_esn(struct crypto_async_request *base, int err)
+@@ -121,6 +131,7 @@ static void esp_output_done_esn(struct crypto_async_request *base, int err)
+ static int esp_output(struct xfrm_state *x, struct sk_buff *skb)
+ {
+ 	int err;
++	struct esp_output_extra *extra;
+ 	struct ip_esp_hdr *esph;
+ 	struct crypto_aead *aead;
+ 	struct aead_request *req;
+@@ -137,8 +148,7 @@ static int esp_output(struct xfrm_state *x, struct sk_buff *skb)
+ 	int tfclen;
+ 	int nfrags;
+ 	int assoclen;
+-	int seqhilen;
+-	__be32 *seqhi;
++	int extralen;
+ 	__be64 seqno;
+ 
+ 	/* skb is pure payload to encrypt */
+@@ -166,21 +176,21 @@ static int esp_output(struct xfrm_state *x, struct sk_buff *skb)
+ 	nfrags = err;
+ 
+ 	assoclen = sizeof(*esph);
+-	seqhilen = 0;
++	extralen = 0;
+ 
+ 	if (x->props.flags & XFRM_STATE_ESN) {
+-		seqhilen += sizeof(__be32);
+-		assoclen += seqhilen;
++		extralen += sizeof(*extra);
++		assoclen += sizeof(__be32);
+ 	}
+ 
+-	tmp = esp_alloc_tmp(aead, nfrags, seqhilen);
++	tmp = esp_alloc_tmp(aead, nfrags, extralen);
+ 	if (!tmp) {
+ 		err = -ENOMEM;
+ 		goto error;
+ 	}
+ 
+-	seqhi = esp_tmp_seqhi(tmp);
+-	iv = esp_tmp_iv(aead, tmp, seqhilen);
++	extra = esp_tmp_extra(tmp);
++	iv = esp_tmp_iv(aead, tmp, extralen);
+ 	req = esp_tmp_req(aead, iv);
+ 	sg = esp_req_sg(aead, req);
+ 
+@@ -247,8 +257,10 @@ static int esp_output(struct xfrm_state *x, struct sk_buff *skb)
+ 	 * encryption.
+ 	 */
+ 	if ((x->props.flags & XFRM_STATE_ESN)) {
+-		esph = (void *)(skb_transport_header(skb) - sizeof(__be32));
+-		*seqhi = esph->spi;
++		extra->esphoff = (unsigned char *)esph -
++				 skb_transport_header(skb);
++		esph = (struct ip_esp_hdr *)((unsigned char *)esph - 4);
++		extra->seqhi = esph->spi;
+ 		esph->seq_no = htonl(XFRM_SKB_CB(skb)->seq.output.hi);
+ 		aead_request_set_callback(req, 0, esp_output_done_esn, skb);
+ 	}
+@@ -445,7 +457,7 @@ static int esp_input(struct xfrm_state *x, struct sk_buff *skb)
+ 		goto out;
+ 
+ 	ESP_SKB_CB(skb)->tmp = tmp;
+-	seqhi = esp_tmp_seqhi(tmp);
++	seqhi = esp_tmp_extra(tmp);
+ 	iv = esp_tmp_iv(aead, tmp, seqhilen);
+ 	req = esp_tmp_req(aead, iv);
+ 	sg = esp_req_sg(aead, req);
+diff --git a/net/ipv4/ipmr.c b/net/ipv4/ipmr.c
+index 395e281..a42dd80 100644
+--- a/net/ipv4/ipmr.c
++++ b/net/ipv4/ipmr.c
+@@ -891,8 +891,10 @@ static struct mfc_cache *ipmr_cache_alloc(void)
+ {
+ 	struct mfc_cache *c = kmem_cache_zalloc(mrt_cachep, GFP_KERNEL);
+ 
+-	if (c)
++	if (c) {
++		c->mfc_un.res.last_assert = jiffies - MFC_ASSERT_THRESH - 1;
+ 		c->mfc_un.res.minvif = MAXVIFS;
++	}
+ 	return c;
+ }
+ 
+diff --git a/net/ipv4/netfilter/arp_tables.c b/net/ipv4/netfilter/arp_tables.c
+index 4133b0f..85d60c6 100644
+--- a/net/ipv4/netfilter/arp_tables.c
++++ b/net/ipv4/netfilter/arp_tables.c
+@@ -367,6 +367,18 @@ static inline bool unconditional(const struct arpt_entry *e)
+ 	       memcmp(&e->arp, &uncond, sizeof(uncond)) == 0;
+ }
+ 
++static bool find_jump_target(const struct xt_table_info *t,
++			     const struct arpt_entry *target)
++{
++	struct arpt_entry *iter;
++
++	xt_entry_foreach(iter, t->entries, t->size) {
++		 if (iter == target)
++			return true;
++	}
++	return false;
++}
++
+ /* Figures out from what hook each rule can be called: returns 0 if
+  * there are loops.  Puts hook bitmask in comefrom.
+  */
+@@ -439,6 +451,8 @@ static int mark_source_chains(const struct xt_table_info *newinfo,
+ 				size = e->next_offset;
+ 				e = (struct arpt_entry *)
+ 					(entry0 + pos + size);
++				if (pos + size >= newinfo->size)
++					return 0;
+ 				e->counters.pcnt = pos;
+ 				pos += size;
+ 			} else {
+@@ -458,9 +472,15 @@ static int mark_source_chains(const struct xt_table_info *newinfo,
+ 					/* This a jump; chase it. */
+ 					duprintf("Jump rule %u -> %u\n",
+ 						 pos, newpos);
++					e = (struct arpt_entry *)
++						(entry0 + newpos);
++					if (!find_jump_target(newinfo, e))
++						return 0;
+ 				} else {
+ 					/* ... this is a fallthru */
+ 					newpos = pos + e->next_offset;
++					if (newpos >= newinfo->size)
++						return 0;
+ 				}
+ 				e = (struct arpt_entry *)
+ 					(entry0 + newpos);
+@@ -474,23 +494,6 @@ next:
+ 	return 1;
+ }
+ 
+-static inline int check_entry(const struct arpt_entry *e)
+-{
+-	const struct xt_entry_target *t;
+-
+-	if (!arp_checkentry(&e->arp))
+-		return -EINVAL;
+-
+-	if (e->target_offset + sizeof(struct xt_entry_target) > e->next_offset)
+-		return -EINVAL;
+-
+-	t = arpt_get_target_c(e);
+-	if (e->target_offset + t->u.target_size > e->next_offset)
+-		return -EINVAL;
+-
+-	return 0;
+-}
+-
+ static inline int check_target(struct arpt_entry *e, const char *name)
+ {
+ 	struct xt_entry_target *t = arpt_get_target(e);
+@@ -586,7 +589,11 @@ static inline int check_entry_size_and_hooks(struct arpt_entry *e,
+ 		return -EINVAL;
+ 	}
+ 
+-	err = check_entry(e);
++	if (!arp_checkentry(&e->arp))
++		return -EINVAL;
++
++	err = xt_check_entry_offsets(e, e->elems, e->target_offset,
++				     e->next_offset);
+ 	if (err)
+ 		return err;
+ 
+@@ -691,10 +698,8 @@ static int translate_table(struct xt_table_info *newinfo, void *entry0,
+ 		}
+ 	}
+ 
+-	if (!mark_source_chains(newinfo, repl->valid_hooks, entry0)) {
+-		duprintf("Looping hook\n");
++	if (!mark_source_chains(newinfo, repl->valid_hooks, entry0))
+ 		return -ELOOP;
+-	}
+ 
+ 	/* Finally, each sanity check must pass */
+ 	i = 0;
+@@ -1126,55 +1131,17 @@ static int do_add_counters(struct net *net, const void __user *user,
+ 	unsigned int i;
+ 	struct xt_counters_info tmp;
+ 	struct xt_counters *paddc;
+-	unsigned int num_counters;
+-	const char *name;
+-	int size;
+-	void *ptmp;
+ 	struct xt_table *t;
+ 	const struct xt_table_info *private;
+ 	int ret = 0;
+ 	struct arpt_entry *iter;
+ 	unsigned int addend;
+-#ifdef CONFIG_COMPAT
+-	struct compat_xt_counters_info compat_tmp;
+ 
+-	if (compat) {
+-		ptmp = &compat_tmp;
+-		size = sizeof(struct compat_xt_counters_info);
+-	} else
+-#endif
+-	{
+-		ptmp = &tmp;
+-		size = sizeof(struct xt_counters_info);
+-	}
++	paddc = xt_copy_counters_from_user(user, len, &tmp, compat);
++	if (IS_ERR(paddc))
++		return PTR_ERR(paddc);
+ 
+-	if (copy_from_user(ptmp, user, size) != 0)
+-		return -EFAULT;
+-
+-#ifdef CONFIG_COMPAT
+-	if (compat) {
+-		num_counters = compat_tmp.num_counters;
+-		name = compat_tmp.name;
+-	} else
+-#endif
+-	{
+-		num_counters = tmp.num_counters;
+-		name = tmp.name;
+-	}
+-
+-	if (len != size + num_counters * sizeof(struct xt_counters))
+-		return -EINVAL;
+-
+-	paddc = vmalloc(len - size);
+-	if (!paddc)
+-		return -ENOMEM;
+-
+-	if (copy_from_user(paddc, user + size, len - size) != 0) {
+-		ret = -EFAULT;
+-		goto free;
+-	}
+-
+-	t = xt_find_table_lock(net, NFPROTO_ARP, name);
++	t = xt_find_table_lock(net, NFPROTO_ARP, tmp.name);
+ 	if (IS_ERR_OR_NULL(t)) {
+ 		ret = t ? PTR_ERR(t) : -ENOENT;
+ 		goto free;
+@@ -1182,7 +1149,7 @@ static int do_add_counters(struct net *net, const void __user *user,
+ 
+ 	local_bh_disable();
+ 	private = t->private;
+-	if (private->number != num_counters) {
++	if (private->number != tmp.num_counters) {
+ 		ret = -EINVAL;
+ 		goto unlock_up_free;
+ 	}
+@@ -1209,6 +1176,18 @@ static int do_add_counters(struct net *net, const void __user *user,
+ }
+ 
+ #ifdef CONFIG_COMPAT
++struct compat_arpt_replace {
++	char				name[XT_TABLE_MAXNAMELEN];
++	u32				valid_hooks;
++	u32				num_entries;
++	u32				size;
++	u32				hook_entry[NF_ARP_NUMHOOKS];
++	u32				underflow[NF_ARP_NUMHOOKS];
++	u32				num_counters;
++	compat_uptr_t			counters;
++	struct compat_arpt_entry	entries[0];
++};
++
+ static inline void compat_release_entry(struct compat_arpt_entry *e)
+ {
+ 	struct xt_entry_target *t;
+@@ -1217,20 +1196,17 @@ static inline void compat_release_entry(struct compat_arpt_entry *e)
+ 	module_put(t->u.kernel.target->me);
+ }
+ 
+-static inline int
++static int
+ check_compat_entry_size_and_hooks(struct compat_arpt_entry *e,
+ 				  struct xt_table_info *newinfo,
+ 				  unsigned int *size,
+ 				  const unsigned char *base,
+-				  const unsigned char *limit,
+-				  const unsigned int *hook_entries,
+-				  const unsigned int *underflows,
+-				  const char *name)
++				  const unsigned char *limit)
+ {
+ 	struct xt_entry_target *t;
+ 	struct xt_target *target;
+ 	unsigned int entry_offset;
+-	int ret, off, h;
++	int ret, off;
+ 
+ 	duprintf("check_compat_entry_size_and_hooks %p\n", e);
+ 	if ((unsigned long)e % __alignof__(struct compat_arpt_entry) != 0 ||
+@@ -1247,8 +1223,11 @@ check_compat_entry_size_and_hooks(struct compat_arpt_entry *e,
+ 		return -EINVAL;
+ 	}
+ 
+-	/* For purposes of check_entry casting the compat entry is fine */
+-	ret = check_entry((struct arpt_entry *)e);
++	if (!arp_checkentry(&e->arp))
++		return -EINVAL;
++
++	ret = xt_compat_check_entry_offsets(e, e->elems, e->target_offset,
++					    e->next_offset);
+ 	if (ret)
+ 		return ret;
+ 
+@@ -1272,17 +1251,6 @@ check_compat_entry_size_and_hooks(struct compat_arpt_entry *e,
+ 	if (ret)
+ 		goto release_target;
+ 
+-	/* Check hooks & underflows */
+-	for (h = 0; h < NF_ARP_NUMHOOKS; h++) {
+-		if ((unsigned char *)e - base == hook_entries[h])
+-			newinfo->hook_entry[h] = hook_entries[h];
+-		if ((unsigned char *)e - base == underflows[h])
+-			newinfo->underflow[h] = underflows[h];
+-	}
+-
+-	/* Clear counters and comefrom */
+-	memset(&e->counters, 0, sizeof(e->counters));
+-	e->comefrom = 0;
+ 	return 0;
+ 
+ release_target:
+@@ -1291,18 +1259,17 @@ out:
+ 	return ret;
+ }
+ 
+-static int
++static void
+ compat_copy_entry_from_user(struct compat_arpt_entry *e, void **dstptr,
+-			    unsigned int *size, const char *name,
++			    unsigned int *size,
+ 			    struct xt_table_info *newinfo, unsigned char *base)
+ {
+ 	struct xt_entry_target *t;
+ 	struct xt_target *target;
+ 	struct arpt_entry *de;
+ 	unsigned int origsize;
+-	int ret, h;
++	int h;
+ 
+-	ret = 0;
+ 	origsize = *size;
+ 	de = (struct arpt_entry *)*dstptr;
+ 	memcpy(de, e, sizeof(struct arpt_entry));
+@@ -1323,148 +1290,82 @@ compat_copy_entry_from_user(struct compat_arpt_entry *e, void **dstptr,
+ 		if ((unsigned char *)de - base < newinfo->underflow[h])
+ 			newinfo->underflow[h] -= origsize - *size;
+ 	}
+-	return ret;
+ }
+ 
+-static int translate_compat_table(const char *name,
+-				  unsigned int valid_hooks,
+-				  struct xt_table_info **pinfo,
++static int translate_compat_table(struct xt_table_info **pinfo,
+ 				  void **pentry0,
+-				  unsigned int total_size,
+-				  unsigned int number,
+-				  unsigned int *hook_entries,
+-				  unsigned int *underflows)
++				  const struct compat_arpt_replace *compatr)
+ {
+ 	unsigned int i, j;
+ 	struct xt_table_info *newinfo, *info;
+ 	void *pos, *entry0, *entry1;
+ 	struct compat_arpt_entry *iter0;
+-	struct arpt_entry *iter1;
++	struct arpt_replace repl;
+ 	unsigned int size;
+ 	int ret = 0;
+ 
+ 	info = *pinfo;
+ 	entry0 = *pentry0;
+-	size = total_size;
+-	info->number = number;
+-
+-	/* Init all hooks to impossible value. */
+-	for (i = 0; i < NF_ARP_NUMHOOKS; i++) {
+-		info->hook_entry[i] = 0xFFFFFFFF;
+-		info->underflow[i] = 0xFFFFFFFF;
+-	}
++	size = compatr->size;
++	info->number = compatr->num_entries;
+ 
+ 	duprintf("translate_compat_table: size %u\n", info->size);
+ 	j = 0;
+ 	xt_compat_lock(NFPROTO_ARP);
+-	xt_compat_init_offsets(NFPROTO_ARP, number);
++	xt_compat_init_offsets(NFPROTO_ARP, compatr->num_entries);
+ 	/* Walk through entries, checking offsets. */
+-	xt_entry_foreach(iter0, entry0, total_size) {
++	xt_entry_foreach(iter0, entry0, compatr->size) {
+ 		ret = check_compat_entry_size_and_hooks(iter0, info, &size,
+ 							entry0,
+-							entry0 + total_size,
+-							hook_entries,
+-							underflows,
+-							name);
++							entry0 + compatr->size);
+ 		if (ret != 0)
+ 			goto out_unlock;
+ 		++j;
+ 	}
+ 
+ 	ret = -EINVAL;
+-	if (j != number) {
++	if (j != compatr->num_entries) {
+ 		duprintf("translate_compat_table: %u not %u entries\n",
+-			 j, number);
++			 j, compatr->num_entries);
+ 		goto out_unlock;
+ 	}
+ 
+-	/* Check hooks all assigned */
+-	for (i = 0; i < NF_ARP_NUMHOOKS; i++) {
+-		/* Only hooks which are valid */
+-		if (!(valid_hooks & (1 << i)))
+-			continue;
+-		if (info->hook_entry[i] == 0xFFFFFFFF) {
+-			duprintf("Invalid hook entry %u %u\n",
+-				 i, hook_entries[i]);
+-			goto out_unlock;
+-		}
+-		if (info->underflow[i] == 0xFFFFFFFF) {
+-			duprintf("Invalid underflow %u %u\n",
+-				 i, underflows[i]);
+-			goto out_unlock;
+-		}
+-	}
+-
+ 	ret = -ENOMEM;
+ 	newinfo = xt_alloc_table_info(size);
+ 	if (!newinfo)
+ 		goto out_unlock;
+ 
+-	newinfo->number = number;
++	newinfo->number = compatr->num_entries;
+ 	for (i = 0; i < NF_ARP_NUMHOOKS; i++) {
+ 		newinfo->hook_entry[i] = info->hook_entry[i];
+ 		newinfo->underflow[i] = info->underflow[i];
+ 	}
+ 	entry1 = newinfo->entries;
+ 	pos = entry1;
+-	size = total_size;
+-	xt_entry_foreach(iter0, entry0, total_size) {
+-		ret = compat_copy_entry_from_user(iter0, &pos, &size,
+-						  name, newinfo, entry1);
+-		if (ret != 0)
+-			break;
+-	}
++	size = compatr->size;
++	xt_entry_foreach(iter0, entry0, compatr->size)
++		compat_copy_entry_from_user(iter0, &pos, &size,
++					    newinfo, entry1);
++
++	/* all module references in entry0 are now gone */
++
+ 	xt_compat_flush_offsets(NFPROTO_ARP);
+ 	xt_compat_unlock(NFPROTO_ARP);
+-	if (ret)
+-		goto free_newinfo;
+ 
+-	ret = -ELOOP;
+-	if (!mark_source_chains(newinfo, valid_hooks, entry1))
+-		goto free_newinfo;
++	memcpy(&repl, compatr, sizeof(*compatr));
+ 
+-	i = 0;
+-	xt_entry_foreach(iter1, entry1, newinfo->size) {
+-		iter1->counters.pcnt = xt_percpu_counter_alloc();
+-		if (IS_ERR_VALUE(iter1->counters.pcnt)) {
+-			ret = -ENOMEM;
+-			break;
+-		}
+-
+-		ret = check_target(iter1, name);
+-		if (ret != 0) {
+-			xt_percpu_counter_free(iter1->counters.pcnt);
+-			break;
+-		}
+-		++i;
+-		if (strcmp(arpt_get_target(iter1)->u.user.name,
+-		    XT_ERROR_TARGET) == 0)
+-			++newinfo->stacksize;
+-	}
+-	if (ret) {
+-		/*
+-		 * The first i matches need cleanup_entry (calls ->destroy)
+-		 * because they had called ->check already. The other j-i
+-		 * entries need only release.
+-		 */
+-		int skip = i;
+-		j -= i;
+-		xt_entry_foreach(iter0, entry0, newinfo->size) {
+-			if (skip-- > 0)
+-				continue;
+-			if (j-- == 0)
+-				break;
+-			compat_release_entry(iter0);
+-		}
+-		xt_entry_foreach(iter1, entry1, newinfo->size) {
+-			if (i-- == 0)
+-				break;
+-			cleanup_entry(iter1);
+-		}
+-		xt_free_table_info(newinfo);
+-		return ret;
++	for (i = 0; i < NF_ARP_NUMHOOKS; i++) {
++		repl.hook_entry[i] = newinfo->hook_entry[i];
++		repl.underflow[i] = newinfo->underflow[i];
+ 	}
+ 
++	repl.num_counters = 0;
++	repl.counters = NULL;
++	repl.size = newinfo->size;
++	ret = translate_table(newinfo, entry1, &repl);
++	if (ret)
++		goto free_newinfo;
++
+ 	*pinfo = newinfo;
+ 	*pentry0 = entry1;
+ 	xt_free_table_info(info);
+@@ -1472,31 +1373,18 @@ static int translate_compat_table(const char *name,
+ 
+ free_newinfo:
+ 	xt_free_table_info(newinfo);
+-out:
+-	xt_entry_foreach(iter0, entry0, total_size) {
++	return ret;
++out_unlock:
++	xt_compat_flush_offsets(NFPROTO_ARP);
++	xt_compat_unlock(NFPROTO_ARP);
++	xt_entry_foreach(iter0, entry0, compatr->size) {
+ 		if (j-- == 0)
+ 			break;
+ 		compat_release_entry(iter0);
+ 	}
+ 	return ret;
+-out_unlock:
+-	xt_compat_flush_offsets(NFPROTO_ARP);
+-	xt_compat_unlock(NFPROTO_ARP);
+-	goto out;
+ }
+ 
+-struct compat_arpt_replace {
+-	char				name[XT_TABLE_MAXNAMELEN];
+-	u32				valid_hooks;
+-	u32				num_entries;
+-	u32				size;
+-	u32				hook_entry[NF_ARP_NUMHOOKS];
+-	u32				underflow[NF_ARP_NUMHOOKS];
+-	u32				num_counters;
+-	compat_uptr_t			counters;
+-	struct compat_arpt_entry	entries[0];
+-};
+-
+ static int compat_do_replace(struct net *net, void __user *user,
+ 			     unsigned int len)
+ {
+@@ -1529,10 +1417,7 @@ static int compat_do_replace(struct net *net, void __user *user,
+ 		goto free_newinfo;
+ 	}
+ 
+-	ret = translate_compat_table(tmp.name, tmp.valid_hooks,
+-				     &newinfo, &loc_cpu_entry, tmp.size,
+-				     tmp.num_entries, tmp.hook_entry,
+-				     tmp.underflow);
++	ret = translate_compat_table(&newinfo, &loc_cpu_entry, &tmp);
+ 	if (ret != 0)
+ 		goto free_newinfo;
+ 
+diff --git a/net/ipv4/netfilter/ip_tables.c b/net/ipv4/netfilter/ip_tables.c
+index 631c100..0984ea3 100644
+--- a/net/ipv4/netfilter/ip_tables.c
++++ b/net/ipv4/netfilter/ip_tables.c
+@@ -443,6 +443,18 @@ ipt_do_table(struct sk_buff *skb,
+ #endif
+ }
+ 
++static bool find_jump_target(const struct xt_table_info *t,
++			     const struct ipt_entry *target)
++{
++	struct ipt_entry *iter;
++
++	xt_entry_foreach(iter, t->entries, t->size) {
++		 if (iter == target)
++			return true;
++	}
++	return false;
++}
++
+ /* Figures out from what hook each rule can be called: returns 0 if
+    there are loops.  Puts hook bitmask in comefrom. */
+ static int
+@@ -520,6 +532,8 @@ mark_source_chains(const struct xt_table_info *newinfo,
+ 				size = e->next_offset;
+ 				e = (struct ipt_entry *)
+ 					(entry0 + pos + size);
++				if (pos + size >= newinfo->size)
++					return 0;
+ 				e->counters.pcnt = pos;
+ 				pos += size;
+ 			} else {
+@@ -538,9 +552,15 @@ mark_source_chains(const struct xt_table_info *newinfo,
+ 					/* This a jump; chase it. */
+ 					duprintf("Jump rule %u -> %u\n",
+ 						 pos, newpos);
++					e = (struct ipt_entry *)
++						(entry0 + newpos);
++					if (!find_jump_target(newinfo, e))
++						return 0;
+ 				} else {
+ 					/* ... this is a fallthru */
+ 					newpos = pos + e->next_offset;
++					if (newpos >= newinfo->size)
++						return 0;
+ 				}
+ 				e = (struct ipt_entry *)
+ 					(entry0 + newpos);
+@@ -568,25 +588,6 @@ static void cleanup_match(struct xt_entry_match *m, struct net *net)
+ }
+ 
+ static int
+-check_entry(const struct ipt_entry *e)
+-{
+-	const struct xt_entry_target *t;
+-
+-	if (!ip_checkentry(&e->ip))
+-		return -EINVAL;
+-
+-	if (e->target_offset + sizeof(struct xt_entry_target) >
+-	    e->next_offset)
+-		return -EINVAL;
+-
+-	t = ipt_get_target_c(e);
+-	if (e->target_offset + t->u.target_size > e->next_offset)
+-		return -EINVAL;
+-
+-	return 0;
+-}
+-
+-static int
+ check_match(struct xt_entry_match *m, struct xt_mtchk_param *par)
+ {
+ 	const struct ipt_ip *ip = par->entryinfo;
+@@ -750,7 +751,11 @@ check_entry_size_and_hooks(struct ipt_entry *e,
+ 		return -EINVAL;
+ 	}
+ 
+-	err = check_entry(e);
++	if (!ip_checkentry(&e->ip))
++		return -EINVAL;
++
++	err = xt_check_entry_offsets(e, e->elems, e->target_offset,
++				     e->next_offset);
+ 	if (err)
+ 		return err;
+ 
+@@ -1309,55 +1314,17 @@ do_add_counters(struct net *net, const void __user *user,
+ 	unsigned int i;
+ 	struct xt_counters_info tmp;
+ 	struct xt_counters *paddc;
+-	unsigned int num_counters;
+-	const char *name;
+-	int size;
+-	void *ptmp;
+ 	struct xt_table *t;
+ 	const struct xt_table_info *private;
+ 	int ret = 0;
+ 	struct ipt_entry *iter;
+ 	unsigned int addend;
+-#ifdef CONFIG_COMPAT
+-	struct compat_xt_counters_info compat_tmp;
+ 
+-	if (compat) {
+-		ptmp = &compat_tmp;
+-		size = sizeof(struct compat_xt_counters_info);
+-	} else
+-#endif
+-	{
+-		ptmp = &tmp;
+-		size = sizeof(struct xt_counters_info);
+-	}
+-
+-	if (copy_from_user(ptmp, user, size) != 0)
+-		return -EFAULT;
+-
+-#ifdef CONFIG_COMPAT
+-	if (compat) {
+-		num_counters = compat_tmp.num_counters;
+-		name = compat_tmp.name;
+-	} else
+-#endif
+-	{
+-		num_counters = tmp.num_counters;
+-		name = tmp.name;
+-	}
++	paddc = xt_copy_counters_from_user(user, len, &tmp, compat);
++	if (IS_ERR(paddc))
++		return PTR_ERR(paddc);
+ 
+-	if (len != size + num_counters * sizeof(struct xt_counters))
+-		return -EINVAL;
+-
+-	paddc = vmalloc(len - size);
+-	if (!paddc)
+-		return -ENOMEM;
+-
+-	if (copy_from_user(paddc, user + size, len - size) != 0) {
+-		ret = -EFAULT;
+-		goto free;
+-	}
+-
+-	t = xt_find_table_lock(net, AF_INET, name);
++	t = xt_find_table_lock(net, AF_INET, tmp.name);
+ 	if (IS_ERR_OR_NULL(t)) {
+ 		ret = t ? PTR_ERR(t) : -ENOENT;
+ 		goto free;
+@@ -1365,7 +1332,7 @@ do_add_counters(struct net *net, const void __user *user,
+ 
+ 	local_bh_disable();
+ 	private = t->private;
+-	if (private->number != num_counters) {
++	if (private->number != tmp.num_counters) {
+ 		ret = -EINVAL;
+ 		goto unlock_up_free;
+ 	}
+@@ -1444,7 +1411,6 @@ compat_copy_entry_to_user(struct ipt_entry *e, void __user **dstptr,
+ 
+ static int
+ compat_find_calc_match(struct xt_entry_match *m,
+-		       const char *name,
+ 		       const struct ipt_ip *ip,
+ 		       int *size)
+ {
+@@ -1479,17 +1445,14 @@ check_compat_entry_size_and_hooks(struct compat_ipt_entry *e,
+ 				  struct xt_table_info *newinfo,
+ 				  unsigned int *size,
+ 				  const unsigned char *base,
+-				  const unsigned char *limit,
+-				  const unsigned int *hook_entries,
+-				  const unsigned int *underflows,
+-				  const char *name)
++				  const unsigned char *limit)
+ {
+ 	struct xt_entry_match *ematch;
+ 	struct xt_entry_target *t;
+ 	struct xt_target *target;
+ 	unsigned int entry_offset;
+ 	unsigned int j;
+-	int ret, off, h;
++	int ret, off;
+ 
+ 	duprintf("check_compat_entry_size_and_hooks %p\n", e);
+ 	if ((unsigned long)e % __alignof__(struct compat_ipt_entry) != 0 ||
+@@ -1506,8 +1469,11 @@ check_compat_entry_size_and_hooks(struct compat_ipt_entry *e,
+ 		return -EINVAL;
+ 	}
+ 
+-	/* For purposes of check_entry casting the compat entry is fine */
+-	ret = check_entry((struct ipt_entry *)e);
++	if (!ip_checkentry(&e->ip))
++		return -EINVAL;
++
++	ret = xt_compat_check_entry_offsets(e, e->elems,
++					    e->target_offset, e->next_offset);
+ 	if (ret)
+ 		return ret;
+ 
+@@ -1515,7 +1481,7 @@ check_compat_entry_size_and_hooks(struct compat_ipt_entry *e,
+ 	entry_offset = (void *)e - (void *)base;
+ 	j = 0;
+ 	xt_ematch_foreach(ematch, e) {
+-		ret = compat_find_calc_match(ematch, name, &e->ip, &off);
++		ret = compat_find_calc_match(ematch, &e->ip, &off);
+ 		if (ret != 0)
+ 			goto release_matches;
+ 		++j;
+@@ -1538,17 +1504,6 @@ check_compat_entry_size_and_hooks(struct compat_ipt_entry *e,
+ 	if (ret)
+ 		goto out;
+ 
+-	/* Check hooks & underflows */
+-	for (h = 0; h < NF_INET_NUMHOOKS; h++) {
+-		if ((unsigned char *)e - base == hook_entries[h])
+-			newinfo->hook_entry[h] = hook_entries[h];
+-		if ((unsigned char *)e - base == underflows[h])
+-			newinfo->underflow[h] = underflows[h];
+-	}
+-
+-	/* Clear counters and comefrom */
+-	memset(&e->counters, 0, sizeof(e->counters));
+-	e->comefrom = 0;
+ 	return 0;
+ 
+ out:
+@@ -1562,19 +1517,18 @@ release_matches:
+ 	return ret;
+ }
+ 
+-static int
++static void
+ compat_copy_entry_from_user(struct compat_ipt_entry *e, void **dstptr,
+-			    unsigned int *size, const char *name,
++			    unsigned int *size,
+ 			    struct xt_table_info *newinfo, unsigned char *base)
+ {
+ 	struct xt_entry_target *t;
+ 	struct xt_target *target;
+ 	struct ipt_entry *de;
+ 	unsigned int origsize;
+-	int ret, h;
++	int h;
+ 	struct xt_entry_match *ematch;
+ 
+-	ret = 0;
+ 	origsize = *size;
+ 	de = (struct ipt_entry *)*dstptr;
+ 	memcpy(de, e, sizeof(struct ipt_entry));
+@@ -1583,201 +1537,105 @@ compat_copy_entry_from_user(struct compat_ipt_entry *e, void **dstptr,
+ 	*dstptr += sizeof(struct ipt_entry);
+ 	*size += sizeof(struct ipt_entry) - sizeof(struct compat_ipt_entry);
+ 
+-	xt_ematch_foreach(ematch, e) {
+-		ret = xt_compat_match_from_user(ematch, dstptr, size);
+-		if (ret != 0)
+-			return ret;
+-	}
++	xt_ematch_foreach(ematch, e)
++		xt_compat_match_from_user(ematch, dstptr, size);
++
+ 	de->target_offset = e->target_offset - (origsize - *size);
+ 	t = compat_ipt_get_target(e);
+ 	target = t->u.kernel.target;
+ 	xt_compat_target_from_user(t, dstptr, size);
+ 
+ 	de->next_offset = e->next_offset - (origsize - *size);
++
+ 	for (h = 0; h < NF_INET_NUMHOOKS; h++) {
+ 		if ((unsigned char *)de - base < newinfo->hook_entry[h])
+ 			newinfo->hook_entry[h] -= origsize - *size;
+ 		if ((unsigned char *)de - base < newinfo->underflow[h])
+ 			newinfo->underflow[h] -= origsize - *size;
+ 	}
+-	return ret;
+-}
+-
+-static int
+-compat_check_entry(struct ipt_entry *e, struct net *net, const char *name)
+-{
+-	struct xt_entry_match *ematch;
+-	struct xt_mtchk_param mtpar;
+-	unsigned int j;
+-	int ret = 0;
+-
+-	e->counters.pcnt = xt_percpu_counter_alloc();
+-	if (IS_ERR_VALUE(e->counters.pcnt))
+-		return -ENOMEM;
+-
+-	j = 0;
+-	mtpar.net	= net;
+-	mtpar.table     = name;
+-	mtpar.entryinfo = &e->ip;
+-	mtpar.hook_mask = e->comefrom;
+-	mtpar.family    = NFPROTO_IPV4;
+-	xt_ematch_foreach(ematch, e) {
+-		ret = check_match(ematch, &mtpar);
+-		if (ret != 0)
+-			goto cleanup_matches;
+-		++j;
+-	}
+-
+-	ret = check_target(e, net, name);
+-	if (ret)
+-		goto cleanup_matches;
+-	return 0;
+-
+- cleanup_matches:
+-	xt_ematch_foreach(ematch, e) {
+-		if (j-- == 0)
+-			break;
+-		cleanup_match(ematch, net);
+-	}
+-
+-	xt_percpu_counter_free(e->counters.pcnt);
+-
+-	return ret;
+ }
+ 
+ static int
+ translate_compat_table(struct net *net,
+-		       const char *name,
+-		       unsigned int valid_hooks,
+ 		       struct xt_table_info **pinfo,
+ 		       void **pentry0,
+-		       unsigned int total_size,
+-		       unsigned int number,
+-		       unsigned int *hook_entries,
+-		       unsigned int *underflows)
++		       const struct compat_ipt_replace *compatr)
+ {
+ 	unsigned int i, j;
+ 	struct xt_table_info *newinfo, *info;
+ 	void *pos, *entry0, *entry1;
+ 	struct compat_ipt_entry *iter0;
+-	struct ipt_entry *iter1;
++	struct ipt_replace repl;
+ 	unsigned int size;
+ 	int ret;
+ 
+ 	info = *pinfo;
+ 	entry0 = *pentry0;
+-	size = total_size;
+-	info->number = number;
+-
+-	/* Init all hooks to impossible value. */
+-	for (i = 0; i < NF_INET_NUMHOOKS; i++) {
+-		info->hook_entry[i] = 0xFFFFFFFF;
+-		info->underflow[i] = 0xFFFFFFFF;
+-	}
++	size = compatr->size;
++	info->number = compatr->num_entries;
+ 
+ 	duprintf("translate_compat_table: size %u\n", info->size);
+ 	j = 0;
+ 	xt_compat_lock(AF_INET);
+-	xt_compat_init_offsets(AF_INET, number);
++	xt_compat_init_offsets(AF_INET, compatr->num_entries);
+ 	/* Walk through entries, checking offsets. */
+-	xt_entry_foreach(iter0, entry0, total_size) {
++	xt_entry_foreach(iter0, entry0, compatr->size) {
+ 		ret = check_compat_entry_size_and_hooks(iter0, info, &size,
+ 							entry0,
+-							entry0 + total_size,
+-							hook_entries,
+-							underflows,
+-							name);
++							entry0 + compatr->size);
+ 		if (ret != 0)
+ 			goto out_unlock;
+ 		++j;
+ 	}
+ 
+ 	ret = -EINVAL;
+-	if (j != number) {
++	if (j != compatr->num_entries) {
+ 		duprintf("translate_compat_table: %u not %u entries\n",
+-			 j, number);
++			 j, compatr->num_entries);
+ 		goto out_unlock;
+ 	}
+ 
+-	/* Check hooks all assigned */
+-	for (i = 0; i < NF_INET_NUMHOOKS; i++) {
+-		/* Only hooks which are valid */
+-		if (!(valid_hooks & (1 << i)))
+-			continue;
+-		if (info->hook_entry[i] == 0xFFFFFFFF) {
+-			duprintf("Invalid hook entry %u %u\n",
+-				 i, hook_entries[i]);
+-			goto out_unlock;
+-		}
+-		if (info->underflow[i] == 0xFFFFFFFF) {
+-			duprintf("Invalid underflow %u %u\n",
+-				 i, underflows[i]);
+-			goto out_unlock;
+-		}
+-	}
+-
+ 	ret = -ENOMEM;
+ 	newinfo = xt_alloc_table_info(size);
+ 	if (!newinfo)
+ 		goto out_unlock;
+ 
+-	newinfo->number = number;
++	newinfo->number = compatr->num_entries;
+ 	for (i = 0; i < NF_INET_NUMHOOKS; i++) {
+-		newinfo->hook_entry[i] = info->hook_entry[i];
+-		newinfo->underflow[i] = info->underflow[i];
++		newinfo->hook_entry[i] = compatr->hook_entry[i];
++		newinfo->underflow[i] = compatr->underflow[i];
+ 	}
+ 	entry1 = newinfo->entries;
+ 	pos = entry1;
+-	size = total_size;
+-	xt_entry_foreach(iter0, entry0, total_size) {
+-		ret = compat_copy_entry_from_user(iter0, &pos, &size,
+-						  name, newinfo, entry1);
+-		if (ret != 0)
+-			break;
+-	}
++	size = compatr->size;
++	xt_entry_foreach(iter0, entry0, compatr->size)
++		compat_copy_entry_from_user(iter0, &pos, &size,
++					    newinfo, entry1);
++
++	/* all module references in entry0 are now gone.
++	 * entry1/newinfo contains a 64bit ruleset that looks exactly as
++	 * generated by 64bit userspace.
++	 *
++	 * Call standard translate_table() to validate all hook_entrys,
++	 * underflows, check for loops, etc.
++	 */
+ 	xt_compat_flush_offsets(AF_INET);
+ 	xt_compat_unlock(AF_INET);
+-	if (ret)
+-		goto free_newinfo;
+ 
+-	ret = -ELOOP;
+-	if (!mark_source_chains(newinfo, valid_hooks, entry1))
+-		goto free_newinfo;
++	memcpy(&repl, compatr, sizeof(*compatr));
+ 
+-	i = 0;
+-	xt_entry_foreach(iter1, entry1, newinfo->size) {
+-		ret = compat_check_entry(iter1, net, name);
+-		if (ret != 0)
+-			break;
+-		++i;
+-		if (strcmp(ipt_get_target(iter1)->u.user.name,
+-		    XT_ERROR_TARGET) == 0)
+-			++newinfo->stacksize;
+-	}
+-	if (ret) {
+-		/*
+-		 * The first i matches need cleanup_entry (calls ->destroy)
+-		 * because they had called ->check already. The other j-i
+-		 * entries need only release.
+-		 */
+-		int skip = i;
+-		j -= i;
+-		xt_entry_foreach(iter0, entry0, newinfo->size) {
+-			if (skip-- > 0)
+-				continue;
+-			if (j-- == 0)
+-				break;
+-			compat_release_entry(iter0);
+-		}
+-		xt_entry_foreach(iter1, entry1, newinfo->size) {
+-			if (i-- == 0)
+-				break;
+-			cleanup_entry(iter1, net);
+-		}
+-		xt_free_table_info(newinfo);
+-		return ret;
++	for (i = 0; i < NF_INET_NUMHOOKS; i++) {
++		repl.hook_entry[i] = newinfo->hook_entry[i];
++		repl.underflow[i] = newinfo->underflow[i];
+ 	}
+ 
++	repl.num_counters = 0;
++	repl.counters = NULL;
++	repl.size = newinfo->size;
++	ret = translate_table(net, newinfo, entry1, &repl);
++	if (ret)
++		goto free_newinfo;
++
+ 	*pinfo = newinfo;
+ 	*pentry0 = entry1;
+ 	xt_free_table_info(info);
+@@ -1785,17 +1643,16 @@ translate_compat_table(struct net *net,
+ 
+ free_newinfo:
+ 	xt_free_table_info(newinfo);
+-out:
+-	xt_entry_foreach(iter0, entry0, total_size) {
++	return ret;
++out_unlock:
++	xt_compat_flush_offsets(AF_INET);
++	xt_compat_unlock(AF_INET);
++	xt_entry_foreach(iter0, entry0, compatr->size) {
+ 		if (j-- == 0)
+ 			break;
+ 		compat_release_entry(iter0);
+ 	}
+ 	return ret;
+-out_unlock:
+-	xt_compat_flush_offsets(AF_INET);
+-	xt_compat_unlock(AF_INET);
+-	goto out;
+ }
+ 
+ static int
+@@ -1831,10 +1688,7 @@ compat_do_replace(struct net *net, void __user *user, unsigned int len)
+ 		goto free_newinfo;
+ 	}
+ 
+-	ret = translate_compat_table(net, tmp.name, tmp.valid_hooks,
+-				     &newinfo, &loc_cpu_entry, tmp.size,
+-				     tmp.num_entries, tmp.hook_entry,
+-				     tmp.underflow);
++	ret = translate_compat_table(net, &newinfo, &loc_cpu_entry, &tmp);
+ 	if (ret != 0)
+ 		goto free_newinfo;
  
 diff --git a/net/ipv4/sysctl_net_ipv4.c b/net/ipv4/sysctl_net_ipv4.c
 index 1e1fe60..03112a3 100644
@@ -139340,6 +142345,548 @@ index bc972e7..da88de8 100644
  }
  EXPORT_SYMBOL_GPL(ip6_sk_dst_lookup_flow);
  
+diff --git a/net/ipv6/ip6mr.c b/net/ipv6/ip6mr.c
+index a10e771..e207cb2 100644
+--- a/net/ipv6/ip6mr.c
++++ b/net/ipv6/ip6mr.c
+@@ -1074,6 +1074,7 @@ static struct mfc6_cache *ip6mr_cache_alloc(void)
+ 	struct mfc6_cache *c = kmem_cache_zalloc(mrt_cachep, GFP_KERNEL);
+ 	if (!c)
+ 		return NULL;
++	c->mfc_un.res.last_assert = jiffies - MFC_ASSERT_THRESH - 1;
+ 	c->mfc_un.res.minvif = MAXMIFS;
+ 	return c;
+ }
+diff --git a/net/ipv6/netfilter/ip6_tables.c b/net/ipv6/netfilter/ip6_tables.c
+index 86b67b7..9021b43 100644
+--- a/net/ipv6/netfilter/ip6_tables.c
++++ b/net/ipv6/netfilter/ip6_tables.c
+@@ -455,6 +455,18 @@ ip6t_do_table(struct sk_buff *skb,
+ #endif
+ }
+ 
++static bool find_jump_target(const struct xt_table_info *t,
++			     const struct ip6t_entry *target)
++{
++	struct ip6t_entry *iter;
++
++	xt_entry_foreach(iter, t->entries, t->size) {
++		 if (iter == target)
++			return true;
++	}
++	return false;
++}
++
+ /* Figures out from what hook each rule can be called: returns 0 if
+    there are loops.  Puts hook bitmask in comefrom. */
+ static int
+@@ -532,6 +544,8 @@ mark_source_chains(const struct xt_table_info *newinfo,
+ 				size = e->next_offset;
+ 				e = (struct ip6t_entry *)
+ 					(entry0 + pos + size);
++				if (pos + size >= newinfo->size)
++					return 0;
+ 				e->counters.pcnt = pos;
+ 				pos += size;
+ 			} else {
+@@ -550,9 +564,15 @@ mark_source_chains(const struct xt_table_info *newinfo,
+ 					/* This a jump; chase it. */
+ 					duprintf("Jump rule %u -> %u\n",
+ 						 pos, newpos);
++					e = (struct ip6t_entry *)
++						(entry0 + newpos);
++					if (!find_jump_target(newinfo, e))
++						return 0;
+ 				} else {
+ 					/* ... this is a fallthru */
+ 					newpos = pos + e->next_offset;
++					if (newpos >= newinfo->size)
++						return 0;
+ 				}
+ 				e = (struct ip6t_entry *)
+ 					(entry0 + newpos);
+@@ -579,25 +599,6 @@ static void cleanup_match(struct xt_entry_match *m, struct net *net)
+ 	module_put(par.match->me);
+ }
+ 
+-static int
+-check_entry(const struct ip6t_entry *e)
+-{
+-	const struct xt_entry_target *t;
+-
+-	if (!ip6_checkentry(&e->ipv6))
+-		return -EINVAL;
+-
+-	if (e->target_offset + sizeof(struct xt_entry_target) >
+-	    e->next_offset)
+-		return -EINVAL;
+-
+-	t = ip6t_get_target_c(e);
+-	if (e->target_offset + t->u.target_size > e->next_offset)
+-		return -EINVAL;
+-
+-	return 0;
+-}
+-
+ static int check_match(struct xt_entry_match *m, struct xt_mtchk_param *par)
+ {
+ 	const struct ip6t_ip6 *ipv6 = par->entryinfo;
+@@ -762,7 +763,11 @@ check_entry_size_and_hooks(struct ip6t_entry *e,
+ 		return -EINVAL;
+ 	}
+ 
+-	err = check_entry(e);
++	if (!ip6_checkentry(&e->ipv6))
++		return -EINVAL;
++
++	err = xt_check_entry_offsets(e, e->elems, e->target_offset,
++				     e->next_offset);
+ 	if (err)
+ 		return err;
+ 
+@@ -1321,55 +1326,16 @@ do_add_counters(struct net *net, const void __user *user, unsigned int len,
+ 	unsigned int i;
+ 	struct xt_counters_info tmp;
+ 	struct xt_counters *paddc;
+-	unsigned int num_counters;
+-	char *name;
+-	int size;
+-	void *ptmp;
+ 	struct xt_table *t;
+ 	const struct xt_table_info *private;
+ 	int ret = 0;
+ 	struct ip6t_entry *iter;
+ 	unsigned int addend;
+-#ifdef CONFIG_COMPAT
+-	struct compat_xt_counters_info compat_tmp;
+-
+-	if (compat) {
+-		ptmp = &compat_tmp;
+-		size = sizeof(struct compat_xt_counters_info);
+-	} else
+-#endif
+-	{
+-		ptmp = &tmp;
+-		size = sizeof(struct xt_counters_info);
+-	}
+-
+-	if (copy_from_user(ptmp, user, size) != 0)
+-		return -EFAULT;
+-
+-#ifdef CONFIG_COMPAT
+-	if (compat) {
+-		num_counters = compat_tmp.num_counters;
+-		name = compat_tmp.name;
+-	} else
+-#endif
+-	{
+-		num_counters = tmp.num_counters;
+-		name = tmp.name;
+-	}
+-
+-	if (len != size + num_counters * sizeof(struct xt_counters))
+-		return -EINVAL;
+-
+-	paddc = vmalloc(len - size);
+-	if (!paddc)
+-		return -ENOMEM;
+ 
+-	if (copy_from_user(paddc, user + size, len - size) != 0) {
+-		ret = -EFAULT;
+-		goto free;
+-	}
+-
+-	t = xt_find_table_lock(net, AF_INET6, name);
++	paddc = xt_copy_counters_from_user(user, len, &tmp, compat);
++	if (IS_ERR(paddc))
++		return PTR_ERR(paddc);
++	t = xt_find_table_lock(net, AF_INET6, tmp.name);
+ 	if (IS_ERR_OR_NULL(t)) {
+ 		ret = t ? PTR_ERR(t) : -ENOENT;
+ 		goto free;
+@@ -1377,7 +1343,7 @@ do_add_counters(struct net *net, const void __user *user, unsigned int len,
+ 
+ 	local_bh_disable();
+ 	private = t->private;
+-	if (private->number != num_counters) {
++	if (private->number != tmp.num_counters) {
+ 		ret = -EINVAL;
+ 		goto unlock_up_free;
+ 	}
+@@ -1456,7 +1422,6 @@ compat_copy_entry_to_user(struct ip6t_entry *e, void __user **dstptr,
+ 
+ static int
+ compat_find_calc_match(struct xt_entry_match *m,
+-		       const char *name,
+ 		       const struct ip6t_ip6 *ipv6,
+ 		       int *size)
+ {
+@@ -1491,17 +1456,14 @@ check_compat_entry_size_and_hooks(struct compat_ip6t_entry *e,
+ 				  struct xt_table_info *newinfo,
+ 				  unsigned int *size,
+ 				  const unsigned char *base,
+-				  const unsigned char *limit,
+-				  const unsigned int *hook_entries,
+-				  const unsigned int *underflows,
+-				  const char *name)
++				  const unsigned char *limit)
+ {
+ 	struct xt_entry_match *ematch;
+ 	struct xt_entry_target *t;
+ 	struct xt_target *target;
+ 	unsigned int entry_offset;
+ 	unsigned int j;
+-	int ret, off, h;
++	int ret, off;
+ 
+ 	duprintf("check_compat_entry_size_and_hooks %p\n", e);
+ 	if ((unsigned long)e % __alignof__(struct compat_ip6t_entry) != 0 ||
+@@ -1518,8 +1480,11 @@ check_compat_entry_size_and_hooks(struct compat_ip6t_entry *e,
+ 		return -EINVAL;
+ 	}
+ 
+-	/* For purposes of check_entry casting the compat entry is fine */
+-	ret = check_entry((struct ip6t_entry *)e);
++	if (!ip6_checkentry(&e->ipv6))
++		return -EINVAL;
++
++	ret = xt_compat_check_entry_offsets(e, e->elems,
++					    e->target_offset, e->next_offset);
+ 	if (ret)
+ 		return ret;
+ 
+@@ -1527,7 +1492,7 @@ check_compat_entry_size_and_hooks(struct compat_ip6t_entry *e,
+ 	entry_offset = (void *)e - (void *)base;
+ 	j = 0;
+ 	xt_ematch_foreach(ematch, e) {
+-		ret = compat_find_calc_match(ematch, name, &e->ipv6, &off);
++		ret = compat_find_calc_match(ematch, &e->ipv6, &off);
+ 		if (ret != 0)
+ 			goto release_matches;
+ 		++j;
+@@ -1550,17 +1515,6 @@ check_compat_entry_size_and_hooks(struct compat_ip6t_entry *e,
+ 	if (ret)
+ 		goto out;
+ 
+-	/* Check hooks & underflows */
+-	for (h = 0; h < NF_INET_NUMHOOKS; h++) {
+-		if ((unsigned char *)e - base == hook_entries[h])
+-			newinfo->hook_entry[h] = hook_entries[h];
+-		if ((unsigned char *)e - base == underflows[h])
+-			newinfo->underflow[h] = underflows[h];
+-	}
+-
+-	/* Clear counters and comefrom */
+-	memset(&e->counters, 0, sizeof(e->counters));
+-	e->comefrom = 0;
+ 	return 0;
+ 
+ out:
+@@ -1574,18 +1528,17 @@ release_matches:
+ 	return ret;
+ }
+ 
+-static int
++static void
+ compat_copy_entry_from_user(struct compat_ip6t_entry *e, void **dstptr,
+-			    unsigned int *size, const char *name,
++			    unsigned int *size,
+ 			    struct xt_table_info *newinfo, unsigned char *base)
+ {
+ 	struct xt_entry_target *t;
+ 	struct ip6t_entry *de;
+ 	unsigned int origsize;
+-	int ret, h;
++	int h;
+ 	struct xt_entry_match *ematch;
+ 
+-	ret = 0;
+ 	origsize = *size;
+ 	de = (struct ip6t_entry *)*dstptr;
+ 	memcpy(de, e, sizeof(struct ip6t_entry));
+@@ -1594,11 +1547,9 @@ compat_copy_entry_from_user(struct compat_ip6t_entry *e, void **dstptr,
+ 	*dstptr += sizeof(struct ip6t_entry);
+ 	*size += sizeof(struct ip6t_entry) - sizeof(struct compat_ip6t_entry);
+ 
+-	xt_ematch_foreach(ematch, e) {
+-		ret = xt_compat_match_from_user(ematch, dstptr, size);
+-		if (ret != 0)
+-			return ret;
+-	}
++	xt_ematch_foreach(ematch, e)
++		xt_compat_match_from_user(ematch, dstptr, size);
++
+ 	de->target_offset = e->target_offset - (origsize - *size);
+ 	t = compat_ip6t_get_target(e);
+ 	xt_compat_target_from_user(t, dstptr, size);
+@@ -1610,183 +1561,83 @@ compat_copy_entry_from_user(struct compat_ip6t_entry *e, void **dstptr,
+ 		if ((unsigned char *)de - base < newinfo->underflow[h])
+ 			newinfo->underflow[h] -= origsize - *size;
+ 	}
+-	return ret;
+-}
+-
+-static int compat_check_entry(struct ip6t_entry *e, struct net *net,
+-			      const char *name)
+-{
+-	unsigned int j;
+-	int ret = 0;
+-	struct xt_mtchk_param mtpar;
+-	struct xt_entry_match *ematch;
+-
+-	e->counters.pcnt = xt_percpu_counter_alloc();
+-	if (IS_ERR_VALUE(e->counters.pcnt))
+-		return -ENOMEM;
+-	j = 0;
+-	mtpar.net	= net;
+-	mtpar.table     = name;
+-	mtpar.entryinfo = &e->ipv6;
+-	mtpar.hook_mask = e->comefrom;
+-	mtpar.family    = NFPROTO_IPV6;
+-	xt_ematch_foreach(ematch, e) {
+-		ret = check_match(ematch, &mtpar);
+-		if (ret != 0)
+-			goto cleanup_matches;
+-		++j;
+-	}
+-
+-	ret = check_target(e, net, name);
+-	if (ret)
+-		goto cleanup_matches;
+-	return 0;
+-
+- cleanup_matches:
+-	xt_ematch_foreach(ematch, e) {
+-		if (j-- == 0)
+-			break;
+-		cleanup_match(ematch, net);
+-	}
+-
+-	xt_percpu_counter_free(e->counters.pcnt);
+-
+-	return ret;
+ }
+ 
+ static int
+ translate_compat_table(struct net *net,
+-		       const char *name,
+-		       unsigned int valid_hooks,
+ 		       struct xt_table_info **pinfo,
+ 		       void **pentry0,
+-		       unsigned int total_size,
+-		       unsigned int number,
+-		       unsigned int *hook_entries,
+-		       unsigned int *underflows)
++		       const struct compat_ip6t_replace *compatr)
+ {
+ 	unsigned int i, j;
+ 	struct xt_table_info *newinfo, *info;
+ 	void *pos, *entry0, *entry1;
+ 	struct compat_ip6t_entry *iter0;
+-	struct ip6t_entry *iter1;
++	struct ip6t_replace repl;
+ 	unsigned int size;
+ 	int ret = 0;
+ 
+ 	info = *pinfo;
+ 	entry0 = *pentry0;
+-	size = total_size;
+-	info->number = number;
+-
+-	/* Init all hooks to impossible value. */
+-	for (i = 0; i < NF_INET_NUMHOOKS; i++) {
+-		info->hook_entry[i] = 0xFFFFFFFF;
+-		info->underflow[i] = 0xFFFFFFFF;
+-	}
++	size = compatr->size;
++	info->number = compatr->num_entries;
+ 
+ 	duprintf("translate_compat_table: size %u\n", info->size);
+ 	j = 0;
+ 	xt_compat_lock(AF_INET6);
+-	xt_compat_init_offsets(AF_INET6, number);
++	xt_compat_init_offsets(AF_INET6, compatr->num_entries);
+ 	/* Walk through entries, checking offsets. */
+-	xt_entry_foreach(iter0, entry0, total_size) {
++	xt_entry_foreach(iter0, entry0, compatr->size) {
+ 		ret = check_compat_entry_size_and_hooks(iter0, info, &size,
+ 							entry0,
+-							entry0 + total_size,
+-							hook_entries,
+-							underflows,
+-							name);
++							entry0 + compatr->size);
+ 		if (ret != 0)
+ 			goto out_unlock;
+ 		++j;
+ 	}
+ 
+ 	ret = -EINVAL;
+-	if (j != number) {
++	if (j != compatr->num_entries) {
+ 		duprintf("translate_compat_table: %u not %u entries\n",
+-			 j, number);
++			 j, compatr->num_entries);
+ 		goto out_unlock;
+ 	}
+ 
+-	/* Check hooks all assigned */
+-	for (i = 0; i < NF_INET_NUMHOOKS; i++) {
+-		/* Only hooks which are valid */
+-		if (!(valid_hooks & (1 << i)))
+-			continue;
+-		if (info->hook_entry[i] == 0xFFFFFFFF) {
+-			duprintf("Invalid hook entry %u %u\n",
+-				 i, hook_entries[i]);
+-			goto out_unlock;
+-		}
+-		if (info->underflow[i] == 0xFFFFFFFF) {
+-			duprintf("Invalid underflow %u %u\n",
+-				 i, underflows[i]);
+-			goto out_unlock;
+-		}
+-	}
+-
+ 	ret = -ENOMEM;
+ 	newinfo = xt_alloc_table_info(size);
+ 	if (!newinfo)
+ 		goto out_unlock;
+ 
+-	newinfo->number = number;
++	newinfo->number = compatr->num_entries;
+ 	for (i = 0; i < NF_INET_NUMHOOKS; i++) {
+-		newinfo->hook_entry[i] = info->hook_entry[i];
+-		newinfo->underflow[i] = info->underflow[i];
++		newinfo->hook_entry[i] = compatr->hook_entry[i];
++		newinfo->underflow[i] = compatr->underflow[i];
+ 	}
+ 	entry1 = newinfo->entries;
+ 	pos = entry1;
+-	size = total_size;
+-	xt_entry_foreach(iter0, entry0, total_size) {
+-		ret = compat_copy_entry_from_user(iter0, &pos, &size,
+-						  name, newinfo, entry1);
+-		if (ret != 0)
+-			break;
+-	}
++	size = compatr->size;
++	xt_entry_foreach(iter0, entry0, compatr->size)
++		compat_copy_entry_from_user(iter0, &pos, &size,
++					    newinfo, entry1);
++
++	/* all module references in entry0 are now gone. */
+ 	xt_compat_flush_offsets(AF_INET6);
+ 	xt_compat_unlock(AF_INET6);
+-	if (ret)
+-		goto free_newinfo;
+ 
+-	ret = -ELOOP;
+-	if (!mark_source_chains(newinfo, valid_hooks, entry1))
+-		goto free_newinfo;
++	memcpy(&repl, compatr, sizeof(*compatr));
+ 
+-	i = 0;
+-	xt_entry_foreach(iter1, entry1, newinfo->size) {
+-		ret = compat_check_entry(iter1, net, name);
+-		if (ret != 0)
+-			break;
+-		++i;
+-		if (strcmp(ip6t_get_target(iter1)->u.user.name,
+-		    XT_ERROR_TARGET) == 0)
+-			++newinfo->stacksize;
+-	}
+-	if (ret) {
+-		/*
+-		 * The first i matches need cleanup_entry (calls ->destroy)
+-		 * because they had called ->check already. The other j-i
+-		 * entries need only release.
+-		 */
+-		int skip = i;
+-		j -= i;
+-		xt_entry_foreach(iter0, entry0, newinfo->size) {
+-			if (skip-- > 0)
+-				continue;
+-			if (j-- == 0)
+-				break;
+-			compat_release_entry(iter0);
+-		}
+-		xt_entry_foreach(iter1, entry1, newinfo->size) {
+-			if (i-- == 0)
+-				break;
+-			cleanup_entry(iter1, net);
+-		}
+-		xt_free_table_info(newinfo);
+-		return ret;
++	for (i = 0; i < NF_INET_NUMHOOKS; i++) {
++		repl.hook_entry[i] = newinfo->hook_entry[i];
++		repl.underflow[i] = newinfo->underflow[i];
+ 	}
+ 
++	repl.num_counters = 0;
++	repl.counters = NULL;
++	repl.size = newinfo->size;
++	ret = translate_table(net, newinfo, entry1, &repl);
++	if (ret)
++		goto free_newinfo;
++
+ 	*pinfo = newinfo;
+ 	*pentry0 = entry1;
+ 	xt_free_table_info(info);
+@@ -1794,17 +1645,16 @@ translate_compat_table(struct net *net,
+ 
+ free_newinfo:
+ 	xt_free_table_info(newinfo);
+-out:
+-	xt_entry_foreach(iter0, entry0, total_size) {
++	return ret;
++out_unlock:
++	xt_compat_flush_offsets(AF_INET6);
++	xt_compat_unlock(AF_INET6);
++	xt_entry_foreach(iter0, entry0, compatr->size) {
+ 		if (j-- == 0)
+ 			break;
+ 		compat_release_entry(iter0);
+ 	}
+ 	return ret;
+-out_unlock:
+-	xt_compat_flush_offsets(AF_INET6);
+-	xt_compat_unlock(AF_INET6);
+-	goto out;
+ }
+ 
+ static int
+@@ -1840,10 +1690,7 @@ compat_do_replace(struct net *net, void __user *user, unsigned int len)
+ 		goto free_newinfo;
+ 	}
+ 
+-	ret = translate_compat_table(net, tmp.name, tmp.valid_hooks,
+-				     &newinfo, &loc_cpu_entry, tmp.size,
+-				     tmp.num_entries, tmp.hook_entry,
+-				     tmp.underflow);
++	ret = translate_compat_table(net, &newinfo, &loc_cpu_entry, &tmp);
+ 	if (ret != 0)
+ 		goto free_newinfo;
+ 
+diff --git a/net/ipv6/sit.c b/net/ipv6/sit.c
+index 8338430..6c53e4e 100644
+--- a/net/ipv6/sit.c
++++ b/net/ipv6/sit.c
+@@ -560,13 +560,13 @@ static int ipip6_err(struct sk_buff *skb, u32 info)
+ 
+ 	if (type == ICMP_DEST_UNREACH && code == ICMP_FRAG_NEEDED) {
+ 		ipv4_update_pmtu(skb, dev_net(skb->dev), info,
+-				 t->parms.link, 0, IPPROTO_IPV6, 0);
++				 t->parms.link, 0, iph->protocol, 0);
+ 		err = 0;
+ 		goto out;
+ 	}
+ 	if (type == ICMP_REDIRECT) {
+ 		ipv4_redirect(skb, dev_net(skb->dev), t->parms.link, 0,
+-			      IPPROTO_IPV6, 0);
++			      iph->protocol, 0);
+ 		err = 0;
+ 		goto out;
+ 	}
 diff --git a/net/ipv6/tcp_ipv6.c b/net/ipv6/tcp_ipv6.c
 index f443c6b..f6d7516 100644
 --- a/net/ipv6/tcp_ipv6.c
@@ -139368,6 +142915,18 @@ index 6bc5c66..f96831d9 100644
  			int ret;
  
  			/* Verify checksum before giving to encap */
+diff --git a/net/kcm/kcmproc.c b/net/kcm/kcmproc.c
+index 7380087..fda7f47 100644
+--- a/net/kcm/kcmproc.c
++++ b/net/kcm/kcmproc.c
+@@ -241,6 +241,7 @@ static const struct file_operations kcm_seq_fops = {
+ 	.open		= kcm_seq_open,
+ 	.read		= seq_read,
+ 	.llseek		= seq_lseek,
++	.release	= seq_release_net,
+ };
+ 
+ static struct kcm_seq_muxinfo kcm_seq_muxinfo = {
 diff --git a/net/l2tp/l2tp_core.c b/net/l2tp/l2tp_core.c
 index 6edfa99..1e40dac 100644
 --- a/net/l2tp/l2tp_core.c
@@ -139381,6 +142940,314 @@ index 6edfa99..1e40dac 100644
  
  		udp_cfg.sk_user_data = tunnel;
  		udp_cfg.encap_type = UDP_ENCAP_L2TPINUDP;
+diff --git a/net/netfilter/x_tables.c b/net/netfilter/x_tables.c
+index 582c9cf..2675d58 100644
+--- a/net/netfilter/x_tables.c
++++ b/net/netfilter/x_tables.c
+@@ -416,6 +416,47 @@ int xt_check_match(struct xt_mtchk_param *par,
+ }
+ EXPORT_SYMBOL_GPL(xt_check_match);
+ 
++/** xt_check_entry_match - check that matches end before start of target
++ *
++ * @match: beginning of xt_entry_match
++ * @target: beginning of this rules target (alleged end of matches)
++ * @alignment: alignment requirement of match structures
++ *
++ * Validates that all matches add up to the beginning of the target,
++ * and that each match covers at least the base structure size.
++ *
++ * Return: 0 on success, negative errno on failure.
++ */
++static int xt_check_entry_match(const char *match, const char *target,
++				const size_t alignment)
++{
++	const struct xt_entry_match *pos;
++	int length = target - match;
++
++	if (length == 0) /* no matches */
++		return 0;
++
++	pos = (struct xt_entry_match *)match;
++	do {
++		if ((unsigned long)pos % alignment)
++			return -EINVAL;
++
++		if (length < (int)sizeof(struct xt_entry_match))
++			return -EINVAL;
++
++		if (pos->u.match_size < sizeof(struct xt_entry_match))
++			return -EINVAL;
++
++		if (pos->u.match_size > length)
++			return -EINVAL;
++
++		length -= pos->u.match_size;
++		pos = ((void *)((char *)(pos) + (pos)->u.match_size));
++	} while (length > 0);
++
++	return 0;
++}
++
+ #ifdef CONFIG_COMPAT
+ int xt_compat_add_offset(u_int8_t af, unsigned int offset, int delta)
+ {
+@@ -485,13 +526,14 @@ int xt_compat_match_offset(const struct xt_match *match)
+ }
+ EXPORT_SYMBOL_GPL(xt_compat_match_offset);
+ 
+-int xt_compat_match_from_user(struct xt_entry_match *m, void **dstptr,
+-			      unsigned int *size)
++void xt_compat_match_from_user(struct xt_entry_match *m, void **dstptr,
++			       unsigned int *size)
+ {
+ 	const struct xt_match *match = m->u.kernel.match;
+ 	struct compat_xt_entry_match *cm = (struct compat_xt_entry_match *)m;
+ 	int pad, off = xt_compat_match_offset(match);
+ 	u_int16_t msize = cm->u.user.match_size;
++	char name[sizeof(m->u.user.name)];
+ 
+ 	m = *dstptr;
+ 	memcpy(m, cm, sizeof(*cm));
+@@ -505,10 +547,12 @@ int xt_compat_match_from_user(struct xt_entry_match *m, void **dstptr,
+ 
+ 	msize += off;
+ 	m->u.user.match_size = msize;
++	strlcpy(name, match->name, sizeof(name));
++	module_put(match->me);
++	strncpy(m->u.user.name, name, sizeof(m->u.user.name));
+ 
+ 	*size += off;
+ 	*dstptr += msize;
+-	return 0;
+ }
+ EXPORT_SYMBOL_GPL(xt_compat_match_from_user);
+ 
+@@ -539,8 +583,125 @@ int xt_compat_match_to_user(const struct xt_entry_match *m,
+ 	return 0;
+ }
+ EXPORT_SYMBOL_GPL(xt_compat_match_to_user);
++
++/* non-compat version may have padding after verdict */
++struct compat_xt_standard_target {
++	struct compat_xt_entry_target t;
++	compat_uint_t verdict;
++};
++
++int xt_compat_check_entry_offsets(const void *base, const char *elems,
++				  unsigned int target_offset,
++				  unsigned int next_offset)
++{
++	long size_of_base_struct = elems - (const char *)base;
++	const struct compat_xt_entry_target *t;
++	const char *e = base;
++
++	if (target_offset < size_of_base_struct)
++		return -EINVAL;
++
++	if (target_offset + sizeof(*t) > next_offset)
++		return -EINVAL;
++
++	t = (void *)(e + target_offset);
++	if (t->u.target_size < sizeof(*t))
++		return -EINVAL;
++
++	if (target_offset + t->u.target_size > next_offset)
++		return -EINVAL;
++
++	if (strcmp(t->u.user.name, XT_STANDARD_TARGET) == 0 &&
++	    COMPAT_XT_ALIGN(target_offset + sizeof(struct compat_xt_standard_target)) != next_offset)
++		return -EINVAL;
++
++	/* compat_xt_entry match has less strict aligment requirements,
++	 * otherwise they are identical.  In case of padding differences
++	 * we need to add compat version of xt_check_entry_match.
++	 */
++	BUILD_BUG_ON(sizeof(struct compat_xt_entry_match) != sizeof(struct xt_entry_match));
++
++	return xt_check_entry_match(elems, base + target_offset,
++				    __alignof__(struct compat_xt_entry_match));
++}
++EXPORT_SYMBOL(xt_compat_check_entry_offsets);
+ #endif /* CONFIG_COMPAT */
+ 
++/**
++ * xt_check_entry_offsets - validate arp/ip/ip6t_entry
++ *
++ * @base: pointer to arp/ip/ip6t_entry
++ * @elems: pointer to first xt_entry_match, i.e. ip(6)t_entry->elems
++ * @target_offset: the arp/ip/ip6_t->target_offset
++ * @next_offset: the arp/ip/ip6_t->next_offset
++ *
++ * validates that target_offset and next_offset are sane and that all
++ * match sizes (if any) align with the target offset.
++ *
++ * This function does not validate the targets or matches themselves, it
++ * only tests that all the offsets and sizes are correct, that all
++ * match structures are aligned, and that the last structure ends where
++ * the target structure begins.
++ *
++ * Also see xt_compat_check_entry_offsets for CONFIG_COMPAT version.
++ *
++ * The arp/ip/ip6t_entry structure @base must have passed following tests:
++ * - it must point to a valid memory location
++ * - base to base + next_offset must be accessible, i.e. not exceed allocated
++ *   length.
++ *
++ * A well-formed entry looks like this:
++ *
++ * ip(6)t_entry   match [mtdata]  match [mtdata] target [tgdata] ip(6)t_entry
++ * e->elems[]-----'                              |               |
++ *                matchsize                      |               |
++ *                                matchsize      |               |
++ *                                               |               |
++ * target_offset---------------------------------'               |
++ * next_offset---------------------------------------------------'
++ *
++ * elems[]: flexible array member at end of ip(6)/arpt_entry struct.
++ *          This is where matches (if any) and the target reside.
++ * target_offset: beginning of target.
++ * next_offset: start of the next rule; also: size of this rule.
++ * Since targets have a minimum size, target_offset + minlen <= next_offset.
++ *
++ * Every match stores its size, sum of sizes must not exceed target_offset.
++ *
++ * Return: 0 on success, negative errno on failure.
++ */
++int xt_check_entry_offsets(const void *base,
++			   const char *elems,
++			   unsigned int target_offset,
++			   unsigned int next_offset)
++{
++	long size_of_base_struct = elems - (const char *)base;
++	const struct xt_entry_target *t;
++	const char *e = base;
++
++	/* target start is within the ip/ip6/arpt_entry struct */
++	if (target_offset < size_of_base_struct)
++		return -EINVAL;
++
++	if (target_offset + sizeof(*t) > next_offset)
++		return -EINVAL;
++
++	t = (void *)(e + target_offset);
++	if (t->u.target_size < sizeof(*t))
++		return -EINVAL;
++
++	if (target_offset + t->u.target_size > next_offset)
++		return -EINVAL;
++
++	if (strcmp(t->u.user.name, XT_STANDARD_TARGET) == 0 &&
++	    XT_ALIGN(target_offset + sizeof(struct xt_standard_target)) != next_offset)
++		return -EINVAL;
++
++	return xt_check_entry_match(elems, base + target_offset,
++				    __alignof__(struct xt_entry_match));
++}
++EXPORT_SYMBOL(xt_check_entry_offsets);
++
+ int xt_check_target(struct xt_tgchk_param *par,
+ 		    unsigned int size, u_int8_t proto, bool inv_proto)
+ {
+@@ -591,6 +752,80 @@ int xt_check_target(struct xt_tgchk_param *par,
+ }
+ EXPORT_SYMBOL_GPL(xt_check_target);
+ 
++/**
++ * xt_copy_counters_from_user - copy counters and metadata from userspace
++ *
++ * @user: src pointer to userspace memory
++ * @len: alleged size of userspace memory
++ * @info: where to store the xt_counters_info metadata
++ * @compat: true if we setsockopt call is done by 32bit task on 64bit kernel
++ *
++ * Copies counter meta data from @user and stores it in @info.
++ *
++ * vmallocs memory to hold the counters, then copies the counter data
++ * from @user to the new memory and returns a pointer to it.
++ *
++ * If @compat is true, @info gets converted automatically to the 64bit
++ * representation.
++ *
++ * The metadata associated with the counters is stored in @info.
++ *
++ * Return: returns pointer that caller has to test via IS_ERR().
++ * If IS_ERR is false, caller has to vfree the pointer.
++ */
++void *xt_copy_counters_from_user(const void __user *user, unsigned int len,
++				 struct xt_counters_info *info, bool compat)
++{
++	void *mem;
++	u64 size;
++
++#ifdef CONFIG_COMPAT
++	if (compat) {
++		/* structures only differ in size due to alignment */
++		struct compat_xt_counters_info compat_tmp;
++
++		if (len <= sizeof(compat_tmp))
++			return ERR_PTR(-EINVAL);
++
++		len -= sizeof(compat_tmp);
++		if (copy_from_user(&compat_tmp, user, sizeof(compat_tmp)) != 0)
++			return ERR_PTR(-EFAULT);
++
++		strlcpy(info->name, compat_tmp.name, sizeof(info->name));
++		info->num_counters = compat_tmp.num_counters;
++		user += sizeof(compat_tmp);
++	} else
++#endif
++	{
++		if (len <= sizeof(*info))
++			return ERR_PTR(-EINVAL);
++
++		len -= sizeof(*info);
++		if (copy_from_user(info, user, sizeof(*info)) != 0)
++			return ERR_PTR(-EFAULT);
++
++		info->name[sizeof(info->name) - 1] = '\0';
++		user += sizeof(*info);
++	}
++
++	size = sizeof(struct xt_counters);
++	size *= info->num_counters;
++
++	if (size != (u64)len)
++		return ERR_PTR(-EINVAL);
++
++	mem = vmalloc(len);
++	if (!mem)
++		return ERR_PTR(-ENOMEM);
++
++	if (copy_from_user(mem, user, len) == 0)
++		return mem;
++
++	vfree(mem);
++	return ERR_PTR(-EFAULT);
++}
++EXPORT_SYMBOL_GPL(xt_copy_counters_from_user);
++
+ #ifdef CONFIG_COMPAT
+ int xt_compat_target_offset(const struct xt_target *target)
+ {
+@@ -606,6 +841,7 @@ void xt_compat_target_from_user(struct xt_entry_target *t, void **dstptr,
+ 	struct compat_xt_entry_target *ct = (struct compat_xt_entry_target *)t;
+ 	int pad, off = xt_compat_target_offset(target);
+ 	u_int16_t tsize = ct->u.user.target_size;
++	char name[sizeof(t->u.user.name)];
+ 
+ 	t = *dstptr;
+ 	memcpy(t, ct, sizeof(*ct));
+@@ -619,6 +855,9 @@ void xt_compat_target_from_user(struct xt_entry_target *t, void **dstptr,
+ 
+ 	tsize += off;
+ 	t->u.user.target_size = tsize;
++	strlcpy(name, target->name, sizeof(name));
++	module_put(target->me);
++	strncpy(t->u.user.name, name, sizeof(t->u.user.name));
+ 
+ 	*size += off;
+ 	*dstptr += tsize;
 diff --git a/net/netlink/af_netlink.c b/net/netlink/af_netlink.c
 index 330ebd6..f48e3b3 100644
 --- a/net/netlink/af_netlink.c
@@ -139407,6 +143274,74 @@ index 330ebd6..f48e3b3 100644
  	return 0;
  
  errout_skb:
+diff --git a/net/sched/act_ipt.c b/net/sched/act_ipt.c
+index 8b52700..6063233 100644
+--- a/net/sched/act_ipt.c
++++ b/net/sched/act_ipt.c
+@@ -121,10 +121,13 @@ static int __tcf_ipt_init(struct tc_action_net *tn, struct nlattr *nla,
+ 	}
+ 
+ 	td = (struct xt_entry_target *)nla_data(tb[TCA_IPT_TARG]);
+-	if (nla_len(tb[TCA_IPT_TARG]) < td->u.target_size)
++	if (nla_len(tb[TCA_IPT_TARG]) < td->u.target_size) {
++		if (exists)
++			tcf_hash_release(a, bind);
+ 		return -EINVAL;
++	}
+ 
+-	if (!tcf_hash_check(tn, index, a, bind)) {
++	if (!exists) {
+ 		ret = tcf_hash_create(tn, index, est, a, sizeof(*ipt), bind,
+ 				      false);
+ 		if (ret)
+diff --git a/net/sched/sch_fifo.c b/net/sched/sch_fifo.c
+index 2177eac..2e4bd2c 100644
+--- a/net/sched/sch_fifo.c
++++ b/net/sched/sch_fifo.c
+@@ -37,14 +37,18 @@ static int pfifo_enqueue(struct sk_buff *skb, struct Qdisc *sch)
+ 
+ static int pfifo_tail_enqueue(struct sk_buff *skb, struct Qdisc *sch)
+ {
++	unsigned int prev_backlog;
++
+ 	if (likely(skb_queue_len(&sch->q) < sch->limit))
+ 		return qdisc_enqueue_tail(skb, sch);
+ 
++	prev_backlog = sch->qstats.backlog;
+ 	/* queue full, remove one skb to fulfill the limit */
+ 	__qdisc_queue_drop_head(sch, &sch->q);
+ 	qdisc_qstats_drop(sch);
+ 	qdisc_enqueue_tail(skb, sch);
+ 
++	qdisc_tree_reduce_backlog(sch, 0, prev_backlog - sch->qstats.backlog);
+ 	return NET_XMIT_CN;
+ }
+ 
+diff --git a/net/sched/sch_netem.c b/net/sched/sch_netem.c
+index 4befe97..b7c29d5 100644
+--- a/net/sched/sch_netem.c
++++ b/net/sched/sch_netem.c
+@@ -650,14 +650,14 @@ deliver:
+ #endif
+ 
+ 			if (q->qdisc) {
++				unsigned int pkt_len = qdisc_pkt_len(skb);
+ 				int err = qdisc_enqueue(skb, q->qdisc);
+ 
+-				if (unlikely(err != NET_XMIT_SUCCESS)) {
+-					if (net_xmit_drop_count(err)) {
+-						qdisc_qstats_drop(sch);
+-						qdisc_tree_reduce_backlog(sch, 1,
+-									  qdisc_pkt_len(skb));
+-					}
++				if (err != NET_XMIT_SUCCESS &&
++				    net_xmit_drop_count(err)) {
++					qdisc_qstats_drop(sch);
++					qdisc_tree_reduce_backlog(sch, 1,
++								  pkt_len);
+ 				}
+ 				goto tfifo_dequeue;
+ 			}
 diff --git a/net/sunrpc/auth_gss/svcauth_gss.c b/net/sunrpc/auth_gss/svcauth_gss.c
 index 1095be9..4605dc7 100644
 --- a/net/sunrpc/auth_gss/svcauth_gss.c
