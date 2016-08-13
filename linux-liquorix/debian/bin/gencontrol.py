@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 import sys
 sys.path.append("debian/lib/python")
@@ -33,6 +33,8 @@ class Gencontrol(Base):
             'bootloaders': config.SchemaItemList(),
             'configs': config.SchemaItemList(),
             'initramfs-generators': config.SchemaItemList(),
+            'check-size': config.SchemaItemInteger(),
+            'check-size-with-dtb': config.SchemaItemBoolean(),
         },
         'relations': {
         },
@@ -60,8 +62,7 @@ class Gencontrol(Base):
         makeflags.update({
             'VERSION': self.version.linux_version,
             'UPSTREAMVERSION': self.version.linux_upstream,
-            'ABINAME': self.abiname,
-            'ABINAME_PART': self.abiname_part,
+            'ABINAME': self.abiname_version + self.abiname_part,
             'SOURCEVERSION': self.version.complete,
         })
 
@@ -76,6 +77,11 @@ class Gencontrol(Base):
                 f.write('# THIS IS A GENERATED FILE; DO NOT EDIT IT!\n'
                         '# Translators should edit %s instead.\n'
                         '#\n' % path)
+
+        """
+        # Prepare to generate debian/tests/control
+        self.tests_control = None
+        """
 
     def do_main_makefile(self, makefile, makeflags, extra):
         fs_enabled = [featureset
@@ -130,8 +136,7 @@ class Gencontrol(Base):
             except KeyError:
                 abiname_part = self.abiname_part
             makeflags['ABINAME'] = vars['abiname'] = \
-                self.version.linux_upstream + abiname_part
-            makeflags['ABINAME_PART'] = abiname_part
+                self.abiname_version + abiname_part
 
         """
         if foreign_kernel:
@@ -161,9 +166,9 @@ class Gencontrol(Base):
         if os.getenv('DEBIAN_KERNEL_DISABLE_INSTALLER'):
             if self.changelog[0].distribution == 'UNRELEASED':
                 import warnings
-                warnings.warn(u'Disable installer modules on request (DEBIAN_KERNEL_DISABLE_INSTALLER set)')
+                warnings.warn('Disable installer modules on request (DEBIAN_KERNEL_DISABLE_INSTALLER set)')
             else:
-                raise RuntimeError(u'Unable to disable installer modules in release build (DEBIAN_KERNEL_DISABLE_INSTALLER set)')
+                raise RuntimeError('Unable to disable installer modules in release build (DEBIAN_KERNEL_DISABLE_INSTALLER set)')
         else:
             # Add udebs using kernel-wedge
             installer_def_dir = 'debian/installer'
@@ -322,18 +327,19 @@ class Gencontrol(Base):
 
         image = self.templates["control.image.type-%s" % config_entry_image['type']]
 
-      #  config_entry_xen = self.config.merge('xen', arch, featureset, flavour)
-      #  if config_entry_xen:
-      #      p = self.process_packages(self.templates['control.xen-linux-system'], vars)
-      #      l = PackageRelationGroup()
-      #      for xen_flavour in config_entry_xen['flavours']:
-      #          l.append("xen-system-%s" % xen_flavour)
-      #      p[0]['Depends'].append(l)
-      #      packages_dummy.extend(p)
+        config_entry_xen = self.config.merge('xen', arch, featureset, flavour)
+        if config_entry_xen:
+            p = self.process_packages(self.templates['control.xen-linux-system'], vars)
+            l = PackageRelationGroup()
+            for xen_flavour in config_entry_xen['flavours']:
+                l.append("xen-system-%s" % xen_flavour)
+            p[0]['Depends'].append(l)
+            packages_dummy.extend(p)
 
         vars.setdefault('desc', None)
 
-        packages_own.append(self.process_real_image(image[0], image_fields, vars))
+        image_main = self.process_real_image(image[0], image_fields, vars)
+        packages_own.append(image_main)
         packages_own.extend(self.process_packages(image[1:], vars))
 
         if config_entry_build.get('modules', True):
@@ -350,16 +356,28 @@ class Gencontrol(Base):
         if os.getenv('DEBIAN_KERNEL_DISABLE_DEBUG'):
             if self.changelog[0].distribution == 'UNRELEASED':
                 import warnings
-                warnings.warn(u'Disable debug infos on request (DEBIAN_KERNEL_DISABLE_DEBUG set)')
+                warnings.warn('Disable debug infos on request (DEBIAN_KERNEL_DISABLE_DEBUG set)')
                 build_debug = False
             else:
-                raise RuntimeError(u'Unable to disable debug infos in release build (DEBIAN_KERNEL_DISABLE_DEBUG set)')
+                raise RuntimeError('Unable to disable debug infos in release build (DEBIAN_KERNEL_DISABLE_DEBUG set)')
 
-        #if build_debug:
-        #    makeflags['DEBUG'] = True
-        #    packages_own.extend(self.process_packages(self.templates['control.image-dbg'], vars))
+        if build_debug:
+            makeflags['DEBUG'] = True
+            packages_own.extend(self.process_packages(self.templates['control.image-dbg'], vars))
 
         self.merge_packages(packages, packages_own + packages_dummy, arch)
+
+        """
+        tests_control = self.process_package(
+            self.templates['tests-control.main'][0], vars)
+        tests_control['Depends'].append(
+            PackageRelationGroup(image_main['Package'],
+                                 override_arches=(arch,)))
+        if self.tests_control:
+            self.tests_control['Depends'].extend(tests_control['Depends'])
+        else:
+            self.tests_control = tests_control
+        """
 
         def get_config(*entry_name):
             entry_real = ('image',) + entry_name
@@ -435,10 +453,10 @@ class Gencontrol(Base):
                 substitute_file('po/' + os.path.basename(path),
                                 'debian/po/' + os.path.basename(path),
                                 append=True)
-        # if build_debug:
-        #     substitute_file('image-dbg.lintian-override',
-        #                     'debian/linux-image-%s%s-dbg.lintian-overrides' %
-        #                     (vars['abiname'], vars['localversion']))
+        if build_debug:
+            substitute_file('image-dbg.lintian-override',
+                            'debian/linux-image-%s%s-dbg.lintian-overrides' %
+                            (vars['abiname'], vars['localversion']))
 
     def merge_packages(self, packages, new, arch):
         for new_package in new:
@@ -472,17 +490,22 @@ class Gencontrol(Base):
             self.abiname_part = ''
         else:
             self.abiname_part = '-%s' % self.config['abi', ]['abiname']
-        self.abiname = self.version.linux_upstream + self.abiname_part
+        # We need to keep at least three version components to avoid
+        # userland breakage (e.g. #742226, #745984).
+        self.abiname_version = re.sub('^(\d+\.\d+)(?=-|$)', r'\1.0',
+                                      self.version.linux_upstream)
         self.vars = {
             'upstreamversion': self.version.linux_upstream,
             'version': self.version.linux_version,
             'source_upstream': self.version.upstream,
             'source_package': self.changelog[0].source,
-            'abiname': self.abiname,
+            'abiname': self.abiname_version + self.abiname_part,
         }
         self.config['version', ] = {'source': self.version.complete,
                                     'upstream': self.version.linux_upstream,
-                                    'abiname': self.abiname}
+                                    'abiname_base': self.abiname_version,
+                                    'abiname': (self.abiname_version +
+                                                self.abiname_part)}
 
         distribution = self.changelog[0].distribution
         if distribution in ('unstable', ):
@@ -492,6 +515,10 @@ class Gencontrol(Base):
                 raise RuntimeError("Can't upload to %s with a version of %s" % (distribution, version))
         if distribution in ('experimental', ):
             if not version.linux_revision_experimental:
+                raise RuntimeError("Can't upload to %s with a version of %s" % (distribution, version))
+        if distribution.endswith('-security') or distribution.endswith('-lts'):
+            if (not version.linux_revision_security or
+                version.linux_revision_backports):
                 raise RuntimeError("Can't upload to %s with a version of %s" % (distribution, version))
         if distribution.endswith('-backports'):
             if not version.linux_revision_backports:
@@ -510,11 +537,18 @@ class Gencontrol(Base):
     def write(self, packages, makefile):
         self.write_config()
         super(Gencontrol, self).write(packages, makefile)
+        """
+        self.write_tests_control()
+        """
 
     def write_config(self):
         f = open("debian/config.defines.dump", 'wb')
         self.config.dump(f)
         f.close()
+
+    def write_tests_control(self):
+        self.write_rfc822(codecs.open("debian/tests/control", 'w', 'utf-8'),
+                          [self.tests_control])
 
 if __name__ == '__main__':
     Gencontrol()()

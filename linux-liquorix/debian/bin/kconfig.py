@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 import optparse
 import os.path
@@ -11,10 +11,10 @@ from debian_linux.kconfig import *
 def merge(output, configs, overrides):
     kconfig = KconfigFile()
     for c in configs:
-        kconfig.read(file(c))
-    for key, value in overrides.iteritems():
+        kconfig.read(open(c))
+    for key, value in overrides.items():
         kconfig.set(key, value)
-    file(output, "w").write(str(kconfig))
+    open(output, "w").write(str(kconfig))
 
 
 def opt_callback_dict(option, opt, value, parser):
