@@ -6,14 +6,17 @@
 # expected to be available (need to be exported from the parent process).
 #
 SHELL  := bash -e
+ifdef ARCH
 DEB_HOST_ARCH     := $(shell dpkg-architecture -a'$(ARCH)' -qDEB_HOST_ARCH)
 DEB_HOST_GNU_TYPE := $(shell dpkg-architecture -a'$(ARCH)' -qDEB_HOST_GNU_TYPE)
 DEB_HOST_MULTIARCH:= $(shell dpkg-architecture -a'$(ARCH)' -qDEB_HOST_MULTIARCH)
 DEB_BUILD_ARCH    := $(shell dpkg-architecture -a'$(ARCH)' -qDEB_BUILD_ARCH)
-MAINTAINER        := $(shell sed -ne 's,^Maintainer: .[^<]*<\([^>]*\)>,\1,p' debian/control)
-DISTRIBUTION      := $(shell dpkg-parsechangelog | sed -ne 's,^Distribution: ,,p')
-SOURCE_DATE := $(shell dpkg-parsechangelog | sed -ne 's,^Date: ,,p')
+endif
+MAINTAINER := $(shell sed -ne 's,^Maintainer: .[^<]*<\([^>]*\)>,\1,p' debian/control)
+DISTRIBUTION := $(shell dpkg-parsechangelog -SDistribution)
+SOURCE_DATE := $(shell dpkg-parsechangelog -SDate)
 SOURCE_DATE_UTC_ISO := $(shell date -u -d '$(SOURCE_DATE)' +%Y-%m-%d)
+DEB_BUILD_OPTIONS := noddebs
 
 DISTRIBUTOR := $(shell lsb_release -is 2>/dev/null)
 ifeq ($(DISTRIBUTOR),)
@@ -31,12 +34,13 @@ endif
 export PYTHONPATH = $(CURDIR)/debian/lib/python
 export DH_OPTIONS
 export DEB_HOST_ARCH DEB_HOST_GNU_TYPE DEB_BUILD_ARCH
+export LC_ALL = C.UTF-8
 
 include debian/rules.defs
 
 stamp = [ -d $(dir $@) ] || mkdir $(dir $@); touch $@
 
-setup_env := env -u ABINAME -u ABINAME_PART -u ARCH -u FEATURESET -u FLAVOUR -u VERSION -u LOCALVERSION
+setup_env := env -u ABINAME -u ARCH -u FEATURESET -u FLAVOUR -u VERSION -u LOCALVERSION
 setup_env += DISTRIBUTION_OFFICIAL_BUILD=1 DISTRIBUTOR="$(DISTRIBUTOR)" DISTRIBUTION_VERSION="$(SOURCEVERSION)" KBUILD_BUILD_TIMESTAMP="$(DISTRIBUTOR) $(SOURCEVERSION) ($(SOURCE_DATE_UTC_ISO))" KBUILD_BUILD_USER="$(word 1,$(subst @, ,$(MAINTAINER)))" KBUILD_BUILD_HOST="$(word 2,$(subst @, ,$(MAINTAINER)))"
 
 MAKE_CLEAN = $(setup_env) $(MAKE)
@@ -67,7 +71,7 @@ source-featureset: $(STAMPS_DIR)/source_$(FEATURESET)
 
 $(BUILD_DIR)/config.$(ARCH)_$(FEATURESET)_$(FLAVOUR): $(KCONFIG)
 	mkdir -p '$(dir $@)'
-	python debian/bin/kconfig.py '$@' $(KCONFIG) $(KCONFIG_OPTIONS)
+	debian/bin/kconfig.py '$@' $(KCONFIG) $(KCONFIG_OPTIONS)
 
 define copy_source
 mkdir -p '$(1)'
@@ -133,6 +137,8 @@ install-base:
 	dh_strip
 	dh_compress
 	dh_fixperms
+	dh_strip
+	dh_shlibdeps
 	dh_installdeb
 	dh_gencontrol -- $(GENCONTROL_ARGS)
 	dh_md5sums
@@ -225,6 +231,10 @@ install-headers_$(ARCH)_$(FEATURESET)_$(FLAVOUR): $(STAMPS_DIR)/build_$(ARCH)_$(
 	mkdir -p $(DIR)/arch/$(KERNEL_ARCH)/include/generated/uapi/asm/
 	cp -a $(IMAGE_BUILD_DIR)/arch/$(KERNEL_ARCH)/include/generated/uapi/asm/*.h $(DIR)/arch/$(KERNEL_ARCH)/include/generated/uapi/asm/
 	cp -a $(SOURCE_DIR)/arch/Kconfig $(DIR)/arch/
+	if [ -x "$(IMAGE_BUILD_DIR)/tools/objtool/objtool" ]; then \
+		mkdir -p $(DIR)/build/tools/objtool/; \
+		cp -a $(IMAGE_BUILD_DIR)/tools/objtool/objtool $(DIR)/tools/objtool/; \
+	fi
 
 	mkdir -p $(PACKAGE_DIR)/lib/modules/$(REAL_VERSION)
 	ln -s /usr/src/$(PACKAGE_NAME) $(PACKAGE_DIR)/lib/modules/$(REAL_VERSION)/build
@@ -288,22 +298,23 @@ endif
 	+$(MAKE_SELF) \
 	  install-image_$(ARCH)_$(FEATURESET)_$(FLAVOUR)_plain_bug \
 	  PACKAGE_DIR='$(PACKAGE_DIR)' PACKAGE_NAME='$(PACKAGE_NAME)' REAL_VERSION='$(REAL_VERSION)'
-	+$(MAKE_SELF) install-base
+	+$(MAKE_SELF) install-base GENCONTROL_ARGS='-Vkernel:Recommends='"$$( \
+		if grep -q '^CONFIG_SMP=y' $(DIR)/.config; then \
+			printf irqbalance,; \
+		fi)"
 
 install-image_$(ARCH)_$(FEATURESET)_$(FLAVOUR)_plain_dt: DT_INSTALL_DIR = $(PACKAGE_DIR)/usr/lib/linux-image-$(REAL_VERSION)
 install-image_$(ARCH)_$(FEATURESET)_$(FLAVOUR)_plain_dt:
 ifneq ($(filter arm64 armel armhf,$(ARCH)),)
 	+$(MAKE_CLEAN) -C $(DIR) dtbs
-	shopt -s nullglob ; for i in $(DIR)/arch/$(KERNEL_ARCH)/boot/dts/*.dtb ; do \
-		install -D -m644 $$i '$(DT_INSTALL_DIR)'/$$(basename $$i) ; \
-	done
+	+$(MAKE_CLEAN) -C $(DIR) dtbs_install INSTALL_DTBS_PATH=$(CURDIR)/$(DT_INSTALL_DIR)
 endif
 
 install-image_$(ARCH)_$(FEATURESET)_$(FLAVOUR)_plain_bug:
 	dh_installdirs usr/share/bug/$(PACKAGE_NAME)
 	dh_install debian/templates/image.plain.bug/* usr/share/bug/$(PACKAGE_NAME)
 	chmod 755 $(PACKAGE_DIR)/usr/share/bug/$(PACKAGE_NAME)/script
-	echo "RELEASE='$(REAL_VERSION)'" > $(PACKAGE_DIR)/usr/share/bug/$(PACKAGE_NAME)/info
+	printf "RELEASE='$(REAL_VERSION)'\nDISTRIBUTOR='$(DISTRIBUTOR)'\nSOURCEVERSION='$(SOURCEVERSION)'\n" > $(PACKAGE_DIR)/usr/share/bug/$(PACKAGE_NAME)/info
 
 install-image-dbg_$(ARCH)_$(FEATURESET)_$(FLAVOUR): REAL_VERSION = $(ABINAME)$(LOCALVERSION)
 install-image-dbg_$(ARCH)_$(FEATURESET)_$(FLAVOUR): PACKAGE_NAME = linux-image-$(REAL_VERSION)-dbg
