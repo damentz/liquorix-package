@@ -26,6 +26,8 @@ class Templates(object):
                     f = codecs.open(filename, 'r', 'utf-8')
                     if prefix == 'control':
                         return read_control(f)
+                    if prefix == 'tests-control':
+                        return read_tests_control(f)
                     return f.read()
 
     def get(self, key, default=None):
@@ -40,12 +42,18 @@ class Templates(object):
 
 def read_control(f):
     from .debian import Package
+    return _read_rfc822(f, Package)
 
+def read_tests_control(f):
+    from .debian import TestsControl
+    return _read_rfc822(f, TestsControl)
+
+def _read_rfc822(f, cls):
     entries = []
     eof = False
 
     while not eof:
-        e = Package()
+        e = cls()
         last = None
         lines = []
         while True:
@@ -58,11 +66,11 @@ def read_control(f):
                 break
             if line[0] in ' \t':
                 if not last:
-                    raise ValueError(u'Continuation line seen before first header')
+                    raise ValueError('Continuation line seen before first header')
                 lines.append(line.lstrip())
                 continue
             if last:
-                e[last] = u'\n'.join(lines)
+                e[last] = '\n'.join(lines)
             i = line.find(':')
             if i < 0:
                 raise ValueError(u"Not a header, not a continuation: ``%s''" % line)

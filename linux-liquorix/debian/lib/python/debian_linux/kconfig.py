@@ -87,5 +87,5 @@ class KconfigFile(OrderedDict):
         self[key] = entry
 
     def str_iter(self):
-        for key, value in self.iteritems():
+        for key, value in self.items():
             yield str(value)

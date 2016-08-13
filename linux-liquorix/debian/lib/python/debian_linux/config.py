@@ -27,6 +27,14 @@ class SchemaItemBoolean(object):
         raise Error
 
 
+class SchemaItemInteger(object):
+    def __call__(self, i):
+        try:
+            return int(i.strip(), 0)
+        except ValueError:
+            raise Error
+
+
 class SchemaItemList(object):
     def __init__(self, type="\s+"):
         self.type = type

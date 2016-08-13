@@ -1,5 +1,4 @@
 import codecs
-import six
 from collections import OrderedDict
 
 from .debian import *
@@ -141,7 +140,7 @@ class Gencontrol(object):
             cmds = []
             for i in extra_arches[arch]:
                 cmds.append("$(MAKE) -f debian/rules.real install-dummy ARCH='%s' DH_OPTIONS='-p%s'" % (arch, i['Package']))
-            makefile.add('binary-arch_%s' % arch, [u'binary-arch_%s_extra' % arch])
+            makefile.add('binary-arch_%s' % arch, ['binary-arch_%s_extra' % arch])
             makefile.add("binary-arch_%s_extra" % arch, cmds = cmds)
 
     def do_arch(self, packages, makefile, arch, vars, makeflags, extra):
@@ -255,7 +254,7 @@ class Gencontrol(object):
 
     def process_package(self, in_entry, vars={}):
         entry = in_entry.__class__()
-        for key, value in in_entry.iteritems():
+        for key, value in in_entry.items():
             if isinstance(value, PackageRelation):
                 value = self.process_relation(value, vars)
             elif isinstance(value, PackageDescription):
@@ -275,7 +274,7 @@ class Gencontrol(object):
         def subst(match):
             return vars[match.group(1)]
 
-        return re.sub(r'@([-_a-z]+)@', subst, six.text_type(s))
+        return re.sub(r'@([-_a-z0-9]+)@', subst, str(s))
 
     def write(self, packages, makefile):
         self.write_control(packages.values())
@@ -296,6 +295,6 @@ class Gencontrol(object):
 
     def write_rfc822(self, f, list):
         for entry in list:
-            for key, value in entry.iteritems():
+            for key, value in entry.items():
                 f.write(u"%s: %s\n" % (key, value))
-            f.write(u'\n')
+            f.write('\n')
