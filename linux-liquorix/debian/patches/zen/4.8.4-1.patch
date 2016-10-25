@@ -2428,7 +2428,7 @@ index c041658..02f5068 100644
 +in-kernel irqchip.  Creating a PMU with a userspace irqchip is currently not
 +supported.
 diff --git a/MAINTAINERS b/MAINTAINERS
-index f593300..8a17054 100644
+index f593300..69604e4 100644
 --- a/MAINTAINERS
 +++ b/MAINTAINERS
 @@ -2256,6 +2256,19 @@ F:	include/linux/audit.h
@@ -2451,8 +2451,23 @@ index f593300..8a17054 100644
  AUXILIARY DISPLAY DRIVERS
  M:	Miguel Ojeda Sandonis <miguel.ojeda.sandonis@gmail.com>
  W:	http://miguelojeda.es/auxdisplay.htm
+@@ -12951,11 +12964,10 @@ F:	arch/x86/xen/*swiotlb*
+ F:	drivers/xen/*swiotlb*
+ 
+ XFS FILESYSTEM
+-P:	Silicon Graphics Inc
+ M:	Dave Chinner <david@fromorbit.com>
+-M:	xfs@oss.sgi.com
+-L:	xfs@oss.sgi.com
+-W:	http://oss.sgi.com/projects/xfs
++M:	linux-xfs@vger.kernel.org
++L:	linux-xfs@vger.kernel.org
++W:	http://xfs.org/
+ T:	git git://git.kernel.org/pub/scm/linux/kernel/git/dgc/linux-xfs.git
+ S:	Supported
+ F:	Documentation/filesystems/xfs.txt
 diff --git a/Makefile b/Makefile
-index 80b8671..a94d8b7 100644
+index 80b8671..45a506d 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -1,8 +1,8 @@
@@ -2461,7 +2476,7 @@ index 80b8671..a94d8b7 100644
 -SUBLEVEL = 0
 -EXTRAVERSION =
 -NAME = Psychotic Stoned Sheep
-+SUBLEVEL = 3
++SUBLEVEL = 4
 +EXTRAVERSION = -zen
 +NAME = Online Space Amplifier
  
@@ -2489,6 +2504,32 @@ index 80b8671..a94d8b7 100644
  else
  ifdef CONFIG_PROFILE_ALL_BRANCHES
  KBUILD_CFLAGS	+= -O2
+diff --git a/arch/arc/include/asm/irqflags-arcv2.h b/arch/arc/include/asm/irqflags-arcv2.h
+index d1ec7f6..e880dfa 100644
+--- a/arch/arc/include/asm/irqflags-arcv2.h
++++ b/arch/arc/include/asm/irqflags-arcv2.h
+@@ -112,7 +112,7 @@ static inline long arch_local_save_flags(void)
+ 	 */
+ 	temp = (1 << 5) |
+ 		((!!(temp & STATUS_IE_MASK)) << CLRI_STATUS_IE_BIT) |
+-		(temp & CLRI_STATUS_E_MASK);
++		((temp >> 1) & CLRI_STATUS_E_MASK);
+ 	return temp;
+ }
+ 
+diff --git a/arch/arc/kernel/intc-arcv2.c b/arch/arc/kernel/intc-arcv2.c
+index 6c24faf..62b59409 100644
+--- a/arch/arc/kernel/intc-arcv2.c
++++ b/arch/arc/kernel/intc-arcv2.c
+@@ -74,7 +74,7 @@ void arc_init_IRQ(void)
+ 	tmp = read_aux_reg(0xa);
+ 	tmp |= STATUS_AD_MASK | (irq_prio << 1);
+ 	tmp &= ~STATUS_IE_MASK;
+-	asm volatile("flag %0	\n"::"r"(tmp));
++	asm volatile("kflag %0	\n"::"r"(tmp));
+ }
+ 
+ static void arcv2_irq_mask(struct irq_data *data)
 diff --git a/arch/arm/boot/dts/armada-390.dtsi b/arch/arm/boot/dts/armada-390.dtsi
 index 094e39c..6cd18d8 100644
 --- a/arch/arm/boot/dts/armada-390.dtsi
@@ -5212,10 +5253,10 @@ index 0000000..fb7bb8f
 +}
 diff --git a/block/bfq-iosched.c b/block/bfq-iosched.c
 new file mode 100644
-index 0000000..9190a55
+index 0000000..eef6ff4
 --- /dev/null
 +++ b/block/bfq-iosched.c
-@@ -0,0 +1,4962 @@
+@@ -0,0 +1,5288 @@
 +/*
 + * Budget Fair Queueing (BFQ) disk scheduler.
 + *
@@ -5301,7 +5342,7 @@ index 0000000..9190a55
 +static const int bfq_back_penalty = 2;
 +
 +/* Idling period duration, in ns. */
-+static u64 bfq_slice_idle = NSEC_PER_SEC / 125;
++static u32 bfq_slice_idle = NSEC_PER_SEC / 125;
 +
 +/* Minimum number of assigned budgets for which stats are safe to compute. */
 +static const int bfq_stats_min_budgets = 194;
@@ -5321,7 +5362,7 @@ index 0000000..9190a55
 +
 +struct kmem_cache *bfq_pool;
 +
-+/* Below this threshold (in ms), we consider thinktime immediate. */
++/* Below this threshold (in ns), we consider thinktime immediate. */
 +#define BFQ_MIN_TT		(2 * NSEC_PER_MSEC)
 +
 +/* hw_tag detection: parallel requests threshold and min samples needed. */
@@ -5332,8 +5373,12 @@ index 0000000..9190a55
 +#define BFQQ_CLOSE_THR		(sector_t)(8 * 1024)
 +#define BFQQ_SEEKY(bfqq)	(hweight32(bfqq->seek_history) > 32/8)
 +
-+/* Min samples used for peak rate estimation (for autotuning). */
-+#define BFQ_PEAK_RATE_SAMPLES	32
++/* Min number of samples required to perform peak-rate update */
++#define BFQ_RATE_MIN_SAMPLES	32
++/* Min observation time interval required to perform a peak-rate update (ns) */
++#define BFQ_RATE_MIN_INTERVAL	300*NSEC_PER_MSEC
++/* Target observation time interval for a peak-rate update (ns) */
++#define BFQ_RATE_REF_INTERVAL	NSEC_PER_SEC
 +
 +/* Shift used for peak rate fixed precision calculations. */
 +#define BFQ_RATE_SHIFT		16
@@ -5852,6 +5897,23 @@ index 0000000..9190a55
 +		bfq_mark_bfqq_IO_bound(bfqq);
 +	else
 +		bfq_clear_bfqq_IO_bound(bfqq);
++
++	bfqq->wr_coeff = bic->saved_wr_coeff;
++	bfqq->wr_start_at_switch_to_srt = bic->saved_wr_start_at_switch_to_srt;
++	BUG_ON(time_is_after_jiffies(bfqq->wr_start_at_switch_to_srt));
++	bfqq->last_wr_start_finish = bic->saved_last_wr_start_finish;
++	BUG_ON(time_is_after_jiffies(bfqq->last_wr_start_finish));
++
++	if (bfqq->wr_coeff > 1 && (bfq_bfqq_in_large_burst(bfqq) ||
++	    time_is_before_jiffies(bfqq->last_wr_start_finish +
++				   bfqq->wr_cur_max_time))) {
++		bfq_log_bfqq(bfqq->bfqd, bfqq,
++		    "resume state: switching off wr");
++
++		bfqq->wr_coeff = 1;
++	}
++	/* make sure weight will be updated, however we got here */
++	bfqq->entity.prio_changed = 1;
 +}
 +
 +static int bfqq_process_refs(struct bfq_queue *bfqq)
@@ -6270,6 +6332,7 @@ index 0000000..9190a55
 +		 * operation, is reset only when bfqq is selected for
 +		 * service (see bfq_get_next_queue).
 +		 */
++		BUG_ON(bfqq->max_budget < 0);
 +		entity->budget = min_t(unsigned long,
 +				       bfq_bfqq_budget_left(bfqq),
 +				       bfqq->max_budget);
@@ -6278,6 +6341,7 @@ index 0000000..9190a55
 +		return true;
 +	}
 +
++	BUG_ON(bfqq->max_budget < 0);
 +	entity->budget = max_t(unsigned long, bfqq->max_budget,
 +			       bfq_serv_to_charge(bfqq->next_rq, bfqq));
 +	BUG_ON(entity->budget < 0);
@@ -6300,6 +6364,7 @@ index 0000000..9190a55
 +			bfqq->wr_coeff = bfqd->bfq_wr_coeff;
 +			bfqq->wr_cur_max_time = bfq_wr_duration(bfqd);
 +		} else {
++			bfqq->wr_start_at_switch_to_srt = jiffies;
 +			bfqq->wr_coeff = bfqd->bfq_wr_coeff *
 +				BFQ_SOFTRT_WEIGHT_FACTOR;
 +			bfqq->wr_cur_max_time =
@@ -6333,32 +6398,13 @@ index 0000000..9190a55
 +				     jiffies,
 +				     jiffies_to_msecs(bfqq->
 +						      wr_cur_max_time));
-+		} else if (time_before(
-+				   bfqq->last_wr_start_finish +
-+				   bfqq->wr_cur_max_time,
-+				   jiffies +
-+				   bfqd->bfq_wr_rt_max_time) &&
-+			   soft_rt) {
++		} else if (soft_rt) {
 +			/*
-+			 * The remaining weight-raising time is lower
-+			 * than bfqd->bfq_wr_rt_max_time, which means
-+			 * that the application is enjoying weight
-+			 * raising either because deemed soft-rt in
-+			 * the near past, or because deemed interactive
-+			 * a long ago.
-+			 * In both cases, resetting now the current
-+			 * remaining weight-raising time for the
-+			 * application to the weight-raising duration
-+			 * for soft rt applications would not cause any
-+			 * latency increase for the application (as the
-+			 * new duration would be higher than the
-+			 * remaining time).
-+			 *
-+			 * In addition, the application is now meeting
-+			 * the requirements for being deemed soft rt.
-+			 * In the end we can correctly and safely
-+			 * (re)charge the weight-raising duration for
-+			 * the application with the weight-raising
++			 * The application is now or still meeting the
++			 * requirements for being deemed soft rt.  We
++			 * can then correctly and safely (re)charge
++			 * the weight-raising duration for the
++			 * application with the weight-raising
 +			 * duration for soft rt applications.
 +			 *
 +			 * In particular, doing this recharge now, i.e.,
@@ -6382,14 +6428,22 @@ index 0000000..9190a55
 +			 *    latency because the application is not
 +			 *    weight-raised while they are pending.
 +			 */
++			if (bfqq->wr_cur_max_time !=
++				bfqd->bfq_wr_rt_max_time) {
++				bfqq->wr_start_at_switch_to_srt =
++					bfqq->last_wr_start_finish;
++                BUG_ON(time_is_after_jiffies(bfqq->last_wr_start_finish));
++
++				bfqq->wr_cur_max_time =
++					bfqd->bfq_wr_rt_max_time;
++				bfqq->wr_coeff = bfqd->bfq_wr_coeff *
++					BFQ_SOFTRT_WEIGHT_FACTOR;
++				bfq_log_bfqq(bfqd, bfqq,
++					     "switching to soft_rt wr");
++			} else
++				bfq_log_bfqq(bfqd, bfqq,
++					"moving forward soft_rt wr duration");
 +			bfqq->last_wr_start_finish = jiffies;
-+			bfqq->wr_cur_max_time =
-+				bfqd->bfq_wr_rt_max_time;
-+			bfqq->wr_coeff = bfqd->bfq_wr_coeff *
-+				BFQ_SOFTRT_WEIGHT_FACTOR;
-+			bfq_log_bfqq(bfqd, bfqq,
-+				     "switching to soft_rt wr, or "
-+				     " just moving forward duration");
 +		}
 +	}
 +}
@@ -6668,14 +6722,24 @@ index 0000000..9190a55
 +	return NULL;
 +}
 +
++static sector_t get_sdist(sector_t last_pos, struct request *rq)
++{
++	sector_t sdist = 0;
++
++	if (last_pos) {
++		if (last_pos < blk_rq_pos(rq))
++			sdist = blk_rq_pos(rq) - last_pos;
++		else
++			sdist = last_pos - blk_rq_pos(rq);
++	}
++
++	return sdist;
++}
++
 +static void bfq_activate_request(struct request_queue *q, struct request *rq)
 +{
 +	struct bfq_data *bfqd = q->elevator->elevator_data;
-+
 +	bfqd->rq_in_driver++;
-+	bfqd->last_position = blk_rq_pos(rq) + blk_rq_sectors(rq);
-+	bfq_log(bfqd, "activate_request: new bfqd->last_position %llu",
-+		(unsigned long long) bfqd->last_position);
 +}
 +
 +static void bfq_deactivate_request(struct request_queue *q, struct request *rq)
@@ -6840,11 +6904,16 @@ index 0000000..9190a55
 +		bfqq->bfqd->wr_busy_queues--;
 +	bfqq->wr_coeff = 1;
 +	bfqq->wr_cur_max_time = 0;
++	bfqq->last_wr_start_finish = jiffies;
 +	/*
 +	 * Trigger a weight change on the next invocation of
 +	 * __bfq_entity_update_weight_prio.
 +	 */
 +	bfqq->entity.prio_changed = 1;
++	bfq_log_bfqq(bfqq->bfqd, bfqq,
++		     "end_wr: wrais ending at %lu, rais_max_time %u",
++		     bfqq->last_wr_start_finish,
++		     jiffies_to_msecs(bfqq->wr_cur_max_time));
 +	bfq_log_bfqq(bfqq->bfqd, bfqq, "end_wr: wr_busy %d",
 +		     bfqq->bfqd->wr_busy_queues);
 +}
@@ -7152,18 +7221,24 @@ index 0000000..9190a55
 +
 +static void bfq_bfqq_save_state(struct bfq_queue *bfqq)
 +{
++	struct bfq_io_cq *bic = bfqq->bic;
++
 +	/*
 +	 * If !bfqq->bic, the queue is already shared or its requests
 +	 * have already been redirected to a shared queue; both idle window
 +	 * and weight raising state have already been saved. Do nothing.
 +	 */
-+	if (!bfqq->bic)
++	if (!bic)
 +		return;
 +
-+	bfqq->bic->saved_idle_window = bfq_bfqq_idle_window(bfqq);
-+	bfqq->bic->saved_IO_bound = bfq_bfqq_IO_bound(bfqq);
-+	bfqq->bic->saved_in_large_burst = bfq_bfqq_in_large_burst(bfqq);
-+	bfqq->bic->was_in_burst_list = !hlist_unhashed(&bfqq->burst_list_node);
++	bic->saved_idle_window = bfq_bfqq_idle_window(bfqq);
++	bic->saved_IO_bound = bfq_bfqq_IO_bound(bfqq);
++	bic->saved_in_large_burst = bfq_bfqq_in_large_burst(bfqq);
++	bic->was_in_burst_list = !hlist_unhashed(&bfqq->burst_list_node);
++	bic->saved_wr_coeff = bfqq->wr_coeff;
++	bic->saved_wr_start_at_switch_to_srt = bfqq->wr_start_at_switch_to_srt;
++	bic->saved_last_wr_start_finish = bfqq->last_wr_start_finish;
++	BUG_ON(time_is_after_jiffies(bfqq->last_wr_start_finish));
 +}
 +
 +static void bfq_get_bic_reference(struct bfq_queue *bfqq)
@@ -7202,6 +7277,7 @@ index 0000000..9190a55
 +		new_bfqq->wr_coeff = bfqq->wr_coeff;
 +		new_bfqq->wr_cur_max_time = bfqq->wr_cur_max_time;
 +		new_bfqq->last_wr_start_finish = bfqq->last_wr_start_finish;
++		new_bfqq->wr_start_at_switch_to_srt = bfqq->wr_start_at_switch_to_srt;
 +		if (bfq_bfqq_busy(new_bfqq))
 +			bfqd->wr_busy_queues++;
 +		new_bfqq->entity.prio_changed = 1;
@@ -7334,9 +7410,10 @@ index 0000000..9190a55
 +		BUG_ON(bfqq == bfqd->in_service_queue);
 +		BUG_ON(RB_EMPTY_ROOT(&bfqq->sort_list));
 +
-+		if (bfqq->wr_coeff > 1 &&
++		if (time_is_before_jiffies(bfqq->last_wr_start_finish) &&
++		    bfqq->wr_coeff > 1 &&
 +		    bfqq->wr_cur_max_time == bfqd->bfq_wr_rt_max_time &&
-+			time_is_before_jiffies(bfqq->budget_timeout)) {
++		    time_is_before_jiffies(bfqq->budget_timeout)) {
 +			/*
 +			 * For soft real-time queues, move the start
 +			 * of the weight-raising period forward by the
@@ -7362,7 +7439,20 @@ index 0000000..9190a55
 +			 * request.
 +			 */
 +			bfqq->last_wr_start_finish += jiffies -
-+				bfqq->budget_timeout;
++				max_t(unsigned long, bfqq->last_wr_start_finish,
++				      bfqq->budget_timeout);
++			if (time_is_after_jiffies(bfqq->last_wr_start_finish)) {
++			       pr_crit(
++			       "BFQ WARNING:last %lu budget %lu jiffies %lu",
++			       bfqq->last_wr_start_finish,
++			       bfqq->budget_timeout,
++			       jiffies);
++			       pr_crit("diff %lu", jiffies -
++				       max_t(unsigned long,
++					     bfqq->last_wr_start_finish,
++					     bfqq->budget_timeout));
++			       bfqq->last_wr_start_finish = jiffies;
++			}
 +		}
 +
 +		bfq_set_budget_timeout(bfqd, bfqq);
@@ -7390,7 +7480,7 @@ index 0000000..9190a55
 +{
 +	struct bfq_queue *bfqq = bfqd->in_service_queue;
 +	struct bfq_io_cq *bic;
-+	unsigned long sl;
++	u32 sl;
 +
 +	BUG_ON(!RB_EMPTY_ROOT(&bfqq->sort_list));
 +
@@ -7424,15 +7514,326 @@ index 0000000..9190a55
 +	 */
 +	if (BFQQ_SEEKY(bfqq) && bfqq->wr_coeff == 1 &&
 +	    bfq_symmetric_scenario(bfqd))
-+		sl = min_t(u64, sl, BFQ_MIN_TT);
++		sl = min_t(u32, sl, BFQ_MIN_TT);
 +
 +	bfqd->last_idling_start = ktime_get();
 +	hrtimer_start(&bfqd->idle_slice_timer, ns_to_ktime(sl),
 +		      HRTIMER_MODE_REL);
 +	bfqg_stats_set_start_idle_time(bfqq_group(bfqq));
-+	bfq_log(bfqd, "arm idle: %llu/%llu ms",
-+		div_u64(sl, NSEC_PER_MSEC),
-+		div_u64(bfqd->bfq_slice_idle, NSEC_PER_MSEC));
++	bfq_log(bfqd, "arm idle: %ld/%ld ms",
++		sl / NSEC_PER_MSEC, bfqd->bfq_slice_idle / NSEC_PER_MSEC);
++}
++
++/*
++ * In autotuning mode, max_budget is dynamically recomputed as the
++ * amount of sectors transferred in timeout at the estimated peak
++ * rate. This enables BFQ to utilize a full timeslice with a full
++ * budget, even if the in-service queue is served at peak rate. And
++ * this maximises throughput with sequential workloads.
++ */
++static unsigned long bfq_calc_max_budget(struct bfq_data *bfqd)
++{
++	return (u64)bfqd->peak_rate * USEC_PER_MSEC *
++		jiffies_to_msecs(bfqd->bfq_timeout)>>BFQ_RATE_SHIFT;
++}
++
++/*
++ * Update parameters related to throughput and responsiveness, as a
++ * function of the estimated peak rate. See comments on
++ * bfq_calc_max_budget(), and on T_slow and T_fast arrays.
++ */
++void update_thr_responsiveness_params(struct bfq_data *bfqd)
++{
++	int dev_type = blk_queue_nonrot(bfqd->queue);
++
++	if (bfqd->bfq_user_max_budget == 0) {
++		bfqd->bfq_max_budget =
++			bfq_calc_max_budget(bfqd);
++		BUG_ON(bfqd->bfq_max_budget < 0);
++		bfq_log(bfqd, "new max_budget = %d",
++			bfqd->bfq_max_budget);
++	}
++
++	if (bfqd->device_speed == BFQ_BFQD_FAST &&
++	    bfqd->peak_rate < device_speed_thresh[dev_type]) {
++		bfqd->device_speed = BFQ_BFQD_SLOW;
++		bfqd->RT_prod = R_slow[dev_type] *
++			T_slow[dev_type];
++	} else if (bfqd->device_speed == BFQ_BFQD_SLOW &&
++		   bfqd->peak_rate > device_speed_thresh[dev_type]) {
++		bfqd->device_speed = BFQ_BFQD_FAST;
++		bfqd->RT_prod = R_fast[dev_type] *
++			T_fast[dev_type];
++	}
++
++	bfq_log(bfqd,
++"dev_type %s dev_speed_class = %s (%llu sects/sec), thresh %llu setcs/sec",
++		dev_type == 0 ? "ROT" : "NONROT",
++		bfqd->device_speed == BFQ_BFQD_FAST ? "FAST" : "SLOW",
++		bfqd->device_speed == BFQ_BFQD_FAST ?
++		(USEC_PER_SEC*(u64)R_fast[dev_type])>>BFQ_RATE_SHIFT :
++		(USEC_PER_SEC*(u64)R_slow[dev_type])>>BFQ_RATE_SHIFT,
++		(USEC_PER_SEC*(u64)device_speed_thresh[dev_type])>>
++		BFQ_RATE_SHIFT);
++}
++
++void bfq_reset_rate_computation(struct bfq_data *bfqd, struct request *rq)
++{
++	if (rq != NULL) { /* new rq dispatch now, reset accordingly */
++		bfqd->last_dispatch = bfqd->first_dispatch = ktime_get_ns() ;
++		bfqd->peak_rate_samples = 1;
++		bfqd->sequential_samples = 0;
++		bfqd->tot_sectors_dispatched = bfqd->last_rq_max_size =
++			blk_rq_sectors(rq);
++	} else /* no new rq dispatched, just reset the number of samples */
++		bfqd->peak_rate_samples = 0; /* full re-init on next disp. */
++
++	bfq_log(bfqd,
++		"reset_rate_computation at end, sample %u/%u tot_sects %llu",
++		bfqd->peak_rate_samples, bfqd->sequential_samples,
++		bfqd->tot_sectors_dispatched);
++}
++
++void bfq_update_rate_reset(struct bfq_data *bfqd, struct request *rq)
++{
++	u32 rate, weight, divisor;
++
++	/*
++	 * For the convergence property to hold (see comments on
++	 * bfq_update_peak_rate()) and for the assessment to be
++	 * reliable, a minimum number of samples must be present, and
++	 * a minimum amount of time must have elapsed. If not so, do
++	 * not compute new rate. Just reset parameters, to get ready
++	 * for a new evaluation attempt.
++	 */
++	if (bfqd->peak_rate_samples < BFQ_RATE_MIN_SAMPLES ||
++	    bfqd->delta_from_first < BFQ_RATE_MIN_INTERVAL) {
++		bfq_log(bfqd,
++	"update_rate_reset: only resetting, delta_first %lluus samples %d",
++			bfqd->delta_from_first>>10, bfqd->peak_rate_samples);
++		goto reset_computation;
++	}
++
++	/*
++	 * If a new request completion has occurred after last
++	 * dispatch, then, to approximate the rate at which requests
++	 * have been served by the device, it is more precise to
++	 * extend the observation interval to the last completion.
++	 */
++	bfqd->delta_from_first =
++		max_t(u64, bfqd->delta_from_first,
++		      bfqd->last_completion - bfqd->first_dispatch);
++
++	BUG_ON(bfqd->delta_from_first == 0);
++	/*
++	 * Rate computed in sects/usec, and not sects/nsec, for
++	 * precision issues.
++	 */
++	rate = div64_ul(bfqd->tot_sectors_dispatched<<BFQ_RATE_SHIFT,
++			div_u64(bfqd->delta_from_first, NSEC_PER_USEC));
++
++	bfq_log(bfqd,
++"update_rate_reset: tot_sects %llu delta_first %lluus rate %llu sects/s (%d)",
++		bfqd->tot_sectors_dispatched, bfqd->delta_from_first>>10,
++		((USEC_PER_SEC*(u64)rate)>>BFQ_RATE_SHIFT),
++		rate > 20<<BFQ_RATE_SHIFT);
++
++	/*
++	 * Peak rate not updated if:
++	 * - the percentage of sequential dispatches is below 3/4 of the
++	 *   total, and rate is below the current estimated peak rate
++	 * - rate is unreasonably high (> 20M sectors/sec)
++	 */
++	if ((bfqd->peak_rate_samples > (3 * bfqd->sequential_samples)>>2 &&
++	     rate <= bfqd->peak_rate) ||
++		rate > 20<<BFQ_RATE_SHIFT) {
++		bfq_log(bfqd,
++		"update_rate_reset: goto reset, samples %u/%u rate/peak %llu/%llu",
++		bfqd->peak_rate_samples, bfqd->sequential_samples,
++		((USEC_PER_SEC*(u64)rate)>>BFQ_RATE_SHIFT),
++		((USEC_PER_SEC*(u64)bfqd->peak_rate)>>BFQ_RATE_SHIFT));
++		goto reset_computation;
++	} else {
++		bfq_log(bfqd,
++		"update_rate_reset: do update, samples %u/%u rate/peak %llu/%llu",
++		bfqd->peak_rate_samples, bfqd->sequential_samples,
++		((USEC_PER_SEC*(u64)rate)>>BFQ_RATE_SHIFT),
++		((USEC_PER_SEC*(u64)bfqd->peak_rate)>>BFQ_RATE_SHIFT));
++	}
++
++	/*
++	 * We have to update the peak rate, at last! To this purpose,
++	 * we use a low-pass filter. We compute the smoothing constant
++	 * of the filter as a function of the 'weight' of the new
++	 * measured rate.
++	 *
++	 * As can be seen in next formulas, we define this weight as a
++	 * quantity proportional to how sequential the workload is,
++	 * and to how long the observation time interval is.
++	 *
++	 * The weight runs from 0 to 8. The maximum value of the
++	 * weight, 8, yields the minimum value for the smoothing
++	 * constant. At this minimum value for the smoothing constant,
++	 * the measured rate contributes for half of the next value of
++	 * the estimated peak rate.
++	 *
++	 * So, the first step is to compute the weight as a function
++	 * of how sequential the workload is. Note that the weight
++	 * cannot reach 9, because bfqd->sequential_samples cannot
++	 * become equal to bfqd->peak_rate_samples, which, in its
++	 * turn, holds true because bfqd->sequential_samples is not
++	 * incremented for the first sample.
++	 */
++	weight = (9 * bfqd->sequential_samples) / bfqd->peak_rate_samples;
++
++	/*
++	 * Second step: further refine the weight as a function of the
++	 * duration of the observation interval.
++	 */
++	weight = min_t(u32, 8,
++		       div_u64(weight * bfqd->delta_from_first,
++			       BFQ_RATE_REF_INTERVAL));
++
++	/*
++	 * Divisor ranging from 10, for minimum weight, to 2, for
++	 * maximum weight.
++	 */
++	divisor = 10 - weight;
++	BUG_ON(divisor == 0);
++
++	/*
++	 * Finally, update peak rate:
++	 *
++	 * peak_rate = peak_rate * (divisor-1) / divisor  +  rate / divisor
++	 */
++	bfqd->peak_rate *= divisor-1;
++	bfqd->peak_rate /= divisor;
++	rate /= divisor; /* smoothing constant alpha = 1/divisor */
++
++	bfq_log(bfqd,
++		"update_rate_reset: divisor %d tmp_peak_rate %llu tmp_rate %u",
++		divisor,
++		((USEC_PER_SEC*(u64)bfqd->peak_rate)>>BFQ_RATE_SHIFT),
++		(u32)((USEC_PER_SEC*(u64)rate)>>BFQ_RATE_SHIFT));
++
++	BUG_ON(bfqd->peak_rate == 0);
++	BUG_ON(bfqd->peak_rate > 20<<BFQ_RATE_SHIFT);
++
++	bfqd->peak_rate += rate;
++	update_thr_responsiveness_params(bfqd);
++	BUG_ON(bfqd->peak_rate > 20<<BFQ_RATE_SHIFT);
++
++reset_computation:
++	bfq_reset_rate_computation(bfqd, rq);
++}
++
++/*
++ * Update the read/write peak rate (the main quantity used for
++ * auto-tuning, see update_thr_responsiveness_params()).
++ *
++ * It is not trivial to estimate the peak rate (correctly): because of
++ * the presence of sw and hw queues between the scheduler and the
++ * device components that finally serve I/O requests, it is hard to
++ * say exactly when a given dispatched request is served inside the
++ * device, and for how long. As a consequence, it is hard to know
++ * precisely at what rate a given set of requests is actually served
++ * by the device.
++ *
++ * On the opposite end, the dispatch time of any request is trivially
++ * available, and, from this piece of information, the "dispatch rate"
++ * of requests can be immediately computed. So, the idea in the next
++ * function is to use what is known, namely request dispatch times
++ * (plus, when useful, request completion times), to estimate what is
++ * unknown, namely in-device request service rate.
++ *
++ * The main issue is that, because of the above facts, the rate at
++ * which a certain set of requests is dispatched over a certain time
++ * interval can vary greatly with respect to the rate at which the
++ * same requests are then served. But, since the size of any
++ * intermediate queue is limited, and the service scheme is lossless
++ * (no request is silently dropped), the following obvious convergence
++ * property holds: the number of requests dispatched MUST become
++ * closer and closer to the number of requests completed as the
++ * observation interval grows. This is the key property used in
++ * the next function to estimate the peak service rate as a function
++ * of the observed dispatch rate. The function assumes to be invoked
++ * on every request dispatch.
++ */
++void bfq_update_peak_rate(struct bfq_data *bfqd, struct request *rq)
++{
++	u64 now_ns = ktime_get_ns();
++
++	if (bfqd->peak_rate_samples == 0) { /* first dispatch */
++		bfq_log(bfqd,
++		"update_peak_rate: goto reset, samples %d",
++				bfqd->peak_rate_samples) ;
++		bfq_reset_rate_computation(bfqd, rq);
++		goto update_last_values; /* will add one sample */
++	}
++
++	/*
++	 * Device idle for very long: the observation interval lasting
++	 * up to this dispatch cannot be a valid observation interval
++	 * for computing a new peak rate (similarly to the late-
++	 * completion event in bfq_completed_request()). Go to
++	 * update_rate_and_reset to have the following three steps
++	 * taken:
++	 * - close the observation interval at the last (previous)
++	 *   request dispatch or completion
++	 * - compute rate, if possible, for that observation interval
++	 * - start a new observation interval with this dispatch
++	 */
++	if (now_ns - bfqd->last_dispatch > 100*NSEC_PER_MSEC &&
++	    bfqd->rq_in_driver == 0) {
++		bfq_log(bfqd,
++"update_peak_rate: jumping to updating&resetting delta_last %lluus samples %d",
++			(now_ns - bfqd->last_dispatch)>>10,
++			bfqd->peak_rate_samples) ;
++		goto update_rate_and_reset;
++	}
++
++	/* Update sampling information */
++	bfqd->peak_rate_samples++;
++
++	if ((bfqd->rq_in_driver > 0 ||
++		now_ns - bfqd->last_completion < BFQ_MIN_TT)
++	     && get_sdist(bfqd->last_position, rq) < BFQQ_SEEK_THR)
++		bfqd->sequential_samples++;
++
++	bfqd->tot_sectors_dispatched += blk_rq_sectors(rq);
++
++	/* Reset max observed rq size every 32 dispatches */
++	if (likely(bfqd->peak_rate_samples % 32))
++		bfqd->last_rq_max_size =
++			max_t(u32, blk_rq_sectors(rq), bfqd->last_rq_max_size);
++	else
++		bfqd->last_rq_max_size = blk_rq_sectors(rq);
++
++	bfqd->delta_from_first = now_ns - bfqd->first_dispatch;
++
++	bfq_log(bfqd,
++	"update_peak_rate: added samples %u/%u tot_sects %llu delta_first %lluus",
++		bfqd->peak_rate_samples, bfqd->sequential_samples,
++		bfqd->tot_sectors_dispatched,
++		bfqd->delta_from_first>>10);
++
++	/* Target observation interval not yet reached, go on sampling */
++	if (bfqd->delta_from_first < BFQ_RATE_REF_INTERVAL)
++		goto update_last_values;
++
++update_rate_and_reset:
++	bfq_update_rate_reset(bfqd, rq);
++update_last_values:
++	bfqd->last_position = blk_rq_pos(rq) + blk_rq_sectors(rq);
++	bfqd->last_dispatch = now_ns;
++
++	bfq_log(bfqd,
++	"update_peak_rate: delta_first %lluus last_pos %llu peak_rate %llu",
++		(now_ns - bfqd->first_dispatch)>>10,
++		(unsigned long long) bfqd->last_position,
++		((USEC_PER_SEC*(u64)bfqd->peak_rate)>>BFQ_RATE_SHIFT));
++	bfq_log(bfqd,
++	"update_peak_rate: samples at end %d", bfqd->peak_rate_samples);
 +}
 +
 +/*
@@ -7453,6 +7854,7 @@ index 0000000..9190a55
 +	 * incrementing bfqq->dispatched.
 +	 */
 +	bfqq->dispatched++;
++	bfq_update_peak_rate(q->elevator->elevator_data, rq);
 +
 +	bfq_remove_request(rq);
 +	elv_dispatch_sort(q, rq);
@@ -7692,27 +8094,15 @@ index 0000000..9190a55
 +			bfqq->entity.budget);
 +}
 +
-+static unsigned long bfq_calc_max_budget(struct bfq_data *bfqd)
-+{
-+	/*
-+	 * The max_budget calculated when autotuning is equal to the
-+	 * amount of sectors transferred in timeout at the
-+	 * estimated peak rate.
-+	 */
-+	return bfqd->peak_rate * 1000 * jiffies_to_msecs(bfqd->bfq_timeout) >>
-+		BFQ_RATE_SHIFT;
-+}
-+
 +/*
-+ * Update the read peak rate (quantity used for auto-tuning) as a
-+ * function of the rate at which bfqq has been served, and check
-+ * whether the process associated with bfqq is "slow". Return true if
-+ * the process is slow. The slow flag is used, in addition to the
-+ * budget timeout, to reduce the amount of service provided to seeky
-+ * processes, and hence reduce their chances to lower the
-+ * throughput. More details in the body of the function.
++ * Return true if the process associated with bfqq is "slow". The slow
++ * flag is used, in addition to the budget timeout, to reduce the
++ * amount of service provided to seeky processes, and thus reduce
++ * their chances to lower the throughput. More details in the comments
++ * on the function bfq_bfqq_expire().
 + *
-+ * An important observation is in order: with devices with internal
++ * An important observation is in order: as discussed in the comments
++ * on the function bfq_update_peak_rate(), with devices with internal
 + * queues, it is hard if ever possible to know when and for how long
 + * an I/O request is processed by the device (apart from the trivial
 + * I/O pattern where a new request is dispatched only after the
@@ -7720,26 +8110,27 @@ index 0000000..9190a55
 + * the real rate at which the I/O requests of each bfq_queue are
 + * served.  In fact, for an I/O scheduler like BFQ, serving a
 + * bfq_queue means just dispatching its requests during its service
-+ * slot, i.e., until the budget of the queue is exhausted, or the
-+ * queue remains idle, or, finally, a timeout fires. But, during the
-+ * service slot of a bfq_queue, the device may be still processing
-+ * requests of bfq_queues served in previous service slots. On the
-+ * opposite end, the requests of the in-service bfq_queue may be
-+ * completed after the service slot of the queue finishes. Anyway,
-+ * unless more sophisticated solutions are used (where possible), the
-+ * sum of the sizes of the requests dispatched during the service slot
-+ * of a bfq_queue is probably the only approximation available for
-+ * the service received by the bfq_queue during its service slot. And,
-+ * as written above, this sum is the quantity used in this function to
-+ * evaluate the peak rate.
++ * slot (i.e., until the budget of the queue is exhausted, or the
++ * queue remains idle, or, finally, a timeout fires). But, during the
++ * service slot of a bfq_queue, around 100 ms at most, the device may
++ * be even still processing requests of bfq_queues served in previous
++ * service slots. On the opposite end, the requests of the in-service
++ * bfq_queue may be completed after the service slot of the queue
++ * finishes.
++ *
++ * Anyway, unless more sophisticated solutions are used
++ * (where possible), the sum of the sizes of the requests dispatched
++ * during the service slot of a bfq_queue is probably the only
++ * approximation available for the service received by the bfq_queue
++ * during its service slot. And this sum is the quantity used in this
++ * function to evaluate the I/O speed of a process.
 + */
-+static bool bfq_update_peak_rate(struct bfq_data *bfqd, struct bfq_queue *bfqq,
++static bool bfq_bfqq_is_slow(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 +				 bool compensate, enum bfqq_expiration reason,
 +				 unsigned long *delta_ms)
 +{
-+	u64 bw, bwdiv10, delta_usecs, delta_ms_tmp;
 +	ktime_t delta_ktime;
-+	int update = 0;
++	u32 delta_usecs;
 +	bool slow = BFQQ_SEEKY(bfqq); /* if delta too short, use seekyness */
 +
 +	if (!bfq_bfqq_sync(bfqq))
@@ -7752,129 +8143,45 @@ index 0000000..9190a55
 +	delta_ktime = ktime_sub(delta_ktime, bfqd->last_budget_start);
 +	delta_usecs = ktime_to_us(delta_ktime);
 +
-+	/* Don't trust short/unrealistic values. */
++	/* don't trust short/unrealistic values. */
 +	if (delta_usecs < 1000 || delta_usecs >= LONG_MAX) {
 +		if (blk_queue_nonrot(bfqd->queue))
-+			*delta_ms = BFQ_MIN_TT; /*
-+						 * give same worst-case
-+						 * guarantees as
-+						 * idling for seeky
-+						*/
-+		else /* Charge at least one seek */
-+			*delta_ms = jiffies_to_msecs(bfq_slice_idle);
++			 /*
++			  * give same worst-case guarantees as idling
++			  * for seeky
++			  */
++			*delta_ms = BFQ_MIN_TT / NSEC_PER_MSEC;
++		else /* charge at least one seek */
++			*delta_ms = bfq_slice_idle / NSEC_PER_MSEC;
++
++		bfq_log(bfqd, "bfq_bfqq_is_slow: unrealistic %u", delta_usecs);
++
 +		return slow;
 +	}
 +
-+	delta_ms_tmp = delta_usecs;
-+	do_div(delta_ms_tmp, NSEC_PER_MSEC);
-+	*delta_ms = delta_ms_tmp;
++	*delta_ms = delta_usecs / USEC_PER_MSEC;
 +
 +	/*
-+	 * Calculate the bandwidth for the last slice.  We use a 64 bit
-+	 * value to store the peak rate, in sectors per usec in fixed
-+	 * point math.  We do so to have enough precision in the estimate
-+	 * and to avoid overflows.
-+	 */
-+	bw = (u64)bfqq->entity.service << BFQ_RATE_SHIFT;
-+	do_div(bw, (unsigned long)delta_usecs);
-+
-+	bfq_log(bfqd, "measured bw = %llu sects/sec",
-+		(1000000*bw)>>BFQ_RATE_SHIFT);
-+	/*
-+	 * Use only long (> 20ms) intervals to filter out spikes for
-+	 * the peak rate estimation.
++	 * Use only long (> 20ms) intervals to filter out excessive
++	 * spikes in service rate estimation.
 +	 */
 +	if (delta_usecs > 20000) {
-+		bool fully_sequential = bfqq->seek_history == 0;
 +		/*
-+		 * Soft real-time queues are not good candidates for
-+		 * evaluating bw, as they are likely to be slow even
-+		 * if sequential.
++		 * Caveat for rotational devices: processes doing I/O
++		 * in the slower disk zones tend to be slow(er) even
++		 * if not seeky. In this respect, the estimated peak
++		 * rate is likely to be an average over the disk
++		 * surface. Accordingly, to not be too harsh with
++		 * unlucky processes, a process is deemed slow only if
++		 * its rate has been lower than half of the estimated
++		 * peak rate.
 +		 */
-+		bool non_soft_rt = bfqq->wr_coeff == 1 ||
-+			bfqq->wr_cur_max_time != bfqd->bfq_wr_rt_max_time;
-+		bool consumed_large_budget =
-+			reason == BFQ_BFQQ_BUDGET_EXHAUSTED &&
-+			bfqq->entity.budget >= bfqd->bfq_max_budget * 2 / 3;
-+		bool served_for_long_time =
-+			reason == BFQ_BFQQ_BUDGET_TIMEOUT ||
-+			consumed_large_budget;
-+
-+		BUG_ON(bfqq->seek_history == 0 &&
-+		       hweight32(bfqq->seek_history) != 0);
-+
-+		if (bw > bfqd->peak_rate ||
-+		    (bfq_bfqq_sync(bfqq) && fully_sequential && non_soft_rt &&
-+		     served_for_long_time)) {
-+			/*
-+			 * To smooth oscillations use a low-pass filter with
-+			 * alpha=9/10, i.e.,
-+			 * new_rate = (9/10) * old_rate + (1/10) * bw
-+			 */
-+			bwdiv10 = bw;
-+			do_div(bwdiv10, 10);
-+			if (bwdiv10 == 0)
-+				return false; /* bw too low to be used */
-+			bfqd->peak_rate *= 9;
-+			do_div(bfqd->peak_rate, 10);
-+			bfqd->peak_rate += bwdiv10;
-+			update = 1;
-+			bfq_log(bfqd, "new peak_rate = %llu sects/sec",
-+				(1000000*bfqd->peak_rate)>>BFQ_RATE_SHIFT);
-+		}
-+
-+		update |= bfqd->peak_rate_samples == BFQ_PEAK_RATE_SAMPLES - 1;
-+
-+		if (bfqd->peak_rate_samples < BFQ_PEAK_RATE_SAMPLES)
-+			bfqd->peak_rate_samples++;
-+
-+		if (bfqd->peak_rate_samples == BFQ_PEAK_RATE_SAMPLES &&
-+		    update) {
-+			int dev_type = blk_queue_nonrot(bfqd->queue);
-+
-+			if (bfqd->bfq_user_max_budget == 0) {
-+				bfqd->bfq_max_budget =
-+					bfq_calc_max_budget(bfqd);
-+				bfq_log(bfqd, "new max_budget = %d",
-+					bfqd->bfq_max_budget);
-+			}
-+			if (bfqd->device_speed == BFQ_BFQD_FAST &&
-+			    bfqd->peak_rate < device_speed_thresh[dev_type]) {
-+				bfqd->device_speed = BFQ_BFQD_SLOW;
-+				bfqd->RT_prod = R_slow[dev_type] *
-+						T_slow[dev_type];
-+			} else if (bfqd->device_speed == BFQ_BFQD_SLOW &&
-+			    bfqd->peak_rate > device_speed_thresh[dev_type]) {
-+				bfqd->device_speed = BFQ_BFQD_FAST;
-+				bfqd->RT_prod = R_fast[dev_type] *
-+						T_fast[dev_type];
-+			}
-+			bfq_log(bfqd,
-+	"dev_type %d dev_speed_class = %d (%d sects/sec), thresh %d setcs/sec",
-+				dev_type, bfqd->device_speed,
-+				bfqd->device_speed == BFQ_BFQD_FAST ?
-+				(1000000*R_fast[dev_type])>>BFQ_RATE_SHIFT :
-+				(1000000*R_slow[dev_type])>>BFQ_RATE_SHIFT,
-+				(1000000*device_speed_thresh[dev_type])>>
-+				BFQ_RATE_SHIFT);
-+		}
-+		/*
-+		 * Caveat: processes doing IO in the slower disk zones
-+		 * tend to be slow(er) even if not seeky. In this
-+		 * respect, the estimated peak rate is likely to be an
-+		 * average over the disk surface. Accordingly, to not
-+		 * be too harsh with unlucky processes, a process is
-+		 * deemed slow only if its bw has been lower than half
-+		 * of the estimated peak rate.
-+		 */
-+		slow = bw < bfqd->peak_rate / 2;
++		slow = bfqq->entity.service < bfqd->bfq_max_budget / 2;
++		bfq_log(bfqd, "bfq_bfqq_is_slow: relative rate %d/%d",
++			bfqq->entity.service, bfqd->bfq_max_budget);
 +	}
 +
-+	bfq_log_bfqq(bfqd, bfqq,
-+		"update_peak_rate: bw %llu sect/s, peak rate %llu, slow %d",
-+		     (1000000*bw)>>BFQ_RATE_SHIFT,
-+		     (1000000*bfqd->peak_rate)>>BFQ_RATE_SHIFT,
-+		     bw < bfqd->peak_rate / 2);
++	bfq_log_bfqq(bfqd, bfqq, "bfq_bfqq_is_slow: slow %d", slow);
 +
 +	return slow;
 +}
@@ -8003,10 +8310,9 @@ index 0000000..9190a55
 +	BUG_ON(bfqq != bfqd->in_service_queue);
 +
 +	/*
-+	 * Update device peak rate for autotuning and check whether the
-+	 * process is slow (see bfq_update_peak_rate).
++	 * Check whether the process is slow (see bfq_bfqq_is_slow).
 +	 */
-+	slow = bfq_update_peak_rate(bfqd, bfqq, compensate, reason, &delta);
++	slow = bfq_bfqq_is_slow(bfqd, bfqq, compensate, reason, &delta);
 +
 +	/*
 +	 * Increase service_from_backlogged before next statement,
@@ -8503,6 +8809,9 @@ index 0000000..9190a55
 +	struct bfq_entity *entity = &bfqq->entity;
 +
 +	if (bfqq->wr_coeff > 1) { /* queue is being weight-raised */
++		BUG_ON(bfqq->wr_cur_max_time == bfqd->bfq_wr_rt_max_time &&
++		       time_is_after_jiffies(bfqq->last_wr_start_finish));
++
 +		bfq_log_bfqq(bfqd, bfqq,
 +			"raising period dur %u/%u msec, old coeff %u, w %d(%d)",
 +			jiffies_to_msecs(jiffies - bfqq->last_wr_start_finish),
@@ -8520,15 +8829,26 @@ index 0000000..9190a55
 +		 * time has elapsed from the beginning of this
 +		 * weight-raising period, then end weight raising.
 +		 */
-+		if (bfq_bfqq_in_large_burst(bfqq) ||
-+		    time_is_before_jiffies(bfqq->last_wr_start_finish +
-+					   bfqq->wr_cur_max_time)) {
-+			bfqq->last_wr_start_finish = jiffies;
-+			bfq_log_bfqq(bfqd, bfqq,
-+				     "wrais ending at %lu, rais_max_time %u",
-+				     bfqq->last_wr_start_finish,
-+				     jiffies_to_msecs(bfqq->wr_cur_max_time));
++		if (bfq_bfqq_in_large_burst(bfqq))
 +			bfq_bfqq_end_wr(bfqq);
++		else if (time_is_before_jiffies(bfqq->last_wr_start_finish +
++					   bfqq->wr_cur_max_time)) {
++			if (bfqq->wr_cur_max_time != bfqd->bfq_wr_rt_max_time ||
++			time_is_before_jiffies(bfqq->wr_start_at_switch_to_srt +
++					bfq_wr_duration(bfqd)))
++				bfq_bfqq_end_wr(bfqq);
++			else {
++				/* switch back to interactive wr */
++				bfqq->wr_coeff = bfqd->bfq_wr_coeff;
++				bfqq->wr_cur_max_time = bfq_wr_duration(bfqd);
++				bfqq->last_wr_start_finish =
++					bfqq->wr_start_at_switch_to_srt;
++				BUG_ON(time_is_after_jiffies(
++					       bfqq->last_wr_start_finish));
++				bfqq->entity.prio_changed = 1;
++				bfq_log_bfqq(bfqd, bfqq,
++					"back to interactive wr");
++			}
 +		}
 +	}
 +	/* Update weight both if it must be raised and if it must be lowered */
@@ -8685,6 +9005,21 @@ index 0000000..9190a55
 +
 +	if (unlikely(force))
 +		return bfq_forced_dispatch(bfqd);
++
++	/*
++	 * Force device to serve one request at a time if
++	 * strict_guarantees is true. Forcing this service scheme is
++	 * currently the ONLY way to guarantee that the request
++	 * service order enforced by the scheduler is respected by a
++	 * queueing device. Otherwise the device is free even to make
++	 * some unlucky request wait for as long as the device
++	 * wishes.
++	 *
++	 * Of course, serving one request at at time may cause loss of
++	 * throughput.
++	 */
++	if (bfqd->strict_guarantees && bfqd->rq_in_driver > 0)
++		return 0;
 +
 +	bfqq = bfq_select_queue(bfqd);
 +	if (!bfqq)
@@ -8919,9 +9254,11 @@ index 0000000..9190a55
 +	bfqq->pid = pid;
 +
 +	bfqq->wr_coeff = 1;
-+	bfqq->last_wr_start_finish = bfq_smallest_from_now();
++	bfqq->last_wr_start_finish = jiffies;
++	bfqq->wr_start_at_switch_to_srt = bfq_smallest_from_now();
 +	bfqq->budget_timeout = bfq_smallest_from_now();
 +	bfqq->split_time = bfq_smallest_from_now();
++
 +	/*
 +	 * Set to the value for which bfqq will not be deemed as
 +	 * soft rt when it becomes backlogged.
@@ -9015,7 +9352,7 @@ index 0000000..9190a55
 +	struct bfq_ttime *ttime = &bic->ttime;
 +	u64 elapsed = ktime_get_ns() - bic->ttime.last_end_request;
 +
-+	elapsed = min(elapsed, 2UL * bfqd->bfq_slice_idle);
++	elapsed = min_t(u64, elapsed, 2 * bfqd->bfq_slice_idle);
 +
 +	ttime->ttime_samples = (7*bic->ttime.ttime_samples + 256) / 8;
 +	ttime->ttime_total = div_u64(7*ttime->ttime_total + 256*elapsed,  8);
@@ -9023,22 +9360,13 @@ index 0000000..9190a55
 +				     ttime->ttime_samples);
 +}
 +
-+
 +static void
 +bfq_update_io_seektime(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 +		       struct request *rq)
 +{
-+	sector_t sdist = 0;
-+
-+	if (bfqq->last_request_pos) {
-+		if (bfqq->last_request_pos < blk_rq_pos(rq))
-+			sdist = blk_rq_pos(rq) - bfqq->last_request_pos;
-+		else
-+			sdist = bfqq->last_request_pos - blk_rq_pos(rq);
-+	}
-+
 +	bfqq->seek_history <<= 1;
-+	bfqq->seek_history |= (sdist > BFQQ_SEEK_THR);
++	bfqq->seek_history |=
++		get_sdist(bfqq->last_request_pos, rq) > BFQQ_SEEK_THR;
 +}
 +
 +/*
@@ -9231,6 +9559,8 @@ index 0000000..9190a55
 +{
 +	struct bfq_queue *bfqq = RQ_BFQQ(rq);
 +	struct bfq_data *bfqd = bfqq->bfqd;
++	u64 now_ns;
++	u32 delta_us;
 +
 +	bfq_log_bfqq(bfqd, bfqq, "completed one req with %u sects left",
 +		     blk_rq_sectors(rq));
@@ -9261,7 +9591,44 @@ index 0000000..9190a55
 +					&bfqd->queue_weights_tree);
 +	}
 +
-+	RQ_BIC(rq)->ttime.last_end_request = ktime_get_ns();
++	now_ns = ktime_get_ns();
++
++	RQ_BIC(rq)->ttime.last_end_request = now_ns;
++
++	/*
++	 * Using us instead of ns, to get a reasonable precision in
++	 * computing rate in next check.
++	 */
++	delta_us = div_u64(now_ns - bfqd->last_completion, NSEC_PER_USEC);
++
++	bfq_log(bfqd, "rq_completed: delta %uus/%luus max_size %u rate %llu/%llu",
++		delta_us, BFQ_MIN_TT/NSEC_PER_USEC, bfqd->last_rq_max_size,
++		(USEC_PER_SEC*
++		(u64)((bfqd->last_rq_max_size<<BFQ_RATE_SHIFT)/delta_us))
++			>>BFQ_RATE_SHIFT,
++		(USEC_PER_SEC*(u64)(1UL<<(BFQ_RATE_SHIFT-10)))>>BFQ_RATE_SHIFT);
++
++	/*
++	 * If the request took rather long to complete, and, according
++	 * to the maximum request size recorded, this completion latency
++	 * implies that the request was certainly served at a very low
++	 * rate (less than 1M sectors/sec), then the whole observation
++	 * interval that lasts up to this time instant cannot be a
++	 * valid time interval for computing a new peak rate.  Invoke
++	 * bfq_update_rate_reset to have the following three steps
++	 * taken:
++	 * - close the observation interval at the last (previous)
++	 *   request dispatch or completion
++	 * - compute rate, if possible, for that observation interval
++	 * - reset to zero samples, which will trigger a proper
++	 *   re-initialization of the observation interval on next
++	 *   dispatch
++	 */
++	if (delta_us > BFQ_MIN_TT/NSEC_PER_USEC &&
++	   (bfqd->last_rq_max_size<<BFQ_RATE_SHIFT)/delta_us <
++			1UL<<(BFQ_RATE_SHIFT - 10))
++		bfq_update_rate_reset(bfqd, NULL);
++	bfqd->last_completion = now_ns;
 +
 +	/*
 +	 * If we are waiting to discover whether the request pattern
@@ -9947,14 +10314,6 @@ index 0000000..9190a55
 +	return count;
 +}
 +
-+static unsigned long bfq_estimated_max_budget(struct bfq_data *bfqd)
-+{
-+	if (bfqd->peak_rate_samples >= BFQ_PEAK_RATE_SAMPLES)
-+		return bfq_calc_max_budget(bfqd);
-+	else
-+		return bfq_default_max_budget;
-+}
-+
 +static ssize_t bfq_max_budget_store(struct elevator_queue *e,
 +				    const char *page, size_t count)
 +{
@@ -9963,7 +10322,7 @@ index 0000000..9190a55
 +	int ret = bfq_var_store(&__data, (page), count);
 +
 +	if (__data == 0)
-+		bfqd->bfq_max_budget = bfq_estimated_max_budget(bfqd);
++		bfqd->bfq_max_budget = bfq_calc_max_budget(bfqd);
 +	else {
 +		if (__data > INT_MAX)
 +			__data = INT_MAX;
@@ -9993,7 +10352,7 @@ index 0000000..9190a55
 +
 +	bfqd->bfq_timeout = msecs_to_jiffies(__data);
 +	if (bfqd->bfq_user_max_budget == 0)
-+		bfqd->bfq_max_budget = bfq_estimated_max_budget(bfqd);
++		bfqd->bfq_max_budget = bfq_calc_max_budget(bfqd);
 +
 +	return ret;
 +}
@@ -10008,8 +10367,8 @@ index 0000000..9190a55
 +	if (__data > 1)
 +		__data = 1;
 +	if (!bfqd->strict_guarantees && __data == 1
-+	    && bfqd->bfq_slice_idle < msecs_to_jiffies(8))
-+		bfqd->bfq_slice_idle = msecs_to_jiffies(8);
++	    && bfqd->bfq_slice_idle < 8 * NSEC_PER_MSEC)
++		bfqd->bfq_slice_idle = 8 * NSEC_PER_MSEC;
 +
 +	bfqd->strict_guarantees = __data;
 +
@@ -10109,7 +10468,7 @@ index 0000000..9190a55
 +static int __init bfq_init(void)
 +{
 +	int ret;
-+	char msg[50] = "BFQ I/O-scheduler: v8r3";
++	char msg[50] = "BFQ I/O-scheduler: v8r4";
 +
 +#ifdef CONFIG_BFQ_GROUP_IOSCHED
 +	ret = blkcg_policy_register(&blkcg_policy_bfq);
@@ -10122,14 +10481,22 @@ index 0000000..9190a55
 +		goto err_pol_unreg;
 +
 +	/*
-+	 * Times to load large popular applications for the typical systems
-+	 * installed on the reference devices (see the comments before the
-+	 * definitions of the two arrays).
++	 * Times to load large popular applications for the typical
++	 * systems installed on the reference devices (see the
++	 * comments before the definitions of the next two
++	 * arrays). Actually, we use slightly slower values, as the
++	 * estimated peak rate tends to be smaller than the actual
++	 * peak rate.  The reason for this last fact is that estimates
++	 * are computed over much shorter time intervals than the long
++	 * intervals typically used for benchmarking. Why? First, to
++	 * adapt more quickly to variations. Second, because an I/O
++	 * scheduler cannot rely on a peak-rate-evaluation workload to
++	 * be run for a long time.
 +	 */
-+	T_slow[0] = msecs_to_jiffies(3500);
-+	T_slow[1] = msecs_to_jiffies(1500);
-+	T_fast[0] = msecs_to_jiffies(8000);
-+	T_fast[1] = msecs_to_jiffies(3000);
++	T_slow[0] = msecs_to_jiffies(3500); /* actually 4 sec */
++	T_slow[1] = msecs_to_jiffies(1000); /* actually 1.5 sec */
++	T_fast[0] = msecs_to_jiffies(7000); /* actually 8 sec */
++	T_fast[1] = msecs_to_jiffies(2500); /* actually 3 sec */
 +
 +	/*
 +	 * Thresholds that determine the switch between speed classes
@@ -10180,10 +10547,10 @@ index 0000000..9190a55
 +MODULE_LICENSE("GPL");
 diff --git a/block/bfq-sched.c b/block/bfq-sched.c
 new file mode 100644
-index 0000000..f8960a4
+index 0000000..45d63d3
 --- /dev/null
 +++ b/block/bfq-sched.c
-@@ -0,0 +1,1469 @@
+@@ -0,0 +1,1501 @@
 +/*
 + * BFQ: Hierarchical B-WF2Q+ scheduler.
 + *
@@ -10513,10 +10880,26 @@ index 0000000..f8960a4
 +static void bfq_update_active_node(struct rb_node *node)
 +{
 +	struct bfq_entity *entity = rb_entry(node, struct bfq_entity, rb_node);
++	struct bfq_queue *bfqq = bfq_entity_to_bfqq(entity);
 +
 +	entity->min_start = entity->start;
 +	bfq_update_min(entity, node->rb_right);
 +	bfq_update_min(entity, node->rb_left);
++
++	if (bfqq) {
++		bfq_log_bfqq(bfqq->bfqd, bfqq,
++			     "update_active_node: new min_start %llu",
++			     ((entity->min_start>>10)*1000)>>12);
++#ifdef CONFIG_BFQ_GROUP_IOSCHED
++	} else {
++		struct bfq_group *bfqg =
++			container_of(entity, struct bfq_group, entity);
++
++		bfq_log_bfqg((struct bfq_data *)bfqg->bfqd, bfqg,
++			     "update_active_node: new min_start %llu",
++			     ((entity->min_start>>10)*1000)>>12);
++#endif
++	}
 +}
 +
 +/**
@@ -11313,7 +11696,23 @@ index 0000000..f8960a4
 +
 +	entry = rb_entry(node, struct bfq_entity, rb_node);
 +	if (bfq_gt(entry->min_start, st->vtime)) {
++		struct bfq_queue *bfqq = bfq_entity_to_bfqq(entry);
 +		st->vtime = entry->min_start;
++
++		if (bfqq)
++			bfq_log_bfqq(bfqq->bfqd, bfqq,
++				     "update_vtime: new vtime %llu %p",
++				     ((st->vtime>>10)*1000)>>12, st);
++#ifdef CONFIG_BFQ_GROUP_IOSCHED
++		else {
++			struct bfq_group *bfqg =
++				container_of(entry, struct bfq_group, entity);
++
++			bfq_log_bfqg((struct bfq_data *)bfqg->bfqd, bfqg,
++				     "update_vtime: new vtime %llu %p",
++				     ((st->vtime>>10)*1000)>>12, st);
++		}
++#endif
 +		bfq_forget_idle(st);
 +	}
 +}
@@ -11655,12 +12054,12 @@ index 0000000..f8960a4
 +}
 diff --git a/block/bfq.h b/block/bfq.h
 new file mode 100644
-index 0000000..00142fc
+index 0000000..ea1e7d8
 --- /dev/null
 +++ b/block/bfq.h
-@@ -0,0 +1,857 @@
+@@ -0,0 +1,886 @@
 +/*
-+ * BFQ-v8r3 for 4.8.0: data structures and common functions prototypes.
++ * BFQ-v8r4 for 4.8.0: data structures and common functions prototypes.
 + *
 + * Based on ideas and code from CFQ:
 + * Copyright (C) 2003 Jens Axboe <axboe@kernel.dk>
@@ -11959,6 +12358,10 @@ index 0000000..00142fc
 +	 * last transition from idle to backlogged.
 +	 */
 +	unsigned long service_from_backlogged;
++	/*
++	 * Value of wr start time when switching to soft rt
++	 */
++	unsigned long wr_start_at_switch_to_srt;
 +
 +	unsigned long split_time; /* time of last split */
 +};
@@ -12013,6 +12416,13 @@ index 0000000..00142fc
 +	 * with another cooperating queue.
 +	 */
 +	bool was_in_burst_list;
++
++	/*
++	 * Similar to previous fields: save wr information.
++	 */
++	unsigned long saved_wr_coeff;
++	unsigned long saved_last_wr_start_finish;
++	unsigned long saved_wr_start_at_switch_to_srt;
 +};
 +
 +enum bfq_device_speed {
@@ -12092,14 +12502,32 @@ index 0000000..00142fc
 +	/* on-disk position of the last served request */
 +	sector_t last_position;
 +
++	/* time of last request completion (ns) */
++	u64 last_completion;
++
++	/* time of first rq dispatch in current observation interval (ns) */
++	u64 first_dispatch;
++	/* time of last rq dispatch in current observation interval (ns) */
++	u64 last_dispatch;
++
 +	/* beginning of the last budget */
 +	ktime_t last_budget_start;
 +	/* beginning of the last idle slice */
 +	ktime_t last_idling_start;
-+	/* number of samples used to calculate @peak_rate */
++
++	/* number of samples in current observation interval */
 +	int peak_rate_samples;
-+	/* peak transfer rate observed for a budget */
-+	u64 peak_rate;
++	/* num of samples of seq dispatches in current observation interval */
++	u32 sequential_samples;
++	/* total num of sectors transferred in current observation interval */
++	u64 tot_sectors_dispatched;
++	/* max rq size seen during current observation interval (sectors) */
++	u32 last_rq_max_size;
++	/* time elapsed from first dispatch in current observ. interval (us) */
++	u64 delta_from_first;
++	/* current estimate of device peak rate */
++	u32 peak_rate;
++
 +	/* maximum budget allotted to a bfq_queue before rescheduling */
 +	int bfq_max_budget;
 +
@@ -12118,7 +12546,7 @@ index 0000000..00142fc
 +	/* maximum allowed backward seek */
 +	unsigned int bfq_back_max;
 +	/* maximum idling time */
-+	u64 bfq_slice_idle;
++	u32 bfq_slice_idle;
 +	/* last time CLASS_IDLE was served */
 +	u64 bfq_class_idle_last_service;
 +
@@ -13349,10 +13777,50 @@ index f87a7e7..85c3dc2 100644
  		return 0;
  
 diff --git a/block/cfq-iosched.c b/block/cfq-iosched.c
-index cc2f6db..fdcd5999 100644
+index cc2f6db..f336dcb 100644
 --- a/block/cfq-iosched.c
 +++ b/block/cfq-iosched.c
-@@ -3764,9 +3764,11 @@ static void check_blkcg_changed(struct cfq_io_cq *cic, struct bio *bio)
+@@ -3042,7 +3042,6 @@ static struct request *cfq_check_fifo(struct cfq_queue *cfqq)
+ 	if (ktime_get_ns() < rq->fifo_time)
+ 		rq = NULL;
+ 
+-	cfq_log_cfqq(cfqq->cfqd, cfqq, "fifo=%p", rq);
+ 	return rq;
+ }
+ 
+@@ -3420,6 +3419,9 @@ static bool cfq_may_dispatch(struct cfq_data *cfqd, struct cfq_queue *cfqq)
+ {
+ 	unsigned int max_dispatch;
+ 
++	if (cfq_cfqq_must_dispatch(cfqq))
++		return true;
++
+ 	/*
+ 	 * Drain async requests before we start sync IO
+ 	 */
+@@ -3511,15 +3513,20 @@ static bool cfq_dispatch_request(struct cfq_data *cfqd, struct cfq_queue *cfqq)
+ 
+ 	BUG_ON(RB_EMPTY_ROOT(&cfqq->sort_list));
+ 
++	rq = cfq_check_fifo(cfqq);
++	if (rq)
++		cfq_mark_cfqq_must_dispatch(cfqq);
++
+ 	if (!cfq_may_dispatch(cfqd, cfqq))
+ 		return false;
+ 
+ 	/*
+ 	 * follow expired path, else get first next available
+ 	 */
+-	rq = cfq_check_fifo(cfqq);
+ 	if (!rq)
+ 		rq = cfqq->next_rq;
++	else
++		cfq_log_cfqq(cfqq->cfqd, cfqq, "fifo=%p", rq);
+ 
+ 	/*
+ 	 * insert request into driver dispatch list
+@@ -3764,9 +3771,11 @@ static void check_blkcg_changed(struct cfq_io_cq *cic, struct bio *bio)
  	struct cfq_data *cfqd = cic_to_cfqd(cic);
  	struct cfq_queue *cfqq;
  	uint64_t serial_nr;
@@ -13364,7 +13832,7 @@ index cc2f6db..fdcd5999 100644
  	rcu_read_unlock();
  
  	/*
-@@ -3777,6 +3779,17 @@ static void check_blkcg_changed(struct cfq_io_cq *cic, struct bio *bio)
+@@ -3777,6 +3786,17 @@ static void check_blkcg_changed(struct cfq_io_cq *cic, struct bio *bio)
  		return;
  
  	/*
@@ -13382,6 +13850,101 @@ index cc2f6db..fdcd5999 100644
  	 * Drop reference to queues.  New queues will be assigned in new
  	 * group upon arrival of fresh requests.
  	 */
+@@ -3989,7 +4009,7 @@ cfq_should_preempt(struct cfq_data *cfqd, struct cfq_queue *new_cfqq,
+ 	 * if the new request is sync, but the currently running queue is
+ 	 * not, let the sync request have priority.
+ 	 */
+-	if (rq_is_sync(rq) && !cfq_cfqq_sync(cfqq))
++	if (rq_is_sync(rq) && !cfq_cfqq_sync(cfqq) && !cfq_cfqq_must_dispatch(cfqq))
+ 		return true;
+ 
+ 	/*
+diff --git a/crypto/async_tx/async_pq.c b/crypto/async_tx/async_pq.c
+index 08b3ac6..f83de99 100644
+--- a/crypto/async_tx/async_pq.c
++++ b/crypto/async_tx/async_pq.c
+@@ -368,8 +368,6 @@ async_syndrome_val(struct page **blocks, unsigned int offset, int disks,
+ 
+ 		dma_set_unmap(tx, unmap);
+ 		async_tx_submit(chan, tx, submit);
+-
+-		return tx;
+ 	} else {
+ 		struct page *p_src = P(blocks, disks);
+ 		struct page *q_src = Q(blocks, disks);
+@@ -424,9 +422,11 @@ async_syndrome_val(struct page **blocks, unsigned int offset, int disks,
+ 		submit->cb_param = cb_param_orig;
+ 		submit->flags = flags_orig;
+ 		async_tx_sync_epilog(submit);
+-
+-		return NULL;
++		tx = NULL;
+ 	}
++	dmaengine_unmap_put(unmap);
++
++	return tx;
+ }
+ EXPORT_SYMBOL_GPL(async_syndrome_val);
+ 
+diff --git a/crypto/ghash-generic.c b/crypto/ghash-generic.c
+index bac7099..12ad3e3 100644
+--- a/crypto/ghash-generic.c
++++ b/crypto/ghash-generic.c
+@@ -14,24 +14,13 @@
+ 
+ #include <crypto/algapi.h>
+ #include <crypto/gf128mul.h>
++#include <crypto/ghash.h>
+ #include <crypto/internal/hash.h>
+ #include <linux/crypto.h>
+ #include <linux/init.h>
+ #include <linux/kernel.h>
+ #include <linux/module.h>
+ 
+-#define GHASH_BLOCK_SIZE	16
+-#define GHASH_DIGEST_SIZE	16
+-
+-struct ghash_ctx {
+-	struct gf128mul_4k *gf128;
+-};
+-
+-struct ghash_desc_ctx {
+-	u8 buffer[GHASH_BLOCK_SIZE];
+-	u32 bytes;
+-};
+-
+ static int ghash_init(struct shash_desc *desc)
+ {
+ 	struct ghash_desc_ctx *dctx = shash_desc_ctx(desc);
+diff --git a/drivers/acpi/nfit/core.c b/drivers/acpi/nfit/core.c
+index e1d5ea6..2accf78 100644
+--- a/drivers/acpi/nfit/core.c
++++ b/drivers/acpi/nfit/core.c
+@@ -2689,6 +2689,9 @@ static void acpi_nfit_notify(struct acpi_device *adev, u32 event)
+ 
+ 	dev_dbg(dev, "%s: event: %d\n", __func__, event);
+ 
++	if (event != NFIT_NOTIFY_UPDATE)
++		return;
++
+ 	device_lock(dev);
+ 	if (!dev->driver) {
+ 		/* dev->driver may be null if we're being removed */
+diff --git a/drivers/acpi/nfit/nfit.h b/drivers/acpi/nfit/nfit.h
+index e894ded..51d23f1 100644
+--- a/drivers/acpi/nfit/nfit.h
++++ b/drivers/acpi/nfit/nfit.h
+@@ -78,6 +78,10 @@ enum {
+ 	NFIT_ARS_TIMEOUT = 90,
+ };
+ 
++enum nfit_root_notifiers {
++	NFIT_NOTIFY_UPDATE = 0x80,
++};
++
+ struct nfit_spa {
+ 	struct list_head list;
+ 	struct nd_region *nd_region;
 diff --git a/drivers/ata/libata-core.c b/drivers/ata/libata-core.c
 index 223a770..07da600 100644
 --- a/drivers/ata/libata-core.c
@@ -13398,6 +13961,19 @@ index 223a770..07da600 100644
  		dev->flags |= ATA_DFLAG_NCQ;
  	}
  
+diff --git a/drivers/base/dma-mapping.c b/drivers/base/dma-mapping.c
+index d799662..261420d 100644
+--- a/drivers/base/dma-mapping.c
++++ b/drivers/base/dma-mapping.c
+@@ -334,7 +334,7 @@ void dma_common_free_remap(void *cpu_addr, size_t size, unsigned long vm_flags)
+ 		return;
+ 	}
+ 
+-	unmap_kernel_range((unsigned long)cpu_addr, size);
++	unmap_kernel_range((unsigned long)cpu_addr, PAGE_ALIGN(size));
+ 	vunmap(cpu_addr);
+ }
+ #endif
 diff --git a/drivers/block/loop.c b/drivers/block/loop.c
 index c9f2107..005e292 100644
 --- a/drivers/block/loop.c
@@ -13941,6 +14517,86 @@ index 018c3825..1801f38 100644
  }
  
  static bool crb_req_canceled(struct tpm_chip *chip, u8 status)
+diff --git a/drivers/clk/mvebu/cp110-system-controller.c b/drivers/clk/mvebu/cp110-system-controller.c
+index 7fa42d6..f2303da 100644
+--- a/drivers/clk/mvebu/cp110-system-controller.c
++++ b/drivers/clk/mvebu/cp110-system-controller.c
+@@ -81,13 +81,6 @@ enum {
+ #define CP110_GATE_EIP150		25
+ #define CP110_GATE_EIP197		26
+ 
+-static struct clk *cp110_clks[CP110_CLK_NUM];
+-
+-static struct clk_onecell_data cp110_clk_data = {
+-	.clks = cp110_clks,
+-	.clk_num = CP110_CLK_NUM,
+-};
+-
+ struct cp110_gate_clk {
+ 	struct clk_hw hw;
+ 	struct regmap *regmap;
+@@ -142,6 +135,8 @@ static struct clk *cp110_register_gate(const char *name,
+ 	if (!gate)
+ 		return ERR_PTR(-ENOMEM);
+ 
++	memset(&init, 0, sizeof(init));
++
+ 	init.name = name;
+ 	init.ops = &cp110_gate_ops;
+ 	init.parent_names = &parent_name;
+@@ -194,7 +189,8 @@ static int cp110_syscon_clk_probe(struct platform_device *pdev)
+ 	struct regmap *regmap;
+ 	struct device_node *np = pdev->dev.of_node;
+ 	const char *ppv2_name, *apll_name, *core_name, *eip_name, *nand_name;
+-	struct clk *clk;
++	struct clk_onecell_data *cp110_clk_data;
++	struct clk *clk, **cp110_clks;
+ 	u32 nand_clk_ctrl;
+ 	int i, ret;
+ 
+@@ -207,6 +203,20 @@ static int cp110_syscon_clk_probe(struct platform_device *pdev)
+ 	if (ret)
+ 		return ret;
+ 
++	cp110_clks = devm_kcalloc(&pdev->dev, sizeof(struct clk *),
++				  CP110_CLK_NUM, GFP_KERNEL);
++	if (!cp110_clks)
++		return -ENOMEM;
++
++	cp110_clk_data = devm_kzalloc(&pdev->dev,
++				      sizeof(*cp110_clk_data),
++				      GFP_KERNEL);
++	if (!cp110_clk_data)
++		return -ENOMEM;
++
++	cp110_clk_data->clks = cp110_clks;
++	cp110_clk_data->clk_num = CP110_CLK_NUM;
++
+ 	/* Register the APLL which is the root of the clk tree */
+ 	of_property_read_string_index(np, "core-clock-output-names",
+ 				      CP110_CORE_APLL, &apll_name);
+@@ -334,10 +344,12 @@ static int cp110_syscon_clk_probe(struct platform_device *pdev)
+ 		cp110_clks[CP110_MAX_CORE_CLOCKS + i] = clk;
+ 	}
+ 
+-	ret = of_clk_add_provider(np, cp110_of_clk_get, &cp110_clk_data);
++	ret = of_clk_add_provider(np, cp110_of_clk_get, cp110_clk_data);
+ 	if (ret)
+ 		goto fail_clk_add;
+ 
++	platform_set_drvdata(pdev, cp110_clks);
++
+ 	return 0;
+ 
+ fail_clk_add:
+@@ -364,6 +376,7 @@ fail0:
+ 
+ static int cp110_syscon_clk_remove(struct platform_device *pdev)
+ {
++	struct clk **cp110_clks = platform_get_drvdata(pdev);
+ 	int i;
+ 
+ 	of_clk_del_provider(pdev->dev.of_node);
 diff --git a/drivers/cpufreq/cpufreq_conservative.c b/drivers/cpufreq/cpufreq_conservative.c
 index 18da4f8..af8825a 100644
 --- a/drivers/cpufreq/cpufreq_conservative.c
@@ -13994,6 +14650,87 @@ index 4ba3d3f..f440d38 100644
  			goto out_fail;
  		}
  		dev->cpu = cpu;
+diff --git a/drivers/crypto/vmx/ghash.c b/drivers/crypto/vmx/ghash.c
+index 6c999cb0..27a94a1 100644
+--- a/drivers/crypto/vmx/ghash.c
++++ b/drivers/crypto/vmx/ghash.c
+@@ -26,16 +26,13 @@
+ #include <linux/hardirq.h>
+ #include <asm/switch_to.h>
+ #include <crypto/aes.h>
++#include <crypto/ghash.h>
+ #include <crypto/scatterwalk.h>
+ #include <crypto/internal/hash.h>
+ #include <crypto/b128ops.h>
+ 
+ #define IN_INTERRUPT in_interrupt()
+ 
+-#define GHASH_BLOCK_SIZE (16)
+-#define GHASH_DIGEST_SIZE (16)
+-#define GHASH_KEY_LEN (16)
+-
+ void gcm_init_p8(u128 htable[16], const u64 Xi[2]);
+ void gcm_gmult_p8(u64 Xi[2], const u128 htable[16]);
+ void gcm_ghash_p8(u64 Xi[2], const u128 htable[16],
+@@ -55,16 +52,11 @@ struct p8_ghash_desc_ctx {
+ 
+ static int p8_ghash_init_tfm(struct crypto_tfm *tfm)
+ {
+-	const char *alg;
++	const char *alg = "ghash-generic";
+ 	struct crypto_shash *fallback;
+ 	struct crypto_shash *shash_tfm = __crypto_shash_cast(tfm);
+ 	struct p8_ghash_ctx *ctx = crypto_tfm_ctx(tfm);
+ 
+-	if (!(alg = crypto_tfm_alg_name(tfm))) {
+-		printk(KERN_ERR "Failed to get algorithm name.\n");
+-		return -ENOENT;
+-	}
+-
+ 	fallback = crypto_alloc_shash(alg, 0, CRYPTO_ALG_NEED_FALLBACK);
+ 	if (IS_ERR(fallback)) {
+ 		printk(KERN_ERR
+@@ -78,10 +70,18 @@ static int p8_ghash_init_tfm(struct crypto_tfm *tfm)
+ 	crypto_shash_set_flags(fallback,
+ 			       crypto_shash_get_flags((struct crypto_shash
+ 						       *) tfm));
+-	ctx->fallback = fallback;
+ 
+-	shash_tfm->descsize = sizeof(struct p8_ghash_desc_ctx)
+-	    + crypto_shash_descsize(fallback);
++	/* Check if the descsize defined in the algorithm is still enough. */
++	if (shash_tfm->descsize < sizeof(struct p8_ghash_desc_ctx)
++	    + crypto_shash_descsize(fallback)) {
++		printk(KERN_ERR
++		       "Desc size of the fallback implementation (%s) does not match the expected value: %lu vs %u\n",
++		       alg,
++		       shash_tfm->descsize - sizeof(struct p8_ghash_desc_ctx),
++		       crypto_shash_descsize(fallback));
++		return -EINVAL;
++	}
++	ctx->fallback = fallback;
+ 
+ 	return 0;
+ }
+@@ -113,7 +113,7 @@ static int p8_ghash_setkey(struct crypto_shash *tfm, const u8 *key,
+ {
+ 	struct p8_ghash_ctx *ctx = crypto_tfm_ctx(crypto_shash_tfm(tfm));
+ 
+-	if (keylen != GHASH_KEY_LEN)
++	if (keylen != GHASH_BLOCK_SIZE)
+ 		return -EINVAL;
+ 
+ 	preempt_disable();
+@@ -211,7 +211,8 @@ struct shash_alg p8_ghash_alg = {
+ 	.update = p8_ghash_update,
+ 	.final = p8_ghash_final,
+ 	.setkey = p8_ghash_setkey,
+-	.descsize = sizeof(struct p8_ghash_desc_ctx),
++	.descsize = sizeof(struct p8_ghash_desc_ctx)
++		+ sizeof(struct ghash_desc_ctx),
+ 	.base = {
+ 		 .cra_name = "ghash",
+ 		 .cra_driver_name = "p8_ghash",
 diff --git a/drivers/gpu/drm/i915/intel_pm.c b/drivers/gpu/drm/i915/intel_pm.c
 index 2d24813..0f042d13 100644
 --- a/drivers/gpu/drm/i915/intel_pm.c
@@ -14006,6 +14743,75 @@ index 2d24813..0f042d13 100644
  }
  
  static bool
+diff --git a/drivers/gpu/drm/virtio/virtgpu_drm_bus.c b/drivers/gpu/drm/virtio/virtgpu_drm_bus.c
+index 7f0e93f87..88a3916 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_drm_bus.c
++++ b/drivers/gpu/drm/virtio/virtgpu_drm_bus.c
+@@ -27,6 +27,16 @@
+ 
+ #include "virtgpu_drv.h"
+ 
++int drm_virtio_set_busid(struct drm_device *dev, struct drm_master *master)
++{
++	struct pci_dev *pdev = dev->pdev;
++
++	if (pdev) {
++		return drm_pci_set_busid(dev, master);
++	}
++	return 0;
++}
++
+ static void virtio_pci_kick_out_firmware_fb(struct pci_dev *pci_dev)
+ {
+ 	struct apertures_struct *ap;
+diff --git a/drivers/gpu/drm/virtio/virtgpu_drv.c b/drivers/gpu/drm/virtio/virtgpu_drv.c
+index c13f70c..5820b702 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_drv.c
++++ b/drivers/gpu/drm/virtio/virtgpu_drv.c
+@@ -117,6 +117,7 @@ static const struct file_operations virtio_gpu_driver_fops = {
+ 
+ static struct drm_driver driver = {
+ 	.driver_features = DRIVER_MODESET | DRIVER_GEM | DRIVER_PRIME | DRIVER_RENDER | DRIVER_ATOMIC,
++	.set_busid = drm_virtio_set_busid,
+ 	.load = virtio_gpu_driver_load,
+ 	.unload = virtio_gpu_driver_unload,
+ 	.open = virtio_gpu_driver_open,
+diff --git a/drivers/gpu/drm/virtio/virtgpu_drv.h b/drivers/gpu/drm/virtio/virtgpu_drv.h
+index b18ef31..acf556a 100644
+--- a/drivers/gpu/drm/virtio/virtgpu_drv.h
++++ b/drivers/gpu/drm/virtio/virtgpu_drv.h
+@@ -49,6 +49,7 @@
+ #define DRIVER_PATCHLEVEL 1
+ 
+ /* virtgpu_drm_bus.c */
++int drm_virtio_set_busid(struct drm_device *dev, struct drm_master *master);
+ int drm_virtio_init(struct drm_driver *driver, struct virtio_device *vdev);
+ 
+ struct virtio_gpu_object {
+diff --git a/drivers/infiniband/hw/hfi1/rc.c b/drivers/infiniband/hw/hfi1/rc.c
+index 5da190e..bcf76c3 100644
+--- a/drivers/infiniband/hw/hfi1/rc.c
++++ b/drivers/infiniband/hw/hfi1/rc.c
+@@ -932,8 +932,10 @@ void hfi1_send_rc_ack(struct hfi1_ctxtdata *rcd, struct rvt_qp *qp,
+ 	return;
+ 
+ queue_ack:
+-	this_cpu_inc(*ibp->rvp.rc_qacks);
+ 	spin_lock_irqsave(&qp->s_lock, flags);
++	if (!(ib_rvt_state_ops[qp->state] & RVT_PROCESS_RECV_OK))
++		goto unlock;
++	this_cpu_inc(*ibp->rvp.rc_qacks);
+ 	qp->s_flags |= RVT_S_ACK_PENDING | RVT_S_RESP_PENDING;
+ 	qp->s_nak_state = qp->r_nak_state;
+ 	qp->s_ack_psn = qp->r_ack_psn;
+@@ -942,6 +944,7 @@ queue_ack:
+ 
+ 	/* Schedule the send tasklet. */
+ 	hfi1_schedule_send(qp);
++unlock:
+ 	spin_unlock_irqrestore(&qp->s_lock, flags);
+ }
+ 
 diff --git a/drivers/input/joydev.c b/drivers/input/joydev.c
 index f3135ae..b30ab7e 100644
 --- a/drivers/input/joydev.c
@@ -14344,6 +15150,217 @@ index dbd907d..691dab7 100644
  }
  
  int rtsx_usb_transfer_data(struct rtsx_ucr *ucr, unsigned int pipe,
+diff --git a/drivers/misc/mei/amthif.c b/drivers/misc/mei/amthif.c
+index a039a5d..fd9271b 100644
+--- a/drivers/misc/mei/amthif.c
++++ b/drivers/misc/mei/amthif.c
+@@ -67,8 +67,12 @@ int mei_amthif_host_init(struct mei_device *dev, struct mei_me_client *me_cl)
+ 	struct mei_cl *cl = &dev->iamthif_cl;
+ 	int ret;
+ 
+-	if (mei_cl_is_connected(cl))
+-		return 0;
++	mutex_lock(&dev->device_lock);
++
++	if (mei_cl_is_connected(cl)) {
++		ret = 0;
++		goto out;
++	}
+ 
+ 	dev->iamthif_state = MEI_IAMTHIF_IDLE;
+ 
+@@ -77,11 +81,13 @@ int mei_amthif_host_init(struct mei_device *dev, struct mei_me_client *me_cl)
+ 	ret = mei_cl_link(cl);
+ 	if (ret < 0) {
+ 		dev_err(dev->dev, "amthif: failed cl_link %d\n", ret);
+-		return ret;
++		goto out;
+ 	}
+ 
+ 	ret = mei_cl_connect(cl, me_cl, NULL);
+ 
++out:
++	mutex_unlock(&dev->device_lock);
+ 	return ret;
+ }
+ 
+diff --git a/drivers/misc/mei/bus.c b/drivers/misc/mei/bus.c
+index 1f33fea..e094df3 100644
+--- a/drivers/misc/mei/bus.c
++++ b/drivers/misc/mei/bus.c
+@@ -983,12 +983,10 @@ void mei_cl_bus_rescan_work(struct work_struct *work)
+ 		container_of(work, struct mei_device, bus_rescan_work);
+ 	struct mei_me_client *me_cl;
+ 
+-	mutex_lock(&bus->device_lock);
+ 	me_cl = mei_me_cl_by_uuid(bus, &mei_amthif_guid);
+ 	if (me_cl)
+ 		mei_amthif_host_init(bus, me_cl);
+ 	mei_me_cl_put(me_cl);
+-	mutex_unlock(&bus->device_lock);
+ 
+ 	mei_cl_bus_rescan(bus);
+ }
+diff --git a/drivers/net/ethernet/intel/i40e/i40e_main.c b/drivers/net/ethernet/intel/i40e/i40e_main.c
+index d0b3a1b..dad15b6 100644
+--- a/drivers/net/ethernet/intel/i40e/i40e_main.c
++++ b/drivers/net/ethernet/intel/i40e/i40e_main.c
+@@ -11360,6 +11360,12 @@ static pci_ers_result_t i40e_pci_error_detected(struct pci_dev *pdev,
+ 
+ 	dev_info(&pdev->dev, "%s: error %d\n", __func__, error);
+ 
++	if (!pf) {
++		dev_info(&pdev->dev,
++			 "Cannot recover - error happened during device probe\n");
++		return PCI_ERS_RESULT_DISCONNECT;
++	}
++
+ 	/* shutdown all operations */
+ 	if (!test_bit(__I40E_SUSPENDED, &pf->state)) {
+ 		rtnl_lock();
+diff --git a/drivers/net/wireless/ath/carl9170/debug.c b/drivers/net/wireless/ath/carl9170/debug.c
+index 6808db4..ec3a64e 100644
+--- a/drivers/net/wireless/ath/carl9170/debug.c
++++ b/drivers/net/wireless/ath/carl9170/debug.c
+@@ -75,7 +75,8 @@ static ssize_t carl9170_debugfs_read(struct file *file, char __user *userbuf,
+ 
+ 	if (!ar)
+ 		return -ENODEV;
+-	dfops = container_of(file->f_op, struct carl9170_debugfs_fops, fops);
++	dfops = container_of(debugfs_real_fops(file),
++			     struct carl9170_debugfs_fops, fops);
+ 
+ 	if (!dfops->read)
+ 		return -ENOSYS;
+@@ -127,7 +128,8 @@ static ssize_t carl9170_debugfs_write(struct file *file,
+ 
+ 	if (!ar)
+ 		return -ENODEV;
+-	dfops = container_of(file->f_op, struct carl9170_debugfs_fops, fops);
++	dfops = container_of(debugfs_real_fops(file),
++			     struct carl9170_debugfs_fops, fops);
+ 
+ 	if (!dfops->write)
+ 		return -ENOSYS;
+diff --git a/drivers/net/wireless/broadcom/b43/debugfs.c b/drivers/net/wireless/broadcom/b43/debugfs.c
+index b4bcd94..7704638 100644
+--- a/drivers/net/wireless/broadcom/b43/debugfs.c
++++ b/drivers/net/wireless/broadcom/b43/debugfs.c
+@@ -524,7 +524,8 @@ static ssize_t b43_debugfs_read(struct file *file, char __user *userbuf,
+ 		goto out_unlock;
+ 	}
+ 
+-	dfops = container_of(file->f_op, struct b43_debugfs_fops, fops);
++	dfops = container_of(debugfs_real_fops(file),
++			     struct b43_debugfs_fops, fops);
+ 	if (!dfops->read) {
+ 		err = -ENOSYS;
+ 		goto out_unlock;
+@@ -585,7 +586,8 @@ static ssize_t b43_debugfs_write(struct file *file,
+ 		goto out_unlock;
+ 	}
+ 
+-	dfops = container_of(file->f_op, struct b43_debugfs_fops, fops);
++	dfops = container_of(debugfs_real_fops(file),
++			     struct b43_debugfs_fops, fops);
+ 	if (!dfops->write) {
+ 		err = -ENOSYS;
+ 		goto out_unlock;
+diff --git a/drivers/net/wireless/broadcom/b43legacy/debugfs.c b/drivers/net/wireless/broadcom/b43legacy/debugfs.c
+index 090910e..82ef56e 100644
+--- a/drivers/net/wireless/broadcom/b43legacy/debugfs.c
++++ b/drivers/net/wireless/broadcom/b43legacy/debugfs.c
+@@ -221,7 +221,8 @@ static ssize_t b43legacy_debugfs_read(struct file *file, char __user *userbuf,
+ 		goto out_unlock;
+ 	}
+ 
+-	dfops = container_of(file->f_op, struct b43legacy_debugfs_fops, fops);
++	dfops = container_of(debugfs_real_fops(file),
++			     struct b43legacy_debugfs_fops, fops);
+ 	if (!dfops->read) {
+ 		err = -ENOSYS;
+ 		goto out_unlock;
+@@ -287,7 +288,8 @@ static ssize_t b43legacy_debugfs_write(struct file *file,
+ 		goto out_unlock;
+ 	}
+ 
+-	dfops = container_of(file->f_op, struct b43legacy_debugfs_fops, fops);
++	dfops = container_of(debugfs_real_fops(file),
++			     struct b43legacy_debugfs_fops, fops);
+ 	if (!dfops->write) {
+ 		err = -ENOSYS;
+ 		goto out_unlock;
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c
+index b8aec5e5..abaf003 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/cfg80211.c
+@@ -2533,7 +2533,7 @@ static void brcmf_fill_bss_param(struct brcmf_if *ifp, struct station_info *si)
+ 				     WL_BSS_INFO_MAX);
+ 	if (err) {
+ 		brcmf_err("Failed to get bss info (%d)\n", err);
+-		return;
++		goto out_kfree;
+ 	}
+ 	si->filled |= BIT(NL80211_STA_INFO_BSS_PARAM);
+ 	si->bss_param.beacon_interval = le16_to_cpu(buf->bss_le.beacon_period);
+@@ -2545,6 +2545,9 @@ static void brcmf_fill_bss_param(struct brcmf_if *ifp, struct station_info *si)
+ 		si->bss_param.flags |= BSS_PARAM_FLAGS_SHORT_PREAMBLE;
+ 	if (capability & WLAN_CAPABILITY_SHORT_SLOT_TIME)
+ 		si->bss_param.flags |= BSS_PARAM_FLAGS_SHORT_SLOT_TIME;
++
++out_kfree:
++	kfree(buf);
+ }
+ 
+ static s32
+@@ -3884,11 +3887,11 @@ brcmf_cfg80211_del_pmksa(struct wiphy *wiphy, struct net_device *ndev,
+ 	if (!check_vif_up(ifp->vif))
+ 		return -EIO;
+ 
+-	brcmf_dbg(CONN, "del_pmksa - PMK bssid = %pM\n", &pmksa->bssid);
++	brcmf_dbg(CONN, "del_pmksa - PMK bssid = %pM\n", pmksa->bssid);
+ 
+ 	npmk = le32_to_cpu(cfg->pmk_list.npmk);
+ 	for (i = 0; i < npmk; i++)
+-		if (!memcmp(&pmksa->bssid, &pmk[i].bssid, ETH_ALEN))
++		if (!memcmp(pmksa->bssid, pmk[i].bssid, ETH_ALEN))
+ 			break;
+ 
+ 	if ((npmk > 0) && (i < npmk)) {
+diff --git a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/flowring.c b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/flowring.c
+index 7e269f9..6366444 100644
+--- a/drivers/net/wireless/broadcom/brcm80211/brcmfmac/flowring.c
++++ b/drivers/net/wireless/broadcom/brcm80211/brcmfmac/flowring.c
+@@ -234,13 +234,20 @@ static void brcmf_flowring_block(struct brcmf_flowring *flow, u16 flowid,
+ 
+ void brcmf_flowring_delete(struct brcmf_flowring *flow, u16 flowid)
+ {
++	struct brcmf_bus *bus_if = dev_get_drvdata(flow->dev);
+ 	struct brcmf_flowring_ring *ring;
++	struct brcmf_if *ifp;
+ 	u16 hash_idx;
++	u8 ifidx;
+ 	struct sk_buff *skb;
+ 
+ 	ring = flow->rings[flowid];
+ 	if (!ring)
+ 		return;
++
++	ifidx = brcmf_flowring_ifidx_get(flow, flowid);
++	ifp = brcmf_get_ifp(bus_if->drvr, ifidx);
++
+ 	brcmf_flowring_block(flow, flowid, false);
+ 	hash_idx = ring->hash_id;
+ 	flow->hash[hash_idx].ifidx = BRCMF_FLOWRING_INVALID_IFIDX;
+@@ -249,7 +256,7 @@ void brcmf_flowring_delete(struct brcmf_flowring *flow, u16 flowid)
+ 
+ 	skb = skb_dequeue(&ring->skblist);
+ 	while (skb) {
+-		brcmu_pkt_buf_free_skb(skb);
++		brcmf_txfinalize(ifp, skb, false);
+ 		skb = skb_dequeue(&ring->skblist);
+ 	}
+ 
 diff --git a/drivers/pci/pci-mid.c b/drivers/pci/pci-mid.c
 index c878aa7..55f453d 100644
 --- a/drivers/pci/pci-mid.c
@@ -17669,6 +18686,36 @@ index fbab29d..243b233 100644
  	RAPL_CPU(INTEL_FAM6_ATOM_GOLDMONT,	rapl_defaults_core),
  	RAPL_CPU(INTEL_FAM6_ATOM_DENVERTON,	rapl_defaults_core),
  
+diff --git a/drivers/scsi/arcmsr/arcmsr_hba.c b/drivers/scsi/arcmsr/arcmsr_hba.c
+index 7640498..3d53d63 100644
+--- a/drivers/scsi/arcmsr/arcmsr_hba.c
++++ b/drivers/scsi/arcmsr/arcmsr_hba.c
+@@ -2388,15 +2388,23 @@ static int arcmsr_iop_message_xfer(struct AdapterControlBlock *acb,
+ 	}
+ 	case ARCMSR_MESSAGE_WRITE_WQBUFFER: {
+ 		unsigned char *ver_addr;
+-		int32_t user_len, cnt2end;
++		uint32_t user_len;
++		int32_t cnt2end;
+ 		uint8_t *pQbuffer, *ptmpuserbuffer;
++
++		user_len = pcmdmessagefld->cmdmessage.Length;
++		if (user_len > ARCMSR_API_DATA_BUFLEN) {
++			retvalue = ARCMSR_MESSAGE_FAIL;
++			goto message_out;
++		}
++
+ 		ver_addr = kmalloc(ARCMSR_API_DATA_BUFLEN, GFP_ATOMIC);
+ 		if (!ver_addr) {
+ 			retvalue = ARCMSR_MESSAGE_FAIL;
+ 			goto message_out;
+ 		}
+ 		ptmpuserbuffer = ver_addr;
+-		user_len = pcmdmessagefld->cmdmessage.Length;
++
+ 		memcpy(ptmpuserbuffer,
+ 			pcmdmessagefld->messagedatabuffer, user_len);
+ 		spin_lock_irqsave(&acb->wqbuffer_lock, flags);
 diff --git a/drivers/scsi/hosts.c b/drivers/scsi/hosts.c
 index ec6381e..258a3f9 100644
 --- a/drivers/scsi/hosts.c
@@ -17706,6 +18753,18 @@ index ec6381e..258a3f9 100644
  	scsi_destroy_command_freelist(shost);
   out_destroy_tags:
  	if (shost_use_blk_mq(shost))
+diff --git a/drivers/scsi/ibmvscsi/ibmvfc.c b/drivers/scsi/ibmvscsi/ibmvfc.c
+index ab67ec4..79c9860 100644
+--- a/drivers/scsi/ibmvscsi/ibmvfc.c
++++ b/drivers/scsi/ibmvscsi/ibmvfc.c
+@@ -717,7 +717,6 @@ static int ibmvfc_reset_crq(struct ibmvfc_host *vhost)
+ 	spin_lock_irqsave(vhost->host->host_lock, flags);
+ 	vhost->state = IBMVFC_NO_CRQ;
+ 	vhost->logged_in = 0;
+-	ibmvfc_set_host_action(vhost, IBMVFC_HOST_ACTION_NONE);
+ 
+ 	/* Clean out the queue */
+ 	memset(crq->msgs, 0, PAGE_SIZE);
 diff --git a/drivers/scsi/scsi.c b/drivers/scsi/scsi.c
 index 1deb6ad..75455d4 100644
 --- a/drivers/scsi/scsi.c
@@ -18887,6 +19946,115 @@ index 9510305..c5af5f0 100644
  config HW_CONSOLE
  	bool
  	depends on VT && !UML
+diff --git a/drivers/tty/serial/8250/8250_dw.c b/drivers/tty/serial/8250/8250_dw.c
+index e199696..b022f5a 100644
+--- a/drivers/tty/serial/8250/8250_dw.c
++++ b/drivers/tty/serial/8250/8250_dw.c
+@@ -462,7 +462,7 @@ static int dw8250_probe(struct platform_device *pdev)
+ 	}
+ 
+ 	data->pclk = devm_clk_get(&pdev->dev, "apb_pclk");
+-	if (IS_ERR(data->clk) && PTR_ERR(data->clk) == -EPROBE_DEFER) {
++	if (IS_ERR(data->pclk) && PTR_ERR(data->pclk) == -EPROBE_DEFER) {
+ 		err = -EPROBE_DEFER;
+ 		goto err_clk;
+ 	}
+diff --git a/drivers/tty/serial/8250/8250_port.c b/drivers/tty/serial/8250/8250_port.c
+index bdfa659..858a546 100644
+--- a/drivers/tty/serial/8250/8250_port.c
++++ b/drivers/tty/serial/8250/8250_port.c
+@@ -1414,12 +1414,8 @@ static void __do_stop_tx_rs485(struct uart_8250_port *p)
+ 	if (!(p->port.rs485.flags & SER_RS485_RX_DURING_TX)) {
+ 		serial8250_clear_fifos(p);
+ 
+-		serial8250_rpm_get(p);
+-
+ 		p->ier |= UART_IER_RLSI | UART_IER_RDI;
+ 		serial_port_out(&p->port, UART_IER, p->ier);
+-
+-		serial8250_rpm_put(p);
+ 	}
+ }
+ 
+@@ -1429,6 +1425,7 @@ static void serial8250_em485_handle_stop_tx(unsigned long arg)
+ 	struct uart_8250_em485 *em485 = p->em485;
+ 	unsigned long flags;
+ 
++	serial8250_rpm_get(p);
+ 	spin_lock_irqsave(&p->port.lock, flags);
+ 	if (em485 &&
+ 	    em485->active_timer == &em485->stop_tx_timer) {
+@@ -1436,6 +1433,7 @@ static void serial8250_em485_handle_stop_tx(unsigned long arg)
+ 		em485->active_timer = NULL;
+ 	}
+ 	spin_unlock_irqrestore(&p->port.lock, flags);
++	serial8250_rpm_put(p);
+ }
+ 
+ static void __stop_tx_rs485(struct uart_8250_port *p)
+@@ -1475,7 +1473,7 @@ static inline void __stop_tx(struct uart_8250_port *p)
+ 		unsigned char lsr = serial_in(p, UART_LSR);
+ 		/*
+ 		 * To provide required timeing and allow FIFO transfer,
+-		 * __stop_tx_rs485 must be called only when both FIFO and
++		 * __stop_tx_rs485() must be called only when both FIFO and
+ 		 * shift register are empty. It is for device driver to enable
+ 		 * interrupt on TEMT.
+ 		 */
+@@ -1484,9 +1482,10 @@ static inline void __stop_tx(struct uart_8250_port *p)
+ 
+ 		del_timer(&em485->start_tx_timer);
+ 		em485->active_timer = NULL;
++
++		__stop_tx_rs485(p);
+ 	}
+ 	__do_stop_tx(p);
+-	__stop_tx_rs485(p);
+ }
+ 
+ static void serial8250_stop_tx(struct uart_port *port)
+diff --git a/drivers/tty/serial/atmel_serial.c b/drivers/tty/serial/atmel_serial.c
+index 2eaa18d..8bbde52 100644
+--- a/drivers/tty/serial/atmel_serial.c
++++ b/drivers/tty/serial/atmel_serial.c
+@@ -1929,6 +1929,9 @@ static void atmel_shutdown(struct uart_port *port)
+ {
+ 	struct atmel_uart_port *atmel_port = to_atmel_uart_port(port);
+ 
++	/* Disable modem control lines interrupts */
++	atmel_disable_ms(port);
++
+ 	/* Disable interrupts at device level */
+ 	atmel_uart_writel(port, ATMEL_US_IDR, -1);
+ 
+@@ -1979,8 +1982,6 @@ static void atmel_shutdown(struct uart_port *port)
+ 	 */
+ 	free_irq(port->irq, port);
+ 
+-	atmel_port->ms_irq_enabled = false;
+-
+ 	atmel_flush_buffer(port);
+ }
+ 
+diff --git a/drivers/tty/serial/imx.c b/drivers/tty/serial/imx.c
+index 0df2b1c..615c027 100644
+--- a/drivers/tty/serial/imx.c
++++ b/drivers/tty/serial/imx.c
+@@ -740,12 +740,13 @@ static unsigned int imx_get_hwmctrl(struct imx_port *sport)
+ {
+ 	unsigned int tmp = TIOCM_DSR;
+ 	unsigned usr1 = readl(sport->port.membase + USR1);
++	unsigned usr2 = readl(sport->port.membase + USR2);
+ 
+ 	if (usr1 & USR1_RTSS)
+ 		tmp |= TIOCM_CTS;
+ 
+ 	/* in DCE mode DCDIN is always 0 */
+-	if (!(usr1 & USR2_DCDIN))
++	if (!(usr2 & USR2_DCDIN))
+ 		tmp |= TIOCM_CAR;
+ 
+ 	if (sport->dte_mode)
 diff --git a/drivers/usb/class/usbtmc.c b/drivers/usb/class/usbtmc.c
 index 917a55c..ffe9f88 100644
 --- a/drivers/usb/class/usbtmc.c
@@ -77948,6 +79116,32 @@ index ed2b632..f3c25e7 100644
  obj-$(CONFIG_PSTORE)		+= pstore/
  obj-$(CONFIG_EFIVAR_FS)		+= efivarfs/
 +obj-$(CONFIG_AUFS_FS)           += aufs/
+diff --git a/fs/attr.c b/fs/attr.c
+index 42bb42b..3c42cab 100644
+--- a/fs/attr.c
++++ b/fs/attr.c
+@@ -202,6 +202,21 @@ int notify_change(struct dentry * dentry, struct iattr * attr, struct inode **de
+ 			return -EPERM;
+ 	}
+ 
++	/*
++	 * If utimes(2) and friends are called with times == NULL (or both
++	 * times are UTIME_NOW), then we need to check for write permission
++	 */
++	if (ia_valid & ATTR_TOUCH) {
++		if (IS_IMMUTABLE(inode))
++			return -EPERM;
++
++		if (!inode_owner_or_capable(inode)) {
++			error = inode_permission(inode, MAY_WRITE);
++			if (error)
++				return error;
++		}
++	}
++
+ 	if ((ia_valid & ATTR_MODE)) {
+ 		umode_t amode = attr->ia_mode;
+ 		/* Flag setting protected by i_mutex */
 diff --git a/fs/aufs/Kconfig b/fs/aufs/Kconfig
 new file mode 100644
 index 0000000..63560ce
@@ -109947,6 +111141,361 @@ index 0000000..2a411f9
 +out:
 +	return err;
 +}
+diff --git a/fs/autofs4/waitq.c b/fs/autofs4/waitq.c
+index 431fd7e..e44271d 100644
+--- a/fs/autofs4/waitq.c
++++ b/fs/autofs4/waitq.c
+@@ -431,8 +431,8 @@ int autofs4_wait(struct autofs_sb_info *sbi,
+ 		memcpy(&wq->name, &qstr, sizeof(struct qstr));
+ 		wq->dev = autofs4_get_dev(sbi);
+ 		wq->ino = autofs4_get_ino(sbi);
+-		wq->uid = current_uid();
+-		wq->gid = current_gid();
++		wq->uid = current_real_cred()->uid;
++		wq->gid = current_real_cred()->gid;
+ 		wq->pid = pid;
+ 		wq->tgid = tgid;
+ 		wq->status = -EINTR; /* Status return if interrupted */
+diff --git a/fs/btrfs/compression.c b/fs/btrfs/compression.c
+index 029db6e..60a850e 100644
+--- a/fs/btrfs/compression.c
++++ b/fs/btrfs/compression.c
+@@ -698,7 +698,7 @@ int btrfs_submit_compressed_read(struct inode *inode, struct bio *bio,
+ 
+ 			ret = btrfs_map_bio(root, comp_bio, mirror_num, 0);
+ 			if (ret) {
+-				bio->bi_error = ret;
++				comp_bio->bi_error = ret;
+ 				bio_endio(comp_bio);
+ 			}
+ 
+@@ -728,7 +728,7 @@ int btrfs_submit_compressed_read(struct inode *inode, struct bio *bio,
+ 
+ 	ret = btrfs_map_bio(root, comp_bio, mirror_num, 0);
+ 	if (ret) {
+-		bio->bi_error = ret;
++		comp_bio->bi_error = ret;
+ 		bio_endio(comp_bio);
+ 	}
+ 
+diff --git a/fs/btrfs/ctree.h b/fs/btrfs/ctree.h
+index 33fe035..791e47c 100644
+--- a/fs/btrfs/ctree.h
++++ b/fs/btrfs/ctree.h
+@@ -251,7 +251,8 @@ struct btrfs_super_block {
+ #define BTRFS_FEATURE_COMPAT_SAFE_CLEAR		0ULL
+ 
+ #define BTRFS_FEATURE_COMPAT_RO_SUPP			\
+-	(BTRFS_FEATURE_COMPAT_RO_FREE_SPACE_TREE)
++	(BTRFS_FEATURE_COMPAT_RO_FREE_SPACE_TREE |	\
++	 BTRFS_FEATURE_COMPAT_RO_FREE_SPACE_TREE_VALID)
+ 
+ #define BTRFS_FEATURE_COMPAT_RO_SAFE_SET	0ULL
+ #define BTRFS_FEATURE_COMPAT_RO_SAFE_CLEAR	0ULL
+diff --git a/fs/btrfs/disk-io.c b/fs/btrfs/disk-io.c
+index 54bc8c7..3dede6d 100644
+--- a/fs/btrfs/disk-io.c
++++ b/fs/btrfs/disk-io.c
+@@ -2566,6 +2566,7 @@ int open_ctree(struct super_block *sb,
+ 	int num_backups_tried = 0;
+ 	int backup_index = 0;
+ 	int max_active;
++	int clear_free_space_tree = 0;
+ 
+ 	tree_root = fs_info->tree_root = btrfs_alloc_root(fs_info, GFP_KERNEL);
+ 	chunk_root = fs_info->chunk_root = btrfs_alloc_root(fs_info, GFP_KERNEL);
+@@ -3129,6 +3130,26 @@ retry_root_backup:
+ 	if (sb->s_flags & MS_RDONLY)
+ 		return 0;
+ 
++	if (btrfs_test_opt(fs_info, CLEAR_CACHE) &&
++	    btrfs_fs_compat_ro(fs_info, FREE_SPACE_TREE)) {
++		clear_free_space_tree = 1;
++	} else if (btrfs_fs_compat_ro(fs_info, FREE_SPACE_TREE) &&
++		   !btrfs_fs_compat_ro(fs_info, FREE_SPACE_TREE_VALID)) {
++		btrfs_warn(fs_info, "free space tree is invalid");
++		clear_free_space_tree = 1;
++	}
++
++	if (clear_free_space_tree) {
++		btrfs_info(fs_info, "clearing free space tree");
++		ret = btrfs_clear_free_space_tree(fs_info);
++		if (ret) {
++			btrfs_warn(fs_info,
++				   "failed to clear free space tree: %d", ret);
++			close_ctree(tree_root);
++			return ret;
++		}
++	}
++
+ 	if (btrfs_test_opt(tree_root->fs_info, FREE_SPACE_TREE) &&
+ 	    !btrfs_fs_compat_ro(fs_info, FREE_SPACE_TREE)) {
+ 		btrfs_info(fs_info, "creating free space tree");
+@@ -3166,18 +3187,6 @@ retry_root_backup:
+ 
+ 	btrfs_qgroup_rescan_resume(fs_info);
+ 
+-	if (btrfs_test_opt(tree_root->fs_info, CLEAR_CACHE) &&
+-	    btrfs_fs_compat_ro(fs_info, FREE_SPACE_TREE)) {
+-		btrfs_info(fs_info, "clearing free space tree");
+-		ret = btrfs_clear_free_space_tree(fs_info);
+-		if (ret) {
+-			btrfs_warn(fs_info,
+-				"failed to clear free space tree: %d", ret);
+-			close_ctree(tree_root);
+-			return ret;
+-		}
+-	}
+-
+ 	if (!fs_info->uuid_root) {
+ 		btrfs_info(fs_info, "creating UUID tree");
+ 		ret = btrfs_create_uuid_tree(fs_info);
+diff --git a/fs/btrfs/extent_io.c b/fs/btrfs/extent_io.c
+index 44fe66b..c3ec30d 100644
+--- a/fs/btrfs/extent_io.c
++++ b/fs/btrfs/extent_io.c
+@@ -5524,17 +5524,45 @@ void copy_extent_buffer(struct extent_buffer *dst, struct extent_buffer *src,
+ 	}
+ }
+ 
+-/*
+- * The extent buffer bitmap operations are done with byte granularity because
+- * bitmap items are not guaranteed to be aligned to a word and therefore a
+- * single word in a bitmap may straddle two pages in the extent buffer.
+- */
+-#define BIT_BYTE(nr) ((nr) / BITS_PER_BYTE)
+-#define BYTE_MASK ((1 << BITS_PER_BYTE) - 1)
+-#define BITMAP_FIRST_BYTE_MASK(start) \
+-	((BYTE_MASK << ((start) & (BITS_PER_BYTE - 1))) & BYTE_MASK)
+-#define BITMAP_LAST_BYTE_MASK(nbits) \
+-	(BYTE_MASK >> (-(nbits) & (BITS_PER_BYTE - 1)))
++void le_bitmap_set(u8 *map, unsigned int start, int len)
++{
++	u8 *p = map + BIT_BYTE(start);
++	const unsigned int size = start + len;
++	int bits_to_set = BITS_PER_BYTE - (start % BITS_PER_BYTE);
++	u8 mask_to_set = BITMAP_FIRST_BYTE_MASK(start);
++
++	while (len - bits_to_set >= 0) {
++		*p |= mask_to_set;
++		len -= bits_to_set;
++		bits_to_set = BITS_PER_BYTE;
++		mask_to_set = ~(u8)0;
++		p++;
++	}
++	if (len) {
++		mask_to_set &= BITMAP_LAST_BYTE_MASK(size);
++		*p |= mask_to_set;
++	}
++}
++
++void le_bitmap_clear(u8 *map, unsigned int start, int len)
++{
++	u8 *p = map + BIT_BYTE(start);
++	const unsigned int size = start + len;
++	int bits_to_clear = BITS_PER_BYTE - (start % BITS_PER_BYTE);
++	u8 mask_to_clear = BITMAP_FIRST_BYTE_MASK(start);
++
++	while (len - bits_to_clear >= 0) {
++		*p &= ~mask_to_clear;
++		len -= bits_to_clear;
++		bits_to_clear = BITS_PER_BYTE;
++		mask_to_clear = ~(u8)0;
++		p++;
++	}
++	if (len) {
++		mask_to_clear &= BITMAP_LAST_BYTE_MASK(size);
++		*p &= ~mask_to_clear;
++	}
++}
+ 
+ /*
+  * eb_bitmap_offset() - calculate the page and offset of the byte containing the
+@@ -5578,7 +5606,7 @@ static inline void eb_bitmap_offset(struct extent_buffer *eb,
+ int extent_buffer_test_bit(struct extent_buffer *eb, unsigned long start,
+ 			   unsigned long nr)
+ {
+-	char *kaddr;
++	u8 *kaddr;
+ 	struct page *page;
+ 	unsigned long i;
+ 	size_t offset;
+@@ -5600,13 +5628,13 @@ int extent_buffer_test_bit(struct extent_buffer *eb, unsigned long start,
+ void extent_buffer_bitmap_set(struct extent_buffer *eb, unsigned long start,
+ 			      unsigned long pos, unsigned long len)
+ {
+-	char *kaddr;
++	u8 *kaddr;
+ 	struct page *page;
+ 	unsigned long i;
+ 	size_t offset;
+ 	const unsigned int size = pos + len;
+ 	int bits_to_set = BITS_PER_BYTE - (pos % BITS_PER_BYTE);
+-	unsigned int mask_to_set = BITMAP_FIRST_BYTE_MASK(pos);
++	u8 mask_to_set = BITMAP_FIRST_BYTE_MASK(pos);
+ 
+ 	eb_bitmap_offset(eb, start, pos, &i, &offset);
+ 	page = eb->pages[i];
+@@ -5617,7 +5645,7 @@ void extent_buffer_bitmap_set(struct extent_buffer *eb, unsigned long start,
+ 		kaddr[offset] |= mask_to_set;
+ 		len -= bits_to_set;
+ 		bits_to_set = BITS_PER_BYTE;
+-		mask_to_set = ~0U;
++		mask_to_set = ~(u8)0;
+ 		if (++offset >= PAGE_SIZE && len > 0) {
+ 			offset = 0;
+ 			page = eb->pages[++i];
+@@ -5642,13 +5670,13 @@ void extent_buffer_bitmap_set(struct extent_buffer *eb, unsigned long start,
+ void extent_buffer_bitmap_clear(struct extent_buffer *eb, unsigned long start,
+ 				unsigned long pos, unsigned long len)
+ {
+-	char *kaddr;
++	u8 *kaddr;
+ 	struct page *page;
+ 	unsigned long i;
+ 	size_t offset;
+ 	const unsigned int size = pos + len;
+ 	int bits_to_clear = BITS_PER_BYTE - (pos % BITS_PER_BYTE);
+-	unsigned int mask_to_clear = BITMAP_FIRST_BYTE_MASK(pos);
++	u8 mask_to_clear = BITMAP_FIRST_BYTE_MASK(pos);
+ 
+ 	eb_bitmap_offset(eb, start, pos, &i, &offset);
+ 	page = eb->pages[i];
+@@ -5659,7 +5687,7 @@ void extent_buffer_bitmap_clear(struct extent_buffer *eb, unsigned long start,
+ 		kaddr[offset] &= ~mask_to_clear;
+ 		len -= bits_to_clear;
+ 		bits_to_clear = BITS_PER_BYTE;
+-		mask_to_clear = ~0U;
++		mask_to_clear = ~(u8)0;
+ 		if (++offset >= PAGE_SIZE && len > 0) {
+ 			offset = 0;
+ 			page = eb->pages[++i];
+diff --git a/fs/btrfs/extent_io.h b/fs/btrfs/extent_io.h
+index 28cd88f..1cf4e42 100644
+--- a/fs/btrfs/extent_io.h
++++ b/fs/btrfs/extent_io.h
+@@ -59,6 +59,28 @@
+  */
+ #define EXTENT_PAGE_PRIVATE 1
+ 
++/*
++ * The extent buffer bitmap operations are done with byte granularity instead of
++ * word granularity for two reasons:
++ * 1. The bitmaps must be little-endian on disk.
++ * 2. Bitmap items are not guaranteed to be aligned to a word and therefore a
++ *    single word in a bitmap may straddle two pages in the extent buffer.
++ */
++#define BIT_BYTE(nr) ((nr) / BITS_PER_BYTE)
++#define BYTE_MASK ((1 << BITS_PER_BYTE) - 1)
++#define BITMAP_FIRST_BYTE_MASK(start) \
++	((BYTE_MASK << ((start) & (BITS_PER_BYTE - 1))) & BYTE_MASK)
++#define BITMAP_LAST_BYTE_MASK(nbits) \
++	(BYTE_MASK >> (-(nbits) & (BITS_PER_BYTE - 1)))
++
++static inline int le_test_bit(int nr, const u8 *addr)
++{
++	return 1U & (addr[BIT_BYTE(nr)] >> (nr & (BITS_PER_BYTE-1)));
++}
++
++extern void le_bitmap_set(u8 *map, unsigned int start, int len);
++extern void le_bitmap_clear(u8 *map, unsigned int start, int len);
++
+ struct extent_state;
+ struct btrfs_root;
+ struct btrfs_io_bio;
+diff --git a/fs/btrfs/free-space-tree.c b/fs/btrfs/free-space-tree.c
+index 87e7e3d..ea605ff 100644
+--- a/fs/btrfs/free-space-tree.c
++++ b/fs/btrfs/free-space-tree.c
+@@ -151,7 +151,7 @@ static inline u32 free_space_bitmap_size(u64 size, u32 sectorsize)
+ 	return DIV_ROUND_UP((u32)div_u64(size, sectorsize), BITS_PER_BYTE);
+ }
+ 
+-static unsigned long *alloc_bitmap(u32 bitmap_size)
++static u8 *alloc_bitmap(u32 bitmap_size)
+ {
+ 	void *mem;
+ 
+@@ -180,8 +180,7 @@ int convert_free_space_to_bitmaps(struct btrfs_trans_handle *trans,
+ 	struct btrfs_free_space_info *info;
+ 	struct btrfs_key key, found_key;
+ 	struct extent_buffer *leaf;
+-	unsigned long *bitmap;
+-	char *bitmap_cursor;
++	u8 *bitmap, *bitmap_cursor;
+ 	u64 start, end;
+ 	u64 bitmap_range, i;
+ 	u32 bitmap_size, flags, expected_extent_count;
+@@ -231,7 +230,7 @@ int convert_free_space_to_bitmaps(struct btrfs_trans_handle *trans,
+ 						block_group->sectorsize);
+ 				last = div_u64(found_key.objectid + found_key.offset - start,
+ 					       block_group->sectorsize);
+-				bitmap_set(bitmap, first, last - first);
++				le_bitmap_set(bitmap, first, last - first);
+ 
+ 				extent_count++;
+ 				nr++;
+@@ -269,7 +268,7 @@ int convert_free_space_to_bitmaps(struct btrfs_trans_handle *trans,
+ 		goto out;
+ 	}
+ 
+-	bitmap_cursor = (char *)bitmap;
++	bitmap_cursor = bitmap;
+ 	bitmap_range = block_group->sectorsize * BTRFS_FREE_SPACE_BITMAP_BITS;
+ 	i = start;
+ 	while (i < end) {
+@@ -318,7 +317,7 @@ int convert_free_space_to_extents(struct btrfs_trans_handle *trans,
+ 	struct btrfs_free_space_info *info;
+ 	struct btrfs_key key, found_key;
+ 	struct extent_buffer *leaf;
+-	unsigned long *bitmap;
++	u8 *bitmap;
+ 	u64 start, end;
+ 	/* Initialize to silence GCC. */
+ 	u64 extent_start = 0;
+@@ -362,7 +361,7 @@ int convert_free_space_to_extents(struct btrfs_trans_handle *trans,
+ 				break;
+ 			} else if (found_key.type == BTRFS_FREE_SPACE_BITMAP_KEY) {
+ 				unsigned long ptr;
+-				char *bitmap_cursor;
++				u8 *bitmap_cursor;
+ 				u32 bitmap_pos, data_size;
+ 
+ 				ASSERT(found_key.objectid >= start);
+@@ -372,7 +371,7 @@ int convert_free_space_to_extents(struct btrfs_trans_handle *trans,
+ 				bitmap_pos = div_u64(found_key.objectid - start,
+ 						     block_group->sectorsize *
+ 						     BITS_PER_BYTE);
+-				bitmap_cursor = ((char *)bitmap) + bitmap_pos;
++				bitmap_cursor = bitmap + bitmap_pos;
+ 				data_size = free_space_bitmap_size(found_key.offset,
+ 								   block_group->sectorsize);
+ 
+@@ -409,7 +408,7 @@ int convert_free_space_to_extents(struct btrfs_trans_handle *trans,
+ 	offset = start;
+ 	bitnr = 0;
+ 	while (offset < end) {
+-		bit = !!test_bit(bitnr, bitmap);
++		bit = !!le_test_bit(bitnr, bitmap);
+ 		if (prev_bit == 0 && bit == 1) {
+ 			extent_start = offset;
+ 		} else if (prev_bit == 1 && bit == 0) {
+@@ -1183,6 +1182,7 @@ int btrfs_create_free_space_tree(struct btrfs_fs_info *fs_info)
+ 	}
+ 
+ 	btrfs_set_fs_compat_ro(fs_info, FREE_SPACE_TREE);
++	btrfs_set_fs_compat_ro(fs_info, FREE_SPACE_TREE_VALID);
+ 	fs_info->creating_free_space_tree = 0;
+ 
+ 	ret = btrfs_commit_transaction(trans, tree_root);
+@@ -1251,6 +1251,7 @@ int btrfs_clear_free_space_tree(struct btrfs_fs_info *fs_info)
+ 		return PTR_ERR(trans);
+ 
+ 	btrfs_clear_fs_compat_ro(fs_info, FREE_SPACE_TREE);
++	btrfs_clear_fs_compat_ro(fs_info, FREE_SPACE_TREE_VALID);
+ 	fs_info->free_space_root = NULL;
+ 
+ 	ret = clear_free_space_tree(trans, free_space_root);
 diff --git a/fs/buffer.c b/fs/buffer.c
 index 9c8eb9b..6a5f1a0 100644
 --- a/fs/buffer.c
@@ -109960,6 +111509,80 @@ index 9c8eb9b..6a5f1a0 100644
  
  	head = create_page_buffers(page, inode,
  					(1 << BH_Dirty)|(1 << BH_Uptodate));
+diff --git a/fs/cachefiles/interface.c b/fs/cachefiles/interface.c
+index ce5f345..e7f16a7 100644
+--- a/fs/cachefiles/interface.c
++++ b/fs/cachefiles/interface.c
+@@ -253,6 +253,8 @@ static void cachefiles_drop_object(struct fscache_object *_object)
+ 	struct cachefiles_object *object;
+ 	struct cachefiles_cache *cache;
+ 	const struct cred *saved_cred;
++	struct inode *inode;
++	blkcnt_t i_blocks = 0;
+ 
+ 	ASSERT(_object);
+ 
+@@ -279,6 +281,10 @@ static void cachefiles_drop_object(struct fscache_object *_object)
+ 		    _object != cache->cache.fsdef
+ 		    ) {
+ 			_debug("- retire object OBJ%x", object->fscache.debug_id);
++			inode = d_backing_inode(object->dentry);
++			if (inode)
++				i_blocks = inode->i_blocks;
++
+ 			cachefiles_begin_secure(cache, &saved_cred);
+ 			cachefiles_delete_object(cache, object);
+ 			cachefiles_end_secure(cache, saved_cred);
+@@ -292,7 +298,7 @@ static void cachefiles_drop_object(struct fscache_object *_object)
+ 
+ 	/* note that the object is now inactive */
+ 	if (test_bit(CACHEFILES_OBJECT_ACTIVE, &object->flags))
+-		cachefiles_mark_object_inactive(cache, object);
++		cachefiles_mark_object_inactive(cache, object, i_blocks);
+ 
+ 	dput(object->dentry);
+ 	object->dentry = NULL;
+diff --git a/fs/cachefiles/internal.h b/fs/cachefiles/internal.h
+index 2fcde1a..cd1effe 100644
+--- a/fs/cachefiles/internal.h
++++ b/fs/cachefiles/internal.h
+@@ -160,7 +160,8 @@ extern char *cachefiles_cook_key(const u8 *raw, int keylen, uint8_t type);
+  * namei.c
+  */
+ extern void cachefiles_mark_object_inactive(struct cachefiles_cache *cache,
+-					    struct cachefiles_object *object);
++					    struct cachefiles_object *object,
++					    blkcnt_t i_blocks);
+ extern int cachefiles_delete_object(struct cachefiles_cache *cache,
+ 				    struct cachefiles_object *object);
+ extern int cachefiles_walk_to_object(struct cachefiles_object *parent,
+diff --git a/fs/cachefiles/namei.c b/fs/cachefiles/namei.c
+index 3f7c2cd..c6ee4b5 100644
+--- a/fs/cachefiles/namei.c
++++ b/fs/cachefiles/namei.c
+@@ -261,10 +261,9 @@ requeue:
+  * Mark an object as being inactive.
+  */
+ void cachefiles_mark_object_inactive(struct cachefiles_cache *cache,
+-				     struct cachefiles_object *object)
++				     struct cachefiles_object *object,
++				     blkcnt_t i_blocks)
+ {
+-	blkcnt_t i_blocks = d_backing_inode(object->dentry)->i_blocks;
+-
+ 	write_lock(&cache->active_lock);
+ 	rb_erase(&object->active_node, &cache->active_nodes);
+ 	clear_bit(CACHEFILES_OBJECT_ACTIVE, &object->flags);
+@@ -707,7 +706,8 @@ mark_active_timed_out:
+ 
+ check_error:
+ 	_debug("check error %d", ret);
+-	cachefiles_mark_object_inactive(cache, object);
++	cachefiles_mark_object_inactive(
++		cache, object, d_backing_inode(object->dentry)->i_blocks);
+ release_dentry:
+ 	dput(object->dentry);
+ 	object->dentry = NULL;
 diff --git a/fs/dcache.c b/fs/dcache.c
 index 5c7cc95..76280ee 100644
 --- a/fs/dcache.c
@@ -109981,6 +111604,88 @@ index 5c7cc95..76280ee 100644
  
  /*
   * Search for at least 1 mount point in the dentry's subdirs.
+diff --git a/fs/debugfs/file.c b/fs/debugfs/file.c
+index 592059f..309f4e9 100644
+--- a/fs/debugfs/file.c
++++ b/fs/debugfs/file.c
+@@ -97,9 +97,6 @@ EXPORT_SYMBOL_GPL(debugfs_use_file_finish);
+ 
+ #define F_DENTRY(filp) ((filp)->f_path.dentry)
+ 
+-#define REAL_FOPS_DEREF(dentry)					\
+-	((const struct file_operations *)(dentry)->d_fsdata)
+-
+ static int open_proxy_open(struct inode *inode, struct file *filp)
+ {
+ 	const struct dentry *dentry = F_DENTRY(filp);
+@@ -112,7 +109,7 @@ static int open_proxy_open(struct inode *inode, struct file *filp)
+ 		goto out;
+ 	}
+ 
+-	real_fops = REAL_FOPS_DEREF(dentry);
++	real_fops = debugfs_real_fops(filp);
+ 	real_fops = fops_get(real_fops);
+ 	if (!real_fops) {
+ 		/* Huh? Module did not clean up after itself at exit? */
+@@ -143,7 +140,7 @@ static ret_type full_proxy_ ## name(proto)				\
+ {									\
+ 	const struct dentry *dentry = F_DENTRY(filp);			\
+ 	const struct file_operations *real_fops =			\
+-		REAL_FOPS_DEREF(dentry);				\
++		debugfs_real_fops(filp);				\
+ 	int srcu_idx;							\
+ 	ret_type r;							\
+ 									\
+@@ -176,7 +173,7 @@ static unsigned int full_proxy_poll(struct file *filp,
+ 				struct poll_table_struct *wait)
+ {
+ 	const struct dentry *dentry = F_DENTRY(filp);
+-	const struct file_operations *real_fops = REAL_FOPS_DEREF(dentry);
++	const struct file_operations *real_fops = debugfs_real_fops(filp);
+ 	int srcu_idx;
+ 	unsigned int r = 0;
+ 
+@@ -193,7 +190,7 @@ static unsigned int full_proxy_poll(struct file *filp,
+ static int full_proxy_release(struct inode *inode, struct file *filp)
+ {
+ 	const struct dentry *dentry = F_DENTRY(filp);
+-	const struct file_operations *real_fops = REAL_FOPS_DEREF(dentry);
++	const struct file_operations *real_fops = debugfs_real_fops(filp);
+ 	const struct file_operations *proxy_fops = filp->f_op;
+ 	int r = 0;
+ 
+@@ -241,7 +238,7 @@ static int full_proxy_open(struct inode *inode, struct file *filp)
+ 		goto out;
+ 	}
+ 
+-	real_fops = REAL_FOPS_DEREF(dentry);
++	real_fops = debugfs_real_fops(filp);
+ 	real_fops = fops_get(real_fops);
+ 	if (!real_fops) {
+ 		/* Huh? Module did not cleanup after itself at exit? */
+diff --git a/fs/dlm/lowcomms.c b/fs/dlm/lowcomms.c
+index 963016c..609998d 100644
+--- a/fs/dlm/lowcomms.c
++++ b/fs/dlm/lowcomms.c
+@@ -1656,16 +1656,12 @@ void dlm_lowcomms_stop(void)
+ 	mutex_lock(&connections_lock);
+ 	dlm_allow_conn = 0;
+ 	foreach_conn(stop_conn);
++	clean_writequeues();
++	foreach_conn(free_conn);
+ 	mutex_unlock(&connections_lock);
+ 
+ 	work_stop();
+ 
+-	mutex_lock(&connections_lock);
+-	clean_writequeues();
+-
+-	foreach_conn(free_conn);
+-
+-	mutex_unlock(&connections_lock);
+ 	kmem_cache_destroy(con_cache);
+ }
+ 
 diff --git a/fs/exec.c b/fs/exec.c
 index 6fcfb3f..c0e7377 100644
 --- a/fs/exec.c
@@ -122689,6 +124394,172 @@ index 0000000..a93fa46
 +/************************************************************************/
 +
 +#define EXFAT_VERSION  "1.2.9"
+diff --git a/fs/ext4/extents.c b/fs/ext4/extents.c
+index d7ccb7f..7f69347 100644
+--- a/fs/ext4/extents.c
++++ b/fs/ext4/extents.c
+@@ -5734,6 +5734,9 @@ int ext4_insert_range(struct inode *inode, loff_t offset, loff_t len)
+ 			up_write(&EXT4_I(inode)->i_data_sem);
+ 			goto out_stop;
+ 		}
++	} else {
++		ext4_ext_drop_refs(path);
++		kfree(path);
+ 	}
+ 
+ 	ret = ext4_es_remove_extent(inode, offset_lblk,
+diff --git a/fs/ext4/inode.c b/fs/ext4/inode.c
+index c6ea25a..f4cdc64 100644
+--- a/fs/ext4/inode.c
++++ b/fs/ext4/inode.c
+@@ -647,11 +647,19 @@ found:
+ 		/*
+ 		 * We have to zeroout blocks before inserting them into extent
+ 		 * status tree. Otherwise someone could look them up there and
+-		 * use them before they are really zeroed.
++		 * use them before they are really zeroed. We also have to
++		 * unmap metadata before zeroing as otherwise writeback can
++		 * overwrite zeros with stale data from block device.
+ 		 */
+ 		if (flags & EXT4_GET_BLOCKS_ZERO &&
+ 		    map->m_flags & EXT4_MAP_MAPPED &&
+ 		    map->m_flags & EXT4_MAP_NEW) {
++			ext4_lblk_t i;
++
++			for (i = 0; i < map->m_len; i++) {
++				unmap_underlying_metadata(inode->i_sb->s_bdev,
++							  map->m_pblk + i);
++			}
+ 			ret = ext4_issue_zeroout(inode, map->m_lblk,
+ 						 map->m_pblk, map->m_len);
+ 			if (ret) {
+@@ -1649,6 +1657,8 @@ static void mpage_release_unused_pages(struct mpage_da_data *mpd,
+ 			BUG_ON(!PageLocked(page));
+ 			BUG_ON(PageWriteback(page));
+ 			if (invalidate) {
++				if (page_mapped(page))
++					clear_page_dirty_for_io(page);
+ 				block_invalidatepage(page, 0, PAGE_SIZE);
+ 				ClearPageUptodate(page);
+ 			}
+@@ -3890,7 +3900,7 @@ int ext4_update_disksize_before_punch(struct inode *inode, loff_t offset,
+ }
+ 
+ /*
+- * ext4_punch_hole: punches a hole in a file by releaseing the blocks
++ * ext4_punch_hole: punches a hole in a file by releasing the blocks
+  * associated with the given offset and length
+  *
+  * @inode:  File inode
+@@ -3919,7 +3929,7 @@ int ext4_punch_hole(struct inode *inode, loff_t offset, loff_t length)
+ 	 * Write out all dirty pages to avoid race conditions
+ 	 * Then release them.
+ 	 */
+-	if (mapping->nrpages && mapping_tagged(mapping, PAGECACHE_TAG_DIRTY)) {
++	if (mapping_tagged(mapping, PAGECACHE_TAG_DIRTY)) {
+ 		ret = filemap_write_and_wait_range(mapping, offset,
+ 						   offset + length - 1);
+ 		if (ret)
+@@ -4814,14 +4824,14 @@ static int ext4_do_update_inode(handle_t *handle,
+  * Fix up interoperability with old kernels. Otherwise, old inodes get
+  * re-used with the upper 16 bits of the uid/gid intact
+  */
+-		if (!ei->i_dtime) {
++		if (ei->i_dtime && list_empty(&ei->i_orphan)) {
++			raw_inode->i_uid_high = 0;
++			raw_inode->i_gid_high = 0;
++		} else {
+ 			raw_inode->i_uid_high =
+ 				cpu_to_le16(high_16_bits(i_uid));
+ 			raw_inode->i_gid_high =
+ 				cpu_to_le16(high_16_bits(i_gid));
+-		} else {
+-			raw_inode->i_uid_high = 0;
+-			raw_inode->i_gid_high = 0;
+ 		}
+ 	} else {
+ 		raw_inode->i_uid_low = cpu_to_le16(fs_high2lowuid(i_uid));
+diff --git a/fs/ext4/move_extent.c b/fs/ext4/move_extent.c
+index a920c5d..6fc14de 100644
+--- a/fs/ext4/move_extent.c
++++ b/fs/ext4/move_extent.c
+@@ -598,6 +598,13 @@ ext4_move_extents(struct file *o_filp, struct file *d_filp, __u64 orig_blk,
+ 		return -EOPNOTSUPP;
+ 	}
+ 
++	if (ext4_encrypted_inode(orig_inode) ||
++	    ext4_encrypted_inode(donor_inode)) {
++		ext4_msg(orig_inode->i_sb, KERN_ERR,
++			 "Online defrag not supported for encrypted files");
++		return -EOPNOTSUPP;
++	}
++
+ 	/* Protect orig and donor inodes against a truncate */
+ 	lock_two_nondirectories(orig_inode, donor_inode);
+ 
+diff --git a/fs/ext4/namei.c b/fs/ext4/namei.c
+index 34c0142..7e2f8c3 100644
+--- a/fs/ext4/namei.c
++++ b/fs/ext4/namei.c
+@@ -2044,33 +2044,31 @@ static int make_indexed_dir(handle_t *handle, struct ext4_filename *fname,
+ 	frame->entries = entries;
+ 	frame->at = entries;
+ 	frame->bh = bh;
+-	bh = bh2;
+ 
+ 	retval = ext4_handle_dirty_dx_node(handle, dir, frame->bh);
+ 	if (retval)
+ 		goto out_frames;	
+-	retval = ext4_handle_dirty_dirent_node(handle, dir, bh);
++	retval = ext4_handle_dirty_dirent_node(handle, dir, bh2);
+ 	if (retval)
+ 		goto out_frames;	
+ 
+-	de = do_split(handle,dir, &bh, frame, &fname->hinfo);
++	de = do_split(handle,dir, &bh2, frame, &fname->hinfo);
+ 	if (IS_ERR(de)) {
+ 		retval = PTR_ERR(de);
+ 		goto out_frames;
+ 	}
+-	dx_release(frames);
+ 
+-	retval = add_dirent_to_buf(handle, fname, dir, inode, de, bh);
+-	brelse(bh);
+-	return retval;
++	retval = add_dirent_to_buf(handle, fname, dir, inode, de, bh2);
+ out_frames:
+ 	/*
+ 	 * Even if the block split failed, we have to properly write
+ 	 * out all the changes we did so far. Otherwise we can end up
+ 	 * with corrupted filesystem.
+ 	 */
+-	ext4_mark_inode_dirty(handle, dir);
++	if (retval)
++		ext4_mark_inode_dirty(handle, dir);
+ 	dx_release(frames);
++	brelse(bh2);
+ 	return retval;
+ }
+ 
+diff --git a/fs/ext4/symlink.c b/fs/ext4/symlink.c
+index 4d83d9e..04a7850 100644
+--- a/fs/ext4/symlink.c
++++ b/fs/ext4/symlink.c
+@@ -65,13 +65,12 @@ static const char *ext4_encrypted_get_link(struct dentry *dentry,
+ 	res = fscrypt_fname_alloc_buffer(inode, cstr.len, &pstr);
+ 	if (res)
+ 		goto errout;
++	paddr = pstr.name;
+ 
+ 	res = fscrypt_fname_disk_to_usr(inode, 0, 0, &cstr, &pstr);
+ 	if (res < 0)
+ 		goto errout;
+ 
+-	paddr = pstr.name;
+-
+ 	/* Null-terminate the name */
+ 	if (res <= pstr.len)
+ 		paddr[res] = '\0';
 diff --git a/fs/f2fs/data.c b/fs/f2fs/data.c
 index ccb401e..cb0528b 100644
 --- a/fs/f2fs/data.c
@@ -122781,6 +124652,94 @@ index ad17e05..ae9f267 100644
  
  void __init files_init(void)
  { 
+diff --git a/fs/fuse/dir.c b/fs/fuse/dir.c
+index c47b778..4ff9251 100644
+--- a/fs/fuse/dir.c
++++ b/fs/fuse/dir.c
+@@ -1702,14 +1702,46 @@ error:
+ static int fuse_setattr(struct dentry *entry, struct iattr *attr)
+ {
+ 	struct inode *inode = d_inode(entry);
++	struct file *file = (attr->ia_valid & ATTR_FILE) ? attr->ia_file : NULL;
++	int ret;
+ 
+ 	if (!fuse_allow_current_process(get_fuse_conn(inode)))
+ 		return -EACCES;
+ 
+-	if (attr->ia_valid & ATTR_FILE)
+-		return fuse_do_setattr(inode, attr, attr->ia_file);
+-	else
+-		return fuse_do_setattr(inode, attr, NULL);
++	if (attr->ia_valid & (ATTR_KILL_SUID | ATTR_KILL_SGID)) {
++		int kill;
++
++		attr->ia_valid &= ~(ATTR_KILL_SUID | ATTR_KILL_SGID |
++				    ATTR_MODE);
++		/*
++		 * ia_mode calculation may have used stale i_mode.  Refresh and
++		 * recalculate.
++		 */
++		ret = fuse_do_getattr(inode, NULL, file);
++		if (ret)
++			return ret;
++
++		attr->ia_mode = inode->i_mode;
++		kill = should_remove_suid(entry);
++		if (kill & ATTR_KILL_SUID) {
++			attr->ia_valid |= ATTR_MODE;
++			attr->ia_mode &= ~S_ISUID;
++		}
++		if (kill & ATTR_KILL_SGID) {
++			attr->ia_valid |= ATTR_MODE;
++			attr->ia_mode &= ~S_ISGID;
++		}
++	}
++	if (!attr->ia_valid)
++		return 0;
++
++	ret = fuse_do_setattr(inode, attr, file);
++	if (!ret) {
++		/* Directory mode changed, may need to revalidate access */
++		if (d_is_dir(entry) && (attr->ia_valid & ATTR_MODE))
++			fuse_invalidate_entry_cache(entry);
++	}
++	return ret;
+ }
+ 
+ static int fuse_getattr(struct vfsmount *mnt, struct dentry *entry,
+@@ -1801,6 +1833,23 @@ static ssize_t fuse_getxattr(struct dentry *entry, struct inode *inode,
+ 	return ret;
+ }
+ 
++static int fuse_verify_xattr_list(char *list, size_t size)
++{
++	size_t origsize = size;
++
++	while (size) {
++		size_t thislen = strnlen(list, size);
++
++		if (!thislen || thislen == size)
++			return -EIO;
++
++		size -= thislen + 1;
++		list += thislen + 1;
++	}
++
++	return origsize;
++}
++
+ static ssize_t fuse_listxattr(struct dentry *entry, char *list, size_t size)
+ {
+ 	struct inode *inode = d_inode(entry);
+@@ -1836,6 +1885,8 @@ static ssize_t fuse_listxattr(struct dentry *entry, char *list, size_t size)
+ 	ret = fuse_simple_request(fc, &args);
+ 	if (!ret && !size)
+ 		ret = outarg.size;
++	if (ret > 0 && size)
++		ret = fuse_verify_xattr_list(list, ret);
+ 	if (ret == -ENOSYS) {
+ 		fc->no_listxattr = 1;
+ 		ret = -EOPNOTSUPP;
 diff --git a/fs/gfs2/meta_io.c b/fs/gfs2/meta_io.c
 index 950b8be..7991c62 100644
 --- a/fs/gfs2/meta_io.c
@@ -122816,6 +124775,51 @@ index 7e3ef3a..da063d3 100644
  
  /**
   *	touch_atime	-	update the access time
+diff --git a/fs/jbd2/transaction.c b/fs/jbd2/transaction.c
+index b5bc3e2..3d8246a 100644
+--- a/fs/jbd2/transaction.c
++++ b/fs/jbd2/transaction.c
+@@ -159,6 +159,7 @@ static void wait_transaction_locked(journal_t *journal)
+ 	read_unlock(&journal->j_state_lock);
+ 	if (need_to_start)
+ 		jbd2_log_start_commit(journal, tid);
++	jbd2_might_wait_for_commit(journal);
+ 	schedule();
+ 	finish_wait(&journal->j_wait_transaction_locked, &wait);
+ }
+@@ -182,8 +183,6 @@ static int add_transaction_credits(journal_t *journal, int blocks,
+ 	int needed;
+ 	int total = blocks + rsv_blocks;
+ 
+-	jbd2_might_wait_for_commit(journal);
+-
+ 	/*
+ 	 * If the current transaction is locked down for commit, wait
+ 	 * for the lock to be released.
+@@ -214,6 +213,7 @@ static int add_transaction_credits(journal_t *journal, int blocks,
+ 		if (atomic_read(&journal->j_reserved_credits) + total >
+ 		    journal->j_max_transaction_buffers) {
+ 			read_unlock(&journal->j_state_lock);
++			jbd2_might_wait_for_commit(journal);
+ 			wait_event(journal->j_wait_reserved,
+ 				   atomic_read(&journal->j_reserved_credits) + total <=
+ 				   journal->j_max_transaction_buffers);
+@@ -238,6 +238,7 @@ static int add_transaction_credits(journal_t *journal, int blocks,
+ 	if (jbd2_log_space_left(journal) < jbd2_space_needed(journal)) {
+ 		atomic_sub(total, &t->t_outstanding_credits);
+ 		read_unlock(&journal->j_state_lock);
++		jbd2_might_wait_for_commit(journal);
+ 		write_lock(&journal->j_state_lock);
+ 		if (jbd2_log_space_left(journal) < jbd2_space_needed(journal))
+ 			__jbd2_log_wait_for_space(journal);
+@@ -255,6 +256,7 @@ static int add_transaction_credits(journal_t *journal, int blocks,
+ 		sub_reserved_credits(journal, rsv_blocks);
+ 		atomic_sub(total, &t->t_outstanding_credits);
+ 		read_unlock(&journal->j_state_lock);
++		jbd2_might_wait_for_commit(journal);
+ 		wait_event(journal->j_wait_reserved,
+ 			 atomic_read(&journal->j_reserved_credits) + rsv_blocks
+ 			 <= journal->j_max_transaction_buffers / 2);
 diff --git a/fs/mpage.c b/fs/mpage.c
 index d2413af..d6f1afe 100644
 --- a/fs/mpage.c
@@ -123073,6 +125077,37 @@ index 66215a7..c643215 100644
  ssize_t __kernel_write(struct file *file, const char *buf, size_t count, loff_t *pos)
  {
  	mm_segment_t old_fs;
+diff --git a/fs/reiserfs/super.c b/fs/reiserfs/super.c
+index 7a4a85a..74d5ddd 100644
+--- a/fs/reiserfs/super.c
++++ b/fs/reiserfs/super.c
+@@ -190,7 +190,15 @@ static int remove_save_link_only(struct super_block *s,
+ static int reiserfs_quota_on_mount(struct super_block *, int);
+ #endif
+ 
+-/* look for uncompleted unlinks and truncates and complete them */
++/*
++ * Look for uncompleted unlinks and truncates and complete them
++ *
++ * Called with superblock write locked.  If quotas are enabled, we have to
++ * release/retake lest we call dquot_quota_on_mount(), proceed to
++ * schedule_on_each_cpu() in invalidate_bdev() and deadlock waiting for the per
++ * cpu worklets to complete flush_async_commits() that in turn wait for the
++ * superblock write lock.
++ */
+ static int finish_unfinished(struct super_block *s)
+ {
+ 	INITIALIZE_PATH(path);
+@@ -237,7 +245,9 @@ static int finish_unfinished(struct super_block *s)
+ 				quota_enabled[i] = 0;
+ 				continue;
+ 			}
++			reiserfs_write_unlock(s);
+ 			ret = reiserfs_quota_on_mount(s, i);
++			reiserfs_write_lock(s);
+ 			if (ret < 0)
+ 				reiserfs_warning(s, "reiserfs-2500",
+ 						 "cannot turn on journaled "
 diff --git a/fs/splice.c b/fs/splice.c
 index dd9bf7e..0606690 100644
 --- a/fs/splice.c
@@ -123114,6 +125149,41 @@ index dd9bf7e..0606690 100644
  
  /**
   * splice_direct_to_actor - splices data directly between two non-pipes
+diff --git a/fs/utimes.c b/fs/utimes.c
+index 794f5f5..ba54b9e 100644
+--- a/fs/utimes.c
++++ b/fs/utimes.c
+@@ -87,21 +87,7 @@ static int utimes_common(struct path *path, struct timespec *times)
+ 		 */
+ 		newattrs.ia_valid |= ATTR_TIMES_SET;
+ 	} else {
+-		/*
+-		 * If times is NULL (or both times are UTIME_NOW),
+-		 * then we need to check permissions, because
+-		 * inode_change_ok() won't do it.
+-		 */
+-		error = -EPERM;
+-                if (IS_IMMUTABLE(inode))
+-			goto mnt_drop_write_and_out;
+-
+-		error = -EACCES;
+-		if (!inode_owner_or_capable(inode)) {
+-			error = inode_permission(inode, MAY_WRITE);
+-			if (error)
+-				goto mnt_drop_write_and_out;
+-		}
++		newattrs.ia_valid |= ATTR_TOUCH;
+ 	}
+ retry_deleg:
+ 	inode_lock(inode);
+@@ -113,7 +99,6 @@ retry_deleg:
+ 			goto retry_deleg;
+ 	}
+ 
+-mnt_drop_write_and_out:
+ 	mnt_drop_write(path->mnt);
+ out:
+ 	return error;
 diff --git a/fs/xattr.c b/fs/xattr.c
 index c243905..b60dc60 100644
 --- a/fs/xattr.c
@@ -123163,6 +125233,35 @@ index ea62245..6290093 100644
  		return 0;
  	}
  	offset = (char *)context->alist + context->count;
+diff --git a/include/crypto/ghash.h b/include/crypto/ghash.h
+new file mode 100644
+index 0000000..2a61c9b
+--- /dev/null
++++ b/include/crypto/ghash.h
+@@ -0,0 +1,23 @@
++/*
++ * Common values for GHASH algorithms
++ */
++
++#ifndef __CRYPTO_GHASH_H__
++#define __CRYPTO_GHASH_H__
++
++#include <linux/types.h>
++#include <crypto/gf128mul.h>
++
++#define GHASH_BLOCK_SIZE	16
++#define GHASH_DIGEST_SIZE	16
++
++struct ghash_ctx {
++	struct gf128mul_4k *gf128;
++};
++
++struct ghash_desc_ctx {
++	u8 buffer[GHASH_BLOCK_SIZE];
++	u32 bytes;
++};
++
++#endif
 diff --git a/include/linux/backing-dev-defs.h b/include/linux/backing-dev-defs.h
 index c357f27..dc5f76d 100644
 --- a/include/linux/backing-dev-defs.h
@@ -123315,6 +125414,34 @@ index e79055c..fccdcd9 100644
  extern void blk_set_default_limits(struct queue_limits *lim);
  extern void blk_set_stacking_limits(struct queue_limits *lim);
  extern int blk_stack_limits(struct queue_limits *t, struct queue_limits *b,
+diff --git a/include/linux/debugfs.h b/include/linux/debugfs.h
+index 1438e23..4d3f0d1 100644
+--- a/include/linux/debugfs.h
++++ b/include/linux/debugfs.h
+@@ -45,6 +45,23 @@ extern struct dentry *arch_debugfs_dir;
+ 
+ extern struct srcu_struct debugfs_srcu;
+ 
++/**
++ * debugfs_real_fops - getter for the real file operation
++ * @filp: a pointer to a struct file
++ *
++ * Must only be called under the protection established by
++ * debugfs_use_file_start().
++ */
++static inline const struct file_operations *debugfs_real_fops(struct file *filp)
++	__must_hold(&debugfs_srcu)
++{
++	/*
++	 * Neither the pointer to the struct file_operations, nor its
++	 * contents ever change -- srcu_dereference() is not needed here.
++	 */
++	return filp->f_path.dentry->d_fsdata;
++}
++
+ #if defined(CONFIG_DEBUG_FS)
+ 
+ struct dentry *debugfs_create_file(const char *name, umode_t mode,
 diff --git a/include/linux/file.h b/include/linux/file.h
 index 7444f5f..bdac0be 100644
 --- a/include/linux/file.h
@@ -123328,7 +125455,7 @@ index 7444f5f..bdac0be 100644
  static inline void fput_light(struct file *file, int fput_needed)
  {
 diff --git a/include/linux/fs.h b/include/linux/fs.h
-index 901e25d..3b37038 100644
+index 901e25d..6f180af 100644
 --- a/include/linux/fs.h
 +++ b/include/linux/fs.h
 @@ -189,6 +189,8 @@ typedef int (dio_iodone_t)(struct kiocb *iocb, loff_t offset,
@@ -123348,7 +125475,15 @@ index 901e25d..3b37038 100644
  
  /*
   * Attribute flags.  These should be or-ed together to figure out what
-@@ -1275,6 +1278,7 @@ extern void fasync_free(struct fasync_struct *);
+@@ -224,6 +227,7 @@ typedef int (dio_iodone_t)(struct kiocb *iocb, loff_t offset,
+ #define ATTR_KILL_PRIV	(1 << 14)
+ #define ATTR_OPEN	(1 << 15) /* Truncating from open(O_TRUNC) */
+ #define ATTR_TIMES_SET	(1 << 16)
++#define ATTR_TOUCH	(1 << 17)
+ 
+ /*
+  * Whiteout is represented by a char device.  The following constants define the
+@@ -1275,6 +1279,7 @@ extern void fasync_free(struct fasync_struct *);
  /* can be called from interrupts */
  extern void kill_fasync(struct fasync_struct **, int, int);
  
@@ -123356,7 +125491,7 @@ index 901e25d..3b37038 100644
  extern void __f_setown(struct file *filp, struct pid *, enum pid_type, int force);
  extern void f_setown(struct file *filp, unsigned long arg, int force);
  extern void f_delown(struct file *filp);
-@@ -1699,6 +1703,7 @@ struct file_operations {
+@@ -1699,6 +1704,7 @@ struct file_operations {
  	ssize_t (*sendpage) (struct file *, struct page *, int, size_t, loff_t *, int);
  	unsigned long (*get_unmapped_area)(struct file *, unsigned long, unsigned long, unsigned long, unsigned long);
  	int (*check_flags)(int);
@@ -123364,7 +125499,7 @@ index 901e25d..3b37038 100644
  	int (*flock) (struct file *, int, struct file_lock *);
  	ssize_t (*splice_write)(struct pipe_inode_info *, struct file *, loff_t *, size_t, unsigned int);
  	ssize_t (*splice_read)(struct file *, loff_t *, struct pipe_inode_info *, size_t, unsigned int);
-@@ -1759,6 +1764,12 @@ ssize_t rw_copy_check_uvector(int type, const struct iovec __user * uvector,
+@@ -1759,6 +1765,12 @@ ssize_t rw_copy_check_uvector(int type, const struct iovec __user * uvector,
  			      struct iovec *fast_pointer,
  			      struct iovec **ret_pointer);
  
@@ -123377,7 +125512,7 @@ index 901e25d..3b37038 100644
  extern ssize_t __vfs_read(struct file *, char __user *, size_t, loff_t *);
  extern ssize_t __vfs_write(struct file *, const char __user *, size_t, loff_t *);
  extern ssize_t vfs_read(struct file *, char __user *, size_t, loff_t *);
-@@ -2123,6 +2134,7 @@ extern int current_umask(void);
+@@ -2123,6 +2135,7 @@ extern int current_umask(void);
  extern void ihold(struct inode * inode);
  extern void iput(struct inode *);
  extern int generic_update_time(struct inode *, struct timespec *, int);
@@ -123620,6 +125755,23 @@ index 903200f..55fc528 100644
  	void * vm_private_data;		/* was vm_pte (shared mem) */
  
  #ifndef CONFIG_MMU
+diff --git a/include/linux/radix-tree.h b/include/linux/radix-tree.h
+index 4c45105..52b97db 100644
+--- a/include/linux/radix-tree.h
++++ b/include/linux/radix-tree.h
+@@ -280,9 +280,9 @@ bool __radix_tree_delete_node(struct radix_tree_root *root,
+ 			      struct radix_tree_node *node);
+ void *radix_tree_delete_item(struct radix_tree_root *, unsigned long, void *);
+ void *radix_tree_delete(struct radix_tree_root *, unsigned long);
+-struct radix_tree_node *radix_tree_replace_clear_tags(
+-				struct radix_tree_root *root,
+-				unsigned long index, void *entry);
++void radix_tree_clear_tags(struct radix_tree_root *root,
++			   struct radix_tree_node *node,
++			   void **slot);
+ unsigned int radix_tree_gang_lookup(struct radix_tree_root *root,
+ 			void **results, unsigned long first_index,
+ 			unsigned int max_items);
 diff --git a/include/linux/sched.h b/include/linux/sched.h
 index 62c68e5..e58ba7a 100644
 --- a/include/linux/sched.h
@@ -123786,6 +125938,18 @@ index d9cf5a5..94d397e 100644
  #define MAX_PRIO		(MAX_RT_PRIO + NICE_WIDTH)
  #define DEFAULT_PRIO		(MAX_RT_PRIO + NICE_WIDTH / 2)
  
+diff --git a/include/linux/sem.h b/include/linux/sem.h
+index 976ce3a..d0efd6e 100644
+--- a/include/linux/sem.h
++++ b/include/linux/sem.h
+@@ -21,6 +21,7 @@ struct sem_array {
+ 	struct list_head	list_id;	/* undo requests on this array */
+ 	int			sem_nsems;	/* no. of semaphores in array */
+ 	int			complex_count;	/* pending complex operations */
++	bool			complex_mode;	/* no parallel simple ops */
+ };
+ 
+ #ifdef CONFIG_SYSVIPC
 diff --git a/include/linux/skip_list.h b/include/linux/skip_list.h
 new file mode 100644
 index 0000000..d4be84b
@@ -124738,6 +126902,29 @@ index 0000000..e220283
 +#define AUFS_CTL_FHSM_FD	_IOW(AuCtlType, AuCtl_FHSM_FD, int)
 +
 +#endif /* __AUFS_TYPE_H__ */
+diff --git a/include/uapi/linux/btrfs.h b/include/uapi/linux/btrfs.h
+index ac5eacd..db4c253 100644
+--- a/include/uapi/linux/btrfs.h
++++ b/include/uapi/linux/btrfs.h
+@@ -239,7 +239,17 @@ struct btrfs_ioctl_fs_info_args {
+  * Used by:
+  * struct btrfs_ioctl_feature_flags
+  */
+-#define BTRFS_FEATURE_COMPAT_RO_FREE_SPACE_TREE	(1ULL << 0)
++#define BTRFS_FEATURE_COMPAT_RO_FREE_SPACE_TREE		(1ULL << 0)
++/*
++ * Older kernels (< 4.9) on big-endian systems produced broken free space tree
++ * bitmaps, and btrfs-progs also used to corrupt the free space tree (versions
++ * < 4.7.3).  If this bit is clear, then the free space tree cannot be trusted.
++ * btrfs-progs can also intentionally clear this bit to ask the kernel to
++ * rebuild the free space tree, however this might not work on older kernels
++ * that do not know about this bit. If not sure, clear the cache manually on
++ * first mount when booting older kernel versions.
++ */
++#define BTRFS_FEATURE_COMPAT_RO_FREE_SPACE_TREE_VALID	(1ULL << 1)
+ 
+ #define BTRFS_FEATURE_INCOMPAT_MIXED_BACKREF	(1ULL << 0)
+ #define BTRFS_FEATURE_INCOMPAT_DEFAULT_SUBVOL	(1ULL << 1)
 diff --git a/include/uapi/linux/sched.h b/include/uapi/linux/sched.h
 index 5f0fe01..950a481 100644
 --- a/include/uapi/linux/sched.h
@@ -124942,6 +127129,237 @@ index a8a58e2..76a2d14 100644
  	if (ramdisk_execute_command) {
  		ret = run_init_process(ramdisk_execute_command);
  		if (!ret)
+diff --git a/ipc/sem.c b/ipc/sem.c
+index 7c9d4f7..5e318c5 100644
+--- a/ipc/sem.c
++++ b/ipc/sem.c
+@@ -162,14 +162,21 @@ static int sysvipc_sem_proc_show(struct seq_file *s, void *it);
+ 
+ /*
+  * Locking:
++ * a) global sem_lock() for read/write
+  *	sem_undo.id_next,
+  *	sem_array.complex_count,
+- *	sem_array.pending{_alter,_cont},
+- *	sem_array.sem_undo: global sem_lock() for read/write
+- *	sem_undo.proc_next: only "current" is allowed to read/write that field.
++ *	sem_array.complex_mode
++ *	sem_array.pending{_alter,_const},
++ *	sem_array.sem_undo
+  *
++ * b) global or semaphore sem_lock() for read/write:
+  *	sem_array.sem_base[i].pending_{const,alter}:
+- *		global or semaphore sem_lock() for read/write
++ *	sem_array.complex_mode (for read)
++ *
++ * c) special:
++ *	sem_undo_list.list_proc:
++ *	* undo_list->lock for write
++ *	* rcu for read
+  */
+ 
+ #define sc_semmsl	sem_ctls[0]
+@@ -260,30 +267,61 @@ static void sem_rcu_free(struct rcu_head *head)
+ }
+ 
+ /*
+- * Wait until all currently ongoing simple ops have completed.
++ * Enter the mode suitable for non-simple operations:
+  * Caller must own sem_perm.lock.
+- * New simple ops cannot start, because simple ops first check
+- * that sem_perm.lock is free.
+- * that a) sem_perm.lock is free and b) complex_count is 0.
+  */
+-static void sem_wait_array(struct sem_array *sma)
++static void complexmode_enter(struct sem_array *sma)
+ {
+ 	int i;
+ 	struct sem *sem;
+ 
+-	if (sma->complex_count)  {
+-		/* The thread that increased sma->complex_count waited on
+-		 * all sem->lock locks. Thus we don't need to wait again.
+-		 */
++	if (sma->complex_mode)  {
++		/* We are already in complex_mode. Nothing to do */
+ 		return;
+ 	}
+ 
++	/* We need a full barrier after seting complex_mode:
++	 * The write to complex_mode must be visible
++	 * before we read the first sem->lock spinlock state.
++	 */
++	smp_store_mb(sma->complex_mode, true);
++
+ 	for (i = 0; i < sma->sem_nsems; i++) {
+ 		sem = sma->sem_base + i;
+ 		spin_unlock_wait(&sem->lock);
+ 	}
++	/*
++	 * spin_unlock_wait() is not a memory barriers, it is only a
++	 * control barrier. The code must pair with spin_unlock(&sem->lock),
++	 * thus just the control barrier is insufficient.
++	 *
++	 * smp_rmb() is sufficient, as writes cannot pass the control barrier.
++	 */
++	smp_rmb();
++}
++
++/*
++ * Try to leave the mode that disallows simple operations:
++ * Caller must own sem_perm.lock.
++ */
++static void complexmode_tryleave(struct sem_array *sma)
++{
++	if (sma->complex_count)  {
++		/* Complex ops are sleeping.
++		 * We must stay in complex mode
++		 */
++		return;
++	}
++	/*
++	 * Immediately after setting complex_mode to false,
++	 * a simple op can start. Thus: all memory writes
++	 * performed by the current operation must be visible
++	 * before we set complex_mode to false.
++	 */
++	smp_store_release(&sma->complex_mode, false);
+ }
+ 
++#define SEM_GLOBAL_LOCK	(-1)
+ /*
+  * If the request contains only one semaphore operation, and there are
+  * no complex transactions pending, lock only the semaphore involved.
+@@ -300,56 +338,42 @@ static inline int sem_lock(struct sem_array *sma, struct sembuf *sops,
+ 		/* Complex operation - acquire a full lock */
+ 		ipc_lock_object(&sma->sem_perm);
+ 
+-		/* And wait until all simple ops that are processed
+-		 * right now have dropped their locks.
+-		 */
+-		sem_wait_array(sma);
+-		return -1;
++		/* Prevent parallel simple ops */
++		complexmode_enter(sma);
++		return SEM_GLOBAL_LOCK;
+ 	}
+ 
+ 	/*
+ 	 * Only one semaphore affected - try to optimize locking.
+-	 * The rules are:
+-	 * - optimized locking is possible if no complex operation
+-	 *   is either enqueued or processed right now.
+-	 * - The test for enqueued complex ops is simple:
+-	 *      sma->complex_count != 0
+-	 * - Testing for complex ops that are processed right now is
+-	 *   a bit more difficult. Complex ops acquire the full lock
+-	 *   and first wait that the running simple ops have completed.
+-	 *   (see above)
+-	 *   Thus: If we own a simple lock and the global lock is free
+-	 *	and complex_count is now 0, then it will stay 0 and
+-	 *	thus just locking sem->lock is sufficient.
++	 * Optimized locking is possible if no complex operation
++	 * is either enqueued or processed right now.
++	 *
++	 * Both facts are tracked by complex_mode.
+ 	 */
+ 	sem = sma->sem_base + sops->sem_num;
+ 
+-	if (sma->complex_count == 0) {
++	/*
++	 * Initial check for complex_mode. Just an optimization,
++	 * no locking, no memory barrier.
++	 */
++	if (!sma->complex_mode) {
+ 		/*
+ 		 * It appears that no complex operation is around.
+ 		 * Acquire the per-semaphore lock.
+ 		 */
+ 		spin_lock(&sem->lock);
+ 
+-		/* Then check that the global lock is free */
+-		if (!spin_is_locked(&sma->sem_perm.lock)) {
+-			/*
+-			 * We need a memory barrier with acquire semantics,
+-			 * otherwise we can race with another thread that does:
+-			 *	complex_count++;
+-			 *	spin_unlock(sem_perm.lock);
+-			 */
+-			smp_acquire__after_ctrl_dep();
++		/*
++		 * See 51d7d5205d33
++		 * ("powerpc: Add smp_mb() to arch_spin_is_locked()"):
++		 * A full barrier is required: the write of sem->lock
++		 * must be visible before the read is executed
++		 */
++		smp_mb();
+ 
+-			/*
+-			 * Now repeat the test of complex_count:
+-			 * It can't change anymore until we drop sem->lock.
+-			 * Thus: if is now 0, then it will stay 0.
+-			 */
+-			if (sma->complex_count == 0) {
+-				/* fast path successful! */
+-				return sops->sem_num;
+-			}
++		if (!smp_load_acquire(&sma->complex_mode)) {
++			/* fast path successful! */
++			return sops->sem_num;
+ 		}
+ 		spin_unlock(&sem->lock);
+ 	}
+@@ -369,15 +393,16 @@ static inline int sem_lock(struct sem_array *sma, struct sembuf *sops,
+ 		/* Not a false alarm, thus complete the sequence for a
+ 		 * full lock.
+ 		 */
+-		sem_wait_array(sma);
+-		return -1;
++		complexmode_enter(sma);
++		return SEM_GLOBAL_LOCK;
+ 	}
+ }
+ 
+ static inline void sem_unlock(struct sem_array *sma, int locknum)
+ {
+-	if (locknum == -1) {
++	if (locknum == SEM_GLOBAL_LOCK) {
+ 		unmerge_queues(sma);
++		complexmode_tryleave(sma);
+ 		ipc_unlock_object(&sma->sem_perm);
+ 	} else {
+ 		struct sem *sem = sma->sem_base + locknum;
+@@ -529,6 +554,7 @@ static int newary(struct ipc_namespace *ns, struct ipc_params *params)
+ 	}
+ 
+ 	sma->complex_count = 0;
++	sma->complex_mode = true; /* dropped by sem_unlock below */
+ 	INIT_LIST_HEAD(&sma->pending_alter);
+ 	INIT_LIST_HEAD(&sma->pending_const);
+ 	INIT_LIST_HEAD(&sma->list_id);
+@@ -2184,10 +2210,10 @@ static int sysvipc_sem_proc_show(struct seq_file *s, void *it)
+ 	/*
+ 	 * The proc interface isn't aware of sem_lock(), it calls
+ 	 * ipc_lock_object() directly (in sysvipc_find_ipc).
+-	 * In order to stay compatible with sem_lock(), we must wait until
+-	 * all simple semop() calls have left their critical regions.
++	 * In order to stay compatible with sem_lock(), we must
++	 * enter / leave complex_mode.
+ 	 */
+-	sem_wait_array(sma);
++	complexmode_enter(sma);
+ 
+ 	sem_otime = get_semotime(sma);
+ 
+@@ -2204,6 +2230,8 @@ static int sysvipc_sem_proc_show(struct seq_file *s, void *it)
+ 		   sem_otime,
+ 		   sma->sem_ctime);
+ 
++	complexmode_tryleave(sma);
++
+ 	return 0;
+ }
+ #endif
 diff --git a/kernel/Makefile b/kernel/Makefile
 index e2ec54e..7241e34 100644
 --- a/kernel/Makefile
@@ -125022,10 +127440,10 @@ index 5e59b83..a787aa9 100644
  obj-$(CONFIG_CPU_FREQ_GOV_SCHEDUTIL) += cpufreq_schedutil.o
 diff --git a/kernel/sched/MuQSS.c b/kernel/sched/MuQSS.c
 new file mode 100644
-index 0000000..ab06347
+index 0000000..b95292f
 --- /dev/null
 +++ b/kernel/sched/MuQSS.c
-@@ -0,0 +1,8247 @@
+@@ -0,0 +1,8231 @@
 +/*
 + *  kernel/sched/MuQSS.c, was kernel/sched.c
 + *
@@ -125163,7 +127581,7 @@ index 0000000..ab06347
 +
 +void print_scheduler_version(void)
 +{
-+	printk(KERN_INFO "MuQSS CPU scheduler v0.114 by Con Kolivas.\n");
++	printk(KERN_INFO "MuQSS CPU scheduler v0.115 by Con Kolivas.\n");
 +}
 +
 +/*
@@ -125207,28 +127625,9 @@ index 0000000..ab06347
 +	return MS_TO_US(rr_interval);
 +}
 +
-+/*
-+ * The global runqueue data that all CPUs work off. Contains either atomic
-+ * variables and a cpu bitmap set atomically.
-+ */
-+struct global_rq {
 +#ifdef CONFIG_SMP
-+	atomic_t nr_running ____cacheline_aligned_in_smp;
-+	atomic_t nr_uninterruptible ____cacheline_aligned_in_smp;
-+	atomic64_t nr_switches ____cacheline_aligned_in_smp;
-+	atomic_t qnr ____cacheline_aligned_in_smp; /* queued not running */
-+#else
-+	atomic_t nr_running ____cacheline_aligned;
-+	atomic_t nr_uninterruptible ____cacheline_aligned;
-+	atomic64_t nr_switches ____cacheline_aligned;
-+	atomic_t qnr ____cacheline_aligned; /* queued not running */
-+#endif
-+#ifdef CONFIG_SMP
-+	cpumask_t cpu_idle_map;
-+#endif
-+};
++static cpumask_t cpu_idle_map ____cacheline_aligned_in_smp;
 +
-+#ifdef CONFIG_SMP
 +/*
 + * We add the notion of a root-domain which will be used to define per-domain
 + * variables. Each exclusive cpuset essentially defines an island domain by
@@ -125259,13 +127658,6 @@ index 0000000..ab06347
 +static struct root_domain def_root_domain;
 +
 +#endif /* CONFIG_SMP */
-+
-+/* There can be only one */
-+#ifdef CONFIG_SMP
-+static struct global_rq grq ____cacheline_aligned_in_smp;
-+#else
-+static struct global_rq grq ____cacheline_aligned;
-+#endif
 +
 +static DEFINE_MUTEX(sched_hotcpu_mutex);
 +
@@ -125738,6 +128130,12 @@ index 0000000..ab06347
 +	next->on_cpu = 1;
 +}
 +
++static inline void smp_sched_reschedule(int cpu)
++{
++	if (likely(cpu_online(cpu)))
++		smp_send_reschedule(cpu);
++}
++
 +/*
 + * resched_task - mark a task 'to be rescheduled now'.
 + *
@@ -125764,7 +128162,7 @@ index 0000000..ab06347
 +	}
 +
 +	if (set_nr_and_not_polling(p))
-+		smp_send_reschedule(cpu);
++		smp_sched_reschedule(cpu);
 +	else
 +		trace_sched_wake_idle_without_ipi(cpu);
 +}
@@ -125816,6 +128214,7 @@ index 0000000..ab06347
 +	 */
 +	if (unlikely(task_on_rq_migrating(prev))) {
 +		sched_info_dequeued(rq, prev);
++		rq->nr_running--;
 +		/*
 +		 * We move the ownership of prev to the new cpu now. ttwu can't
 +		 * activate prev to the wrong cpu since it has to grab this
@@ -125826,6 +128225,7 @@ index 0000000..ab06347
 +
 +		raw_spin_lock(&prev->pi_lock);
 +		rq = __task_rq_lock(prev);
++		rq->nr_running++;
 +		/* Check that someone else hasn't already queued prev */
 +		if (likely(!task_queued(prev))) {
 +			enqueue_task(rq, prev, 0);
@@ -125880,7 +128280,7 @@ index 0000000..ab06347
 +
 +static inline int rq_load(struct rq *rq)
 +{
-+	return rq->sl->entries + !rq_idle(rq);
++	return rq->nr_running;
 +}
 +
 +static inline bool rq_local(struct rq *rq);
@@ -126027,26 +128427,6 @@ index 0000000..ab06347
 +	return (rr_interval * task_prio_ratio(p) / 128);
 +}
 +
-+/*
-+ * qnr is the "queued but not running" count which is the total number of
-+ * tasks on the global runqueue list waiting for cpu time but not actually
-+ * currently running on a cpu.
-+ */
-+static inline void inc_qnr(void)
-+{
-+	atomic_inc(&grq.qnr);
-+}
-+
-+static inline void dec_qnr(void)
-+{
-+	atomic_dec(&grq.qnr);
-+}
-+
-+static inline int queued_notrunning(void)
-+{
-+	return atomic_read(&grq.qnr);
-+}
-+
 +#ifdef CONFIG_SMP
 +/* Entered with rq locked */
 +static inline void resched_if_idle(struct rq *rq)
@@ -126151,7 +128531,7 @@ index 0000000..ab06347
 +static inline void set_cpuidle_map(int cpu)
 +{
 +	if (likely(cpu_online(cpu)))
-+		atomic_set_cpu(cpu, &grq.cpu_idle_map);
++		atomic_set_cpu(cpu, &cpu_idle_map);
 +}
 +
 +static inline void atomic_clear_cpu(int cpu, cpumask_t *cpumask)
@@ -126161,12 +128541,12 @@ index 0000000..ab06347
 +
 +static inline void clear_cpuidle_map(int cpu)
 +{
-+	atomic_clear_cpu(cpu, &grq.cpu_idle_map);
++	atomic_clear_cpu(cpu, &cpu_idle_map);
 +}
 +
 +static bool suitable_idle_cpus(struct task_struct *p)
 +{
-+	return (cpumask_intersects(&p->cpus_allowed, &grq.cpu_idle_map));
++	return (cpumask_intersects(&p->cpus_allowed, &cpu_idle_map));
 +}
 +
 +/*
@@ -126193,7 +128573,7 @@ index 0000000..ab06347
 +	}
 +
 +	if (set_nr_and_not_polling(rq->curr))
-+		smp_send_reschedule(cpu);
++		smp_sched_reschedule(cpu);
 +	else
 +		trace_sched_wake_idle_without_ipi(cpu);
 +}
@@ -126288,7 +128668,7 @@ index 0000000..ab06347
 +		return;
 +	}
 +
-+	smp_send_reschedule(rq->cpu);
++	smp_sched_reschedule(rq->cpu);
 +}
 +
 +static struct rq *resched_best_idle(struct task_struct *p, int cpu)
@@ -126297,7 +128677,7 @@ index 0000000..ab06347
 +	struct rq *rq;
 +	int best_cpu;
 +
-+	cpumask_and(&tmpmask, &p->cpus_allowed, &grq.cpu_idle_map);
++	cpumask_and(&tmpmask, &p->cpus_allowed, &cpu_idle_map);
 +	best_cpu = best_mask_cpu(cpu, task_rq(p), &tmpmask);
 +	rq = cpu_rq(best_cpu);
 +	if (!smt_schedule(p, rq))
@@ -126409,12 +128789,11 @@ index 0000000..ab06347
 +
 +	p->prio = effective_prio(p);
 +	if (task_contributes_to_load(p))
-+		atomic_dec(&grq.nr_uninterruptible);
++		rq->nr_uninterruptible--;
 +
 +	enqueue_task(rq, p, 0);
 +	p->on_rq = TASK_ON_RQ_QUEUED;
-+	atomic_inc(&grq.nr_running);
-+	inc_qnr();
++	rq->nr_running++;
 +}
 +
 +/*
@@ -126424,10 +128803,10 @@ index 0000000..ab06347
 +static inline void deactivate_task(struct task_struct *p, struct rq *rq)
 +{
 +	if (task_contributes_to_load(p))
-+		atomic_inc(&grq.nr_uninterruptible);
++		rq->nr_uninterruptible++;
 +
 +	p->on_rq = 0;
-+	atomic_dec(&grq.nr_running);
++	rq->nr_running--;
 +	sched_info_dequeued(rq, p);
 +}
 +
@@ -126495,11 +128874,12 @@ index 0000000..ab06347
 +
 +	dequeue_task(p_rq, p, DEQUEUE_SAVE);
 +	if (p_rq != rq) {
++		p_rq->nr_running--;
 +		sched_info_dequeued(p_rq, p);
++		rq->nr_running++;
 +		sched_info_queued(rq, p);
 +	}
 +	set_task_cpu(p, cpu);
-+	dec_qnr();
 +}
 +
 +/*
@@ -126512,7 +128892,6 @@ index 0000000..ab06347
 +	if (deactivate)
 +		deactivate_task(p, rq);
 +	else {
-+		inc_qnr();
 +#ifdef CONFIG_SMP
 +		/*
 +		 * set_task_cpu was called on the running task that doesn't
@@ -126669,7 +129048,7 @@ index 0000000..ab06347
 +	preempt_disable();
 +	cpu = task_cpu(p);
 +	if ((cpu != smp_processor_id()) && task_curr(p))
-+		smp_send_reschedule(cpu);
++		smp_sched_reschedule(cpu);
 +	preempt_enable();
 +}
 +EXPORT_SYMBOL_GPL(kick_process);
@@ -126834,7 +129213,7 @@ index 0000000..ab06347
 +
 +#ifdef CONFIG_SMP
 +	if (p->sched_contributes_to_load)
-+		atomic_dec(&grq.nr_uninterruptible);
++		rq->nr_uninterruptible--;
 +#endif
 +
 +	ttwu_activate(rq, p);
@@ -126925,7 +129304,7 @@ index 0000000..ab06347
 +
 +	if (llist_add(&p->wake_entry, &cpu_rq(cpu)->wake_list)) {
 +		if (!set_nr_if_polling(rq->idle))
-+			smp_send_reschedule(cpu);
++			smp_sched_reschedule(cpu);
 +		else
 +			trace_sched_wake_idle_without_ipi(cpu);
 +	}
@@ -126946,7 +129325,7 @@ index 0000000..ab06347
 +	} else {
 +		rq_lock_irqsave(rq, &flags);
 +		if (likely(is_idle_task(rq->curr)))
-+			smp_send_reschedule(cpu);
++			smp_sched_reschedule(cpu);
 +		/* Else cpu is not in idle, do nothing here */
 +		rq_unlock_irqrestore(rq, &flags);
 +	}
@@ -127008,7 +129387,7 @@ index 0000000..ab06347
 +		rq = other_rq;
 +	}
 +	if (unlikely(!rq))
-+		return smp_processor_id();
++		return task_cpu(p);
 +	return rq->cpu;
 +}
 +#else /* CONFIG_SMP */
@@ -127718,22 +130097,6 @@ index 0000000..ab06347
 +}
 +
 +/*
-+ * nr_running, nr_uninterruptible and nr_context_switches:
-+ *
-+ * externally visible scheduler statistics: current number of runnable
-+ * threads, total number of context switches performed since bootup.
-+ */
-+unsigned long nr_running(void)
-+{
-+	return atomic_read(&grq.nr_running);
-+}
-+
-+static unsigned long nr_uninterruptible(void)
-+{
-+	return atomic_read(&grq.nr_uninterruptible);
-+}
-+
-+/*
 + * Check if only the current task is running on the cpu.
 + *
 + * Caution: this function does not check that the caller has disabled
@@ -127757,9 +130120,31 @@ index 0000000..ab06347
 +}
 +EXPORT_SYMBOL(single_task_running);
 +
++/*
++ * nr_running, nr_uninterruptible and nr_context_switches:
++ *
++ * externally visible scheduler statistics: current number of runnable
++ * threads, total number of context switches performed since bootup.
++ */
 +unsigned long long nr_context_switches(void)
 +{
-+	return (unsigned long long)atomic64_read(&grq.nr_switches);
++	long long sum = 0;
++	int i;
++
++	for_each_possible_cpu(i)
++		sum += cpu_rq(i)->nr_switches;
++
++	return sum;
++}
++
++unsigned long nr_running(void)
++{
++	long i, sum = 0;
++
++	for_each_online_cpu(i)
++		sum += cpu_rq(i)->nr_running;
++
++	return sum;
 +}
 +
 +unsigned long nr_iowait(void)
@@ -127780,7 +130165,14 @@ index 0000000..ab06347
 +
 +unsigned long nr_active(void)
 +{
-+	return nr_running() + nr_uninterruptible();
++	long i, sum = 0;
++
++	for_each_online_cpu(i) {
++		sum += cpu_rq(i)->nr_running;
++		sum += cpu_rq(i)->nr_uninterruptible;
++	}
++
++	return sum;
 +}
 +
 +/*
@@ -128690,8 +131082,6 @@ index 0000000..ab06347
 +		time_slice_expired(p, rq);
 +}
 +
-+#define BITOP_WORD(nr)		((nr) / BITS_PER_LONG)
-+
 +/*
 + * Task selection with skiplists is a simple matter of picking off the first
 + * task in the sorted list, an O(1) operation. The lookup is amortised O(1)
@@ -128708,8 +131098,9 @@ index 0000000..ab06347
 + * runqueue or a runqueue with more tasks than the current one with a better
 + * key/deadline.
 + */
-+static inline struct
-+task_struct *earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *idle)
++#ifdef CONFIG_SMP
++static inline struct task_struct
++*earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *idle)
 +{
 +	struct task_struct *edt = idle;
 +	struct rq *locked = NULL;
@@ -128787,6 +131178,19 @@ index 0000000..ab06347
 +
 +	return edt;
 +}
++#else /* CONFIG_SMP */
++static inline struct task_struct
++*earliest_deadline_task(struct rq *rq, int cpu, struct task_struct *idle)
++{
++	struct task_struct *edt;
++
++	if (unlikely(!rq->sl->entries))
++		return idle;
++	edt = rq->node.next[0]->value;
++	take_task(rq, cpu, edt);
++	return edt;
++}
++#endif /* CONFIG_SMP */
 +
 +/*
 + * Print scheduling while atomic bug:
@@ -128868,13 +131272,9 @@ index 0000000..ab06347
 +		rq = cpu_rq(other_cpu);
 +		if (rq_idle(rq))
 +			continue;
-+		if (unlikely(!rq->online))
-+			continue;
 +		p = rq->curr;
-+		if (!smt_schedule(p, this_rq)) {
-+			set_tsk_need_resched(p);
-+			smp_send_reschedule(other_cpu);
-+		}
++		if (!smt_schedule(p, this_rq))
++			resched_curr(rq);
 +	}
 +}
 +
@@ -128882,21 +131282,12 @@ index 0000000..ab06347
 +{
 +	int other_cpu;
 +
-+	if (!queued_notrunning())
-+		return;
-+
 +	for_each_cpu(other_cpu, &this_rq->thread_mask) {
 +		struct rq *rq;
 +
 +		rq = cpu_rq(other_cpu);
-+		if (unlikely(!rq->online))
-+			continue;
-+		if (rq_idle(rq)) {
-+			struct task_struct *p = rq->curr;
-+
-+			set_tsk_need_resched(p);
-+			smp_send_reschedule(other_cpu);
-+		}
++		if (rq_idle(rq))
++			resched_idle(rq);
 +	}
 +}
 +#else
@@ -129048,23 +131439,16 @@ index 0000000..ab06347
 +		return_task(prev, rq, cpu, deactivate);
 +	}
 +
-+	if (unlikely(!queued_notrunning())) {
-+		next = idle;
-+		schedstat_inc(rq, sched_goidle);
++	next = earliest_deadline_task(rq, cpu, idle);
++	if (likely(next->prio != PRIO_LIMIT)) {
++		clear_cpuidle_map(cpu);
++		next->last_ran = niffies;
++	} else {
 +		set_cpuidle_map(cpu);
 +		update_load_avg(rq);
-+	} else {
-+		next = earliest_deadline_task(rq, cpu, idle);
-+		if (likely(next->prio != PRIO_LIMIT))
-+			clear_cpuidle_map(cpu);
-+		else {
-+			set_cpuidle_map(cpu);
-+			update_load_avg(rq);
-+		}
 +	}
 +
 +	set_rq_task(rq, next);
-+	next->last_ran = niffies;
 +
 +	if (likely(prev != next)) {
 +		/*
@@ -129076,16 +131460,14 @@ index 0000000..ab06347
 +			check_siblings(rq);
 +		else
 +			wake_siblings(rq);
-+		atomic64_inc(&grq.nr_switches);
++		rq->nr_switches++;
 +		rq->curr = next;
 +		++*switch_count;
 +
 +		trace_sched_switch(preempt, prev, next);
 +		rq = context_switch(rq, prev, next); /* unlocks the rq */
-+	} else {
-+		check_siblings(rq);
++	} else
 +		rq_unlock_irq(rq);
-+	}
 +}
 +
 +static inline void sched_submit_work(struct task_struct *tsk)
@@ -130646,7 +133028,7 @@ index 0000000..ab06347
 +	p->nr_cpus_allowed = cpumask_weight(new_mask);
 +}
 +
-+void do_set_cpus_allowed(struct task_struct *p, const struct cpumask *new_mask)
++static void __do_set_cpus_allowed(struct task_struct *p, const struct cpumask *new_mask)
 +{
 +	struct rq *rq = task_rq(p);
 +
@@ -130661,6 +133043,29 @@ index 0000000..ab06347
 +		 */
 +		lockdep_assert_held(&rq->lock);
 +	}
++}
++
++/*
++ * Calling do_set_cpus_allowed from outside the scheduler code may make the
++ * task not be able to run on its current CPU so we resched it here.
++ */
++void do_set_cpus_allowed(struct task_struct *p, const struct cpumask *new_mask)
++{
++	__do_set_cpus_allowed(p, new_mask);
++	if (needs_other_cpu(p, task_cpu(p))) {
++		set_task_cpu(p, valid_task_cpu(p));
++		resched_task(p);
++	}
++}
++
++/*
++ * For internal scheduler calls to do_set_cpus_allowed which will resched
++ * themselves if needed.
++ */
++static void _do_set_cpus_allowed(struct task_struct *p, const struct cpumask *new_mask)
++{
++	__do_set_cpus_allowed(p, new_mask);
++	/* __set_cpus_allowed_ptr will handle the reschedule in this variant */
 +	if (needs_other_cpu(p, task_cpu(p)))
 +		set_task_cpu(p, valid_task_cpu(p));
 +}
@@ -130858,7 +133263,7 @@ index 0000000..ab06347
 +		return;
 +
 +	if (set_nr_and_not_polling(cpu_rq(cpu)->idle))
-+		smp_send_reschedule(cpu);
++		smp_sched_reschedule(cpu);
 +	else
 +		trace_sched_wake_idle_without_ipi(cpu);
 +}
@@ -130918,7 +133323,7 @@ index 0000000..ab06347
 +
 +	queued = task_queued(p);
 +
-+	do_set_cpus_allowed(p, new_mask);
++	_do_set_cpus_allowed(p, new_mask);
 +
 +	if (p->flags & PF_KTHREAD) {
 +		/*
@@ -132504,7 +134909,7 @@ index 0000000..ab06347
 +/* All this CPU's SMT siblings are idle */
 +static bool siblings_cpu_idle(struct rq *rq)
 +{
-+	return cpumask_subset(&rq->thread_mask, &grq.cpu_idle_map);
++	return cpumask_subset(&rq->thread_mask, &cpu_idle_map);
 +}
 +#endif
 +#ifdef CONFIG_SCHED_MC
@@ -132515,7 +134920,7 @@ index 0000000..ab06347
 +/* All this CPU's shared cache siblings are idle */
 +static bool cache_cpu_idle(struct rq *rq)
 +{
-+	return cpumask_subset(&rq->core_mask, &grq.cpu_idle_map);
++	return cpumask_subset(&rq->core_mask, &cpu_idle_map);
 +}
 +#endif
 +
@@ -132696,15 +135101,11 @@ index 0000000..ab06347
 +	for (i = 1 ; i < NICE_WIDTH ; i++)
 +		prio_ratios[i] = prio_ratios[i - 1] * 11 / 10;
 +
-+	atomic_set(&grq.nr_running, 0);
-+	atomic_set(&grq.nr_uninterruptible, 0);
-+	atomic64_set(&grq.nr_switches, 0);
 +	skiplist_node_init(&init_task.node);
 +
 +#ifdef CONFIG_SMP
 +	init_defrootdomain();
-+	atomic_set(&grq.qnr, 0);
-+	cpumask_clear(&grq.cpu_idle_map);
++	cpumask_clear(&cpu_idle_map);
 +#else
 +	uprq = &per_cpu(runqueues, 0);
 +#endif
@@ -132718,6 +135119,7 @@ index 0000000..ab06347
 +#endif /* CONFIG_CGROUP_SCHED */
 +	for_each_possible_cpu(i) {
 +		rq = cpu_rq(i);
++		rq->nr_running = rq->nr_uninterruptible = rq->nr_switches = 0;
 +		skiplist_init(&rq->node);
 +		rq->sl = new_skiplist(&rq->node);
 +		raw_spin_lock_init(&rq->lock);
@@ -133275,10 +135677,10 @@ index 0000000..ab06347
 +#endif	/* CONFIG_CGROUP_SCHED */
 diff --git a/kernel/sched/MuQSS.h b/kernel/sched/MuQSS.h
 new file mode 100644
-index 0000000..4e3115d
+index 0000000..10a12b3
 --- /dev/null
 +++ b/kernel/sched/MuQSS.h
-@@ -0,0 +1,274 @@
+@@ -0,0 +1,277 @@
 +#include <linux/sched.h>
 +#include <linux/cpuidle.h>
 +#include <linux/skip_list.h>
@@ -133298,6 +135700,9 @@ index 0000000..4e3115d
 +struct rq {
 +	struct task_struct *curr, *idle, *stop;
 +	struct mm_struct *prev_mm;
++	long nr_uninterruptible;
++	s64 nr_switches;
++	int nr_running;
 +
 +	raw_spinlock_t lock;
 +
@@ -133691,10 +136096,10 @@ index 87e2c9f..ba7b137 100644
   * bump this up when changing the output format or the meaning of an existing
 diff --git a/kernel/skip_list.c b/kernel/skip_list.c
 new file mode 100644
-index 0000000..5c66067
+index 0000000..d525080
 --- /dev/null
 +++ b/kernel/skip_list.c
-@@ -0,0 +1,174 @@
+@@ -0,0 +1,148 @@
 +/*
 +  Copyright (C) 2011,2016 Con Kolivas.
 +
@@ -133790,34 +136195,9 @@ index 0000000..5c66067
 +	memset(node, 0, sizeof(skiplist_node));
 +}
 +
-+/*
-+ * Returns a pseudo-random number based on the randseed value by masking out
-+ * 0-15. As many levels are not required when only few values are on the list,
-+ * we limit the height of the levels according to how many list entries there
-+ * are in a cheap manner. The height of the levels may have been higher while
-+ * there were more entries queued previously but as this code is used only by
-+ * the scheduler, entries are short lived and will be torn down regularly.
-+ *
-+ * 00-03 entries - 1 level
-+ * 04-07 entries - 2 levels
-+ * 08-15 entries - 4 levels
-+ * 15-31 entries - 7 levels
-+ *  32+  entries - max(16) levels
-+ */
-+static inline unsigned int randomLevel(int entries, unsigned int randseed)
++static inline unsigned int randomLevel(const long unsigned int randseed)
 +{
-+	unsigned int mask;
-+
-+	if (entries > 15)
-+		mask = 0x7;
-+	else if (entries > 7)
-+		mask = 0x3;
-+	else if (entries > 3)
-+		mask = 0x1;
-+	else
-+		return 0;
-+
-+	return randseed & mask;
++	return find_first_bit(&randseed, MaxLevel);
 +}
 +
 +void skiplist_insert(skiplist *l, skiplist_node *node, keyType key, valueType value, unsigned int randseed)
@@ -133833,9 +136213,8 @@ index 0000000..5c66067
 +		update[k] = p;
 +	} while (--k >= 0);
 +
-+	k = randomLevel(++l->entries, randseed);
-+	if (k > MaxLevel)
-+		k = MaxLevel;
++	++l->entries;
++	k = randomLevel(randseed);
 +	if (k > l->level) {
 +		k = ++l->level;
 +		update[k] = l->header;
@@ -134113,6 +136492,39 @@ index 5dc77a8..23afd63 100644
  
  obj-$(CONFIG_STACKDEPOT) += stackdepot.o
  KASAN_SANITIZE_stackdepot.o := n
+diff --git a/lib/radix-tree.c b/lib/radix-tree.c
+index 91f0727..8e6d552 100644
+--- a/lib/radix-tree.c
++++ b/lib/radix-tree.c
+@@ -1583,15 +1583,10 @@ void *radix_tree_delete(struct radix_tree_root *root, unsigned long index)
+ }
+ EXPORT_SYMBOL(radix_tree_delete);
+ 
+-struct radix_tree_node *radix_tree_replace_clear_tags(
+-			struct radix_tree_root *root,
+-			unsigned long index, void *entry)
++void radix_tree_clear_tags(struct radix_tree_root *root,
++			   struct radix_tree_node *node,
++			   void **slot)
+ {
+-	struct radix_tree_node *node;
+-	void **slot;
+-
+-	__radix_tree_lookup(root, index, &node, &slot);
+-
+ 	if (node) {
+ 		unsigned int tag, offset = get_slot_offset(node, slot);
+ 		for (tag = 0; tag < RADIX_TREE_MAX_TAGS; tag++)
+@@ -1600,9 +1595,6 @@ struct radix_tree_node *radix_tree_replace_clear_tags(
+ 		/* Clear root node tags */
+ 		root->gfp_mask &= __GFP_BITS_MASK;
+ 	}
+-
+-	radix_tree_replace_slot(slot, entry);
+-	return node;
+ }
+ 
+ /**
 diff --git a/lib/wbt.c b/lib/wbt.c
 new file mode 100644
 index 0000000..257c7b0
@@ -134848,10 +137260,100 @@ index 8fde443..3bfed5ab 100644
  	wb->congested = wb_congested_get_create(bdi, blkcg_id, gfp);
  	if (!wb->congested)
 diff --git a/mm/filemap.c b/mm/filemap.c
-index 2d0986a..4a31bad 100644
+index 2d0986a..ea47a7d 100644
 --- a/mm/filemap.c
 +++ b/mm/filemap.c
-@@ -2284,7 +2284,7 @@ int filemap_page_mkwrite(struct vm_area_struct *vma, struct vm_fault *vmf)
+@@ -169,33 +169,35 @@ static int page_cache_tree_insert(struct address_space *mapping,
+ static void page_cache_tree_delete(struct address_space *mapping,
+ 				   struct page *page, void *shadow)
+ {
+-	struct radix_tree_node *node;
+ 	int i, nr = PageHuge(page) ? 1 : hpage_nr_pages(page);
+ 
+ 	VM_BUG_ON_PAGE(!PageLocked(page), page);
+ 	VM_BUG_ON_PAGE(PageTail(page), page);
+ 	VM_BUG_ON_PAGE(nr != 1 && shadow, page);
+ 
+-	if (shadow) {
+-		mapping->nrexceptional += nr;
+-		/*
+-		 * Make sure the nrexceptional update is committed before
+-		 * the nrpages update so that final truncate racing
+-		 * with reclaim does not see both counters 0 at the
+-		 * same time and miss a shadow entry.
+-		 */
+-		smp_wmb();
+-	}
+-	mapping->nrpages -= nr;
+-
+ 	for (i = 0; i < nr; i++) {
+-		node = radix_tree_replace_clear_tags(&mapping->page_tree,
+-				page->index + i, shadow);
++		struct radix_tree_node *node;
++		void **slot;
++
++		__radix_tree_lookup(&mapping->page_tree, page->index + i,
++				    &node, &slot);
++
++		radix_tree_clear_tags(&mapping->page_tree, node, slot);
++
+ 		if (!node) {
+ 			VM_BUG_ON_PAGE(nr != 1, page);
+-			return;
++			/*
++			 * We need a node to properly account shadow
++			 * entries. Don't plant any without. XXX
++			 */
++			shadow = NULL;
+ 		}
+ 
++		radix_tree_replace_slot(slot, shadow);
++
++		if (!node)
++			break;
++
+ 		workingset_node_pages_dec(node);
+ 		if (shadow)
+ 			workingset_node_shadows_inc(node);
+@@ -219,6 +221,18 @@ static void page_cache_tree_delete(struct address_space *mapping,
+ 					&node->private_list);
+ 		}
+ 	}
++
++	if (shadow) {
++		mapping->nrexceptional += nr;
++		/*
++		 * Make sure the nrexceptional update is committed before
++		 * the nrpages update so that final truncate racing
++		 * with reclaim does not see both counters 0 at the
++		 * same time and miss a shadow entry.
++		 */
++		smp_wmb();
++	}
++	mapping->nrpages -= nr;
+ }
+ 
+ /*
+@@ -619,7 +633,6 @@ int replace_page_cache_page(struct page *old, struct page *new, gfp_t gfp_mask)
+ 		__delete_from_page_cache(old, NULL);
+ 		error = page_cache_tree_insert(mapping, new, NULL);
+ 		BUG_ON(error);
+-		mapping->nrpages++;
+ 
+ 		/*
+ 		 * hugetlb pages do not participate in page cache accounting.
+@@ -1674,6 +1687,10 @@ static ssize_t do_generic_file_read(struct file *filp, loff_t *ppos,
+ 	unsigned int prev_offset;
+ 	int error = 0;
+ 
++	if (unlikely(*ppos >= inode->i_sb->s_maxbytes))
++		return -EINVAL;
++	iov_iter_truncate(iter, inode->i_sb->s_maxbytes);
++
+ 	index = *ppos >> PAGE_SHIFT;
+ 	prev_index = ra->prev_pos >> PAGE_SHIFT;
+ 	prev_offset = ra->prev_pos & (PAGE_SIZE-1);
+@@ -2284,7 +2301,7 @@ int filemap_page_mkwrite(struct vm_area_struct *vma, struct vm_fault *vmf)
  	int ret = VM_FAULT_LOCKED;
  
  	sb_start_pagefault(inode->i_sb);
@@ -134899,6 +137401,47 @@ index 96b2b2f..22cc22e 100644
  	return 0;
  }
  
+diff --git a/mm/hugetlb.c b/mm/hugetlb.c
+index 87e11d8..603bdd0 100644
+--- a/mm/hugetlb.c
++++ b/mm/hugetlb.c
+@@ -1443,13 +1443,14 @@ static void dissolve_free_huge_page(struct page *page)
+ {
+ 	spin_lock(&hugetlb_lock);
+ 	if (PageHuge(page) && !page_count(page)) {
+-		struct hstate *h = page_hstate(page);
+-		int nid = page_to_nid(page);
+-		list_del(&page->lru);
++		struct page *head = compound_head(page);
++		struct hstate *h = page_hstate(head);
++		int nid = page_to_nid(head);
++		list_del(&head->lru);
+ 		h->free_huge_pages--;
+ 		h->free_huge_pages_node[nid]--;
+ 		h->max_huge_pages--;
+-		update_and_free_page(h, page);
++		update_and_free_page(h, head);
+ 	}
+ 	spin_unlock(&hugetlb_lock);
+ }
+@@ -1457,7 +1458,8 @@ static void dissolve_free_huge_page(struct page *page)
+ /*
+  * Dissolve free hugepages in a given pfn range. Used by memory hotplug to
+  * make specified memory blocks removable from the system.
+- * Note that start_pfn should aligned with (minimum) hugepage size.
++ * Note that this will dissolve a free gigantic hugepage completely, if any
++ * part of it lies within the given range.
+  */
+ void dissolve_free_huge_pages(unsigned long start_pfn, unsigned long end_pfn)
+ {
+@@ -1466,7 +1468,6 @@ void dissolve_free_huge_pages(unsigned long start_pfn, unsigned long end_pfn)
+ 	if (!hugepages_supported())
+ 		return;
+ 
+-	VM_BUG_ON(!IS_ALIGNED(start_pfn, 1 << minimum_order));
+ 	for (pfn = start_pfn; pfn < end_pfn; pfn += 1 << minimum_order)
+ 		dissolve_free_huge_page(pfn_to_page(pfn));
+ }
 diff --git a/mm/memory.c b/mm/memory.c
 index 793fe0f..45f39f3 100644
 --- a/mm/memory.c
@@ -135480,6 +138023,47 @@ index 575cefd..bd481ac 100644
  	SND_HDA_PIN_QUIRK(0x10ec0298, 0x1028, "Dell", ALC298_FIXUP_DELL1_MIC_NO_PRESENCE,
  		ALC298_STANDARD_PINS,
  		{0x17, 0x90170110}),
+diff --git a/sound/soc/codecs/nau8825.c b/sound/soc/codecs/nau8825.c
+index 2e59a85..ff56637 100644
+--- a/sound/soc/codecs/nau8825.c
++++ b/sound/soc/codecs/nau8825.c
+@@ -1907,7 +1907,7 @@ static int nau8825_calc_fll_param(unsigned int fll_in, unsigned int fs,
+ 	/* Calculate the FLL 10-bit integer input and the FLL 16-bit fractional
+ 	 * input based on FDCO, FREF and FLL ratio.
+ 	 */
+-	fvco = div_u64(fvco << 16, fref * fll_param->ratio);
++	fvco = div_u64(fvco_max << 16, fref * fll_param->ratio);
+ 	fll_param->fll_int = (fvco >> 16) & 0x3FF;
+ 	fll_param->fll_frac = fvco & 0xFFFF;
+ 	return 0;
+diff --git a/sound/soc/intel/atom/sst/sst_pvt.c b/sound/soc/intel/atom/sst/sst_pvt.c
+index adb32fe..b1e6b8f 100644
+--- a/sound/soc/intel/atom/sst/sst_pvt.c
++++ b/sound/soc/intel/atom/sst/sst_pvt.c
+@@ -279,17 +279,15 @@ int sst_prepare_and_post_msg(struct intel_sst_drv *sst,
+ 
+ 	if (response) {
+ 		ret = sst_wait_timeout(sst, block);
+-		if (ret < 0) {
++		if (ret < 0)
+ 			goto out;
+-		} else if(block->data) {
+-			if (!data)
+-				goto out;
+-			*data = kzalloc(block->size, GFP_KERNEL);
+-			if (!(*data)) {
++
++		if (data && block->data) {
++			*data = kmemdup(block->data, block->size, GFP_KERNEL);
++			if (!*data) {
+ 				ret = -ENOMEM;
+ 				goto out;
+-			} else
+-				memcpy(data, (void *) block->data, block->size);
++			}
+ 		}
+ 	}
+ out:
 diff --git a/sound/usb/line6/driver.c b/sound/usb/line6/driver.c
 index 81b7da8..183311c 100644
 --- a/sound/usb/line6/driver.c
