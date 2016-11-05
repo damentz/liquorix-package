@@ -109,6 +109,18 @@ index 4ba0a2a..640f65e 100644
  Users:		https://github.com/ibm-capi/libcxl
  
  What:		/sys/class/cxl/<card>/perst_reloads_same_image (not in a guest)
+diff --git a/Documentation/block/00-INDEX b/Documentation/block/00-INDEX
+index e55103a..8d55b4b 100644
+--- a/Documentation/block/00-INDEX
++++ b/Documentation/block/00-INDEX
+@@ -1,5 +1,7 @@
+ 00-INDEX
+ 	- This file
++bfq-iosched.txt
++	- BFQ IO scheduler and its tunables
+ biodoc.txt
+ 	- Notes on the Generic Block Layer Rewrite in Linux 2.5
+ biovecs.txt
 diff --git a/Documentation/filesystems/aufs/README b/Documentation/filesystems/aufs/README
 new file mode 100644
 index 0000000..36df674
@@ -5417,10 +5429,10 @@ index 0b4d04c..6228403 100644
  
  	notify_cpu_starting(cpu);
 diff --git a/block/Kconfig.iosched b/block/Kconfig.iosched
-index 421bef9..6d92579 100644
+index 421bef9..277b112 100644
 --- a/block/Kconfig.iosched
 +++ b/block/Kconfig.iosched
-@@ -39,6 +39,25 @@ config CFQ_GROUP_IOSCHED
+@@ -39,6 +39,22 @@ config CFQ_GROUP_IOSCHED
  	---help---
  	  Enable group IO scheduling in CFQ.
  
@@ -5428,13 +5440,10 @@ index 421bef9..6d92579 100644
 +	tristate "BFQ I/O scheduler"
 +	default n
 +	---help---
-+	  The BFQ I/O scheduler tries to distribute bandwidth among
-+	  all processes according to their weights.
-+	  It aims at distributing the bandwidth as desired, independently of
-+	  the disk parameters and with any workload. It also tries to
-+	  guarantee low latency to interactive and soft real-time
-+	  applications. If compiled built-in (saying Y here), BFQ can
-+	  be configured to support hierarchical scheduling.
++	The BFQ I/O scheduler distributes bandwidth among all
++	processes according to their weights, regardless of the
++	device parameters and with any workload. It also guarantees
++	a low latency to interactive and soft real-time applications.
 +
 +config BFQ_GROUP_IOSCHED
 +	bool "BFQ hierarchical scheduling support"
@@ -5446,7 +5455,7 @@ index 421bef9..6d92579 100644
  choice
  	prompt "Default I/O scheduler"
  	default DEFAULT_CFQ
-@@ -52,6 +71,16 @@ choice
+@@ -52,6 +68,16 @@ choice
  	config DEFAULT_CFQ
  		bool "CFQ" if IOSCHED_CFQ=y
  
@@ -5463,7 +5472,7 @@ index 421bef9..6d92579 100644
  	config DEFAULT_NOOP
  		bool "No-op"
  
-@@ -61,6 +90,7 @@ config DEFAULT_IOSCHED
+@@ -61,6 +87,7 @@ config DEFAULT_IOSCHED
  	string
  	default "deadline" if DEFAULT_DEADLINE
  	default "cfq" if DEFAULT_CFQ
@@ -6729,12 +6738,12 @@ index 0000000..fb7bb8f
 +}
 diff --git a/block/bfq-iosched.c b/block/bfq-iosched.c
 new file mode 100644
-index 0000000..ecb949e
+index 0000000..0f3081d
 --- /dev/null
 +++ b/block/bfq-iosched.c
-@@ -0,0 +1,5287 @@
+@@ -0,0 +1,5291 @@
 +/*
-+ * Budget Fair Queueing (BFQ) disk scheduler.
++ * Budget Fair Queueing (BFQ) I/O scheduler.
 + *
 + * Based on ideas and code from CFQ:
 + * Copyright (C) 2003 Jens Axboe <axboe@kernel.dk>
@@ -6812,19 +6821,19 @@ index 0000000..ecb949e
 +static const u64 bfq_fifo_expire[2] = { NSEC_PER_SEC / 4, NSEC_PER_SEC / 8 };
 +
 +/* Maximum backwards seek, in KiB. */
-+static const int bfq_back_max = 16 * 1024;
++static const int bfq_back_max = (16 * 1024);
 +
 +/* Penalty of a backwards seek, in number of sectors. */
 +static const int bfq_back_penalty = 2;
 +
 +/* Idling period duration, in ns. */
-+static u32 bfq_slice_idle = NSEC_PER_SEC / 125;
++static u32 bfq_slice_idle = (NSEC_PER_SEC / 125);
 +
 +/* Minimum number of assigned budgets for which stats are safe to compute. */
 +static const int bfq_stats_min_budgets = 194;
 +
 +/* Default maximum budget values, in sectors and number of requests. */
-+static const int bfq_default_max_budget = 16 * 1024;
++static const int bfq_default_max_budget = (16 * 1024);
 +
 +/*
 + * Async to sync throughput distribution is controlled as follows:
@@ -6834,7 +6843,7 @@ index 0000000..ecb949e
 +static const int bfq_async_charge_factor = 10;
 +
 +/* Default timeout values, in jiffies, approximating CFQ defaults. */
-+static const int bfq_timeout = HZ / 8;
++static const int bfq_timeout = (HZ / 8);
 +
 +struct kmem_cache *bfq_pool;
 +
@@ -6852,7 +6861,7 @@ index 0000000..ecb949e
 +/* Min number of samples required to perform peak-rate update */
 +#define BFQ_RATE_MIN_SAMPLES	32
 +/* Min observation time interval required to perform a peak-rate update (ns) */
-+#define BFQ_RATE_MIN_INTERVAL	300*NSEC_PER_MSEC
++#define BFQ_RATE_MIN_INTERVAL	(300*NSEC_PER_MSEC)
 +/* Target observation time interval for a peak-rate update (ns) */
 +#define BFQ_RATE_REF_INTERVAL	NSEC_PER_SEC
 +
@@ -8914,9 +8923,13 @@ index 0000000..ecb949e
 +			 * not only expires, but also remains with no
 +			 * request.
 +			 */
-+			bfqq->last_wr_start_finish += jiffies -
-+				max_t(unsigned long, bfqq->last_wr_start_finish,
-+				      bfqq->budget_timeout);
++			if (time_after(bfqq->budget_timeout,
++				       bfqq->last_wr_start_finish))
++				bfqq->last_wr_start_finish +=
++					jiffies - bfqq->budget_timeout;
++			else
++				bfqq->last_wr_start_finish = jiffies;
++
 +			if (time_is_after_jiffies(bfqq->last_wr_start_finish)) {
 +			       pr_crit(
 +			       "BFQ WARNING:last %lu budget %lu jiffies %lu",
@@ -11943,7 +11956,7 @@ index 0000000..ecb949e
 +static int __init bfq_init(void)
 +{
 +	int ret;
-+	char msg[50] = "BFQ I/O-scheduler: v8r4";
++	char msg[50] = "BFQ I/O-scheduler: v8r5";
 +
 +#ifdef CONFIG_BFQ_GROUP_IOSCHED
 +	ret = blkcg_policy_register(&blkcg_policy_bfq);
@@ -13529,12 +13542,12 @@ index 0000000..45d63d3
 +}
 diff --git a/block/bfq.h b/block/bfq.h
 new file mode 100644
-index 0000000..ea1e7d8
+index 0000000..b80abe0
 --- /dev/null
 +++ b/block/bfq.h
 @@ -0,0 +1,886 @@
 +/*
-+ * BFQ-v8r4 for 4.8.0: data structures and common functions prototypes.
++ * BFQ-v8r5 for 4.8.0: data structures and common functions prototypes.
 + *
 + * Based on ideas and code from CFQ:
 + * Copyright (C) 2003 Jens Axboe <axboe@kernel.dk>
