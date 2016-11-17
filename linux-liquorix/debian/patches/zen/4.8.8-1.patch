@@ -121,6 +121,551 @@ index e55103a..8d55b4b 100644
  biodoc.txt
  	- Notes on the Generic Block Layer Rewrite in Linux 2.5
  biovecs.txt
+diff --git a/Documentation/block/bfq-iosched.txt b/Documentation/block/bfq-iosched.txt
+new file mode 100644
+index 0000000..5ba67af
+--- /dev/null
++++ b/Documentation/block/bfq-iosched.txt
+@@ -0,0 +1,516 @@
++BFQ (Budget Fair Queueing)
++==========================
++
++BFQ is a proportional-share I/O scheduler, with some extra
++low-latency capabilities. In addition to cgroups support (blkio or io
++controllers), BFQ's main features are:
++- BFQ guarantees a high system and application responsiveness, and a
++  low latency for time-sensitive applications, such as audio or video
++  players;
++- BFQ distributes bandwidth, and not just time, among processes or
++  groups (switching back to time distribution when needed to keep
++  throughput high).
++
++On average CPUs, the current version of BFQ can handle devices
++performing at most ~30K IOPS; at most ~50 KIOPS on faster CPUs. As a
++reference, 30-50 KIOPS correspond to very high bandwidths with
++sequential I/O (e.g., 8-12 GB/s if I/O requests are 256 KB large), and
++to 120-200 MB/s with 4KB random I/O.
++
++The table of contents follow. Impatients can just jump to Section 3.
++
++CONTENTS
++
++1. When may BFQ be useful?
++ 1-1 Personal systems
++ 1-2 Server systems
++2. How does BFQ work?
++3. What are BFQ's tunable?
++4. BFQ group scheduling
++ 4-1 Service guarantees provided
++ 4-2 Interface
++
++1. When may BFQ be useful?
++==========================
++
++BFQ provides the following benefits on personal and server systems.
++
++1-1 Personal systems
++--------------------
++
++Low latency for interactive applications
++
++Regardless of the actual background workload, BFQ guarantees that, for
++interactive tasks, the storage device is virtually as responsive as if
++it was idle. For example, even if one or more of the following
++background workloads are being executed:
++- one or more large files are being read, written or copied,
++- a tree of source files is being compiled,
++- one or more virtual machines are performing I/O,
++- a software update is in progress,
++- indexing daemons are scanning filesystems and updating their
++  databases,
++starting an application or loading a file from within an application
++takes about the same time as if the storage device was idle. As a
++comparison, with CFQ, NOOP or DEADLINE, and in the same conditions,
++applications experience high latencies, or even become unresponsive
++until the background workload terminates (also on SSDs).
++
++Low latency for soft real-time applications
++
++Also soft real-time applications, such as audio and video
++players/streamers, enjoy a low latency and a low drop rate, regardless
++of the background I/O workload. As a consequence, these applications
++do not suffer from almost any glitch due to the background workload.
++
++Higher speed for code-development tasks
++
++If some additional workload happens to be executed in parallel, then
++BFQ executes the I/O-related components of typical code-development
++tasks (compilation, checkout, merge, ...) much more quickly than CFQ,
++NOOP or DEADLINE.
++
++High throughput
++
++On hard disks, BFQ achieves up to 30% higher throughput than CFQ, and
++up to 150% higher throughput than DEADLINE and NOOP, with all the
++sequential workloads considered in our tests. With random workloads,
++and with all the workloads on flash-based devices, BFQ achieves,
++instead, about the same throughput as the other schedulers.
++
++Strong fairness, bandwidth and delay guarantees
++
++BFQ distributes the device throughput, and not just the device time,
++among I/O-bound applications in proportion their weights, with any
++workload and regardless of the device parameters. From these bandwidth
++guarantees, it is possible to compute tight per-I/O-request delay
++guarantees by a simple formula. If not configured for strict service
++guarantees, BFQ switches to time-based resource sharing (only) for
++applications that would otherwise cause a throughput loss.
++
++1-2 Server systems
++------------------
++
++Most benefits for server systems follow from the same service
++properties as above. In particular, regardless of whether additional,
++possibly heavy workloads are being served, BFQ guarantees:
++
++. audio and video-streaming with zero or very low jitter and drop
++  rate;
++
++. fast retrieval of WEB pages and embedded objects;
++
++. real-time recording of data in live-dumping applications (e.g.,
++  packet logging);
++
++. responsiveness in local and remote access to a server.
++
++
++2. How does BFQ work?
++=====================
++
++BFQ is a proportional-share I/O scheduler, whose general structure,
++plus a lot of code, are borrowed from CFQ.
++
++- Each process doing I/O on a device is associated with a weight and a
++  (bfq_)queue.
++
++- BFQ grants exclusive access to the device, for a while, to one queue
++  (process) at a time, and implements this service model by
++  associating every queue with a budget, measured in number of
++  sectors.
++
++  - After a queue is granted access to the device, the budget of the
++    queue is decremented, on each request dispatch, by the size of the
++    request.
++
++  - The in-service queue is expired, i.e., its service is suspended,
++    only if one of the following events occurs: 1) the queue finishes
++    its budget, 2) the queue empties, 3) a "budget timeout" fires.
++
++    - The budget timeout prevents processes doing random I/O from
++      holding the device for too long and dramatically reducing
++      throughput.
++
++    - Actually, as in CFQ, a queue associated with a process issuing
++      sync requests may not be expired immediately when it empties. In
++      contrast, BFQ may idle the device for a short time interval,
++      giving the process the chance to go on being served if it issues
++      a new request in time. Device idling typically boosts the
++      throughput on rotational devices, if processes do synchronous
++      and sequential I/O. In addition, under BFQ, device idling is
++      also instrumental in guaranteeing the desired throughput
++      fraction to processes issuing sync requests (see the description
++      of the slice_idle tunable in this document, or [1, 2], for more
++      details).
++
++      - With respect to idling for service guarantees, if several
++	processes are competing for the device at the same time, but
++	all processes (and groups, after the following commit) have
++	the same weight, then BFQ guarantees the expected throughput
++	distribution without ever idling the device. Throughput is
++	thus as high as possible in this common scenario.
++
++  - If low-latency mode is enabled (default configuration), BFQ
++    executes some special heuristics to detect interactive and soft
++    real-time applications (e.g., video or audio players/streamers),
++    and to reduce their latency. The most important action taken to
++    achieve this goal is to give to the queues associated with these
++    applications more than their fair share of the device
++    throughput. For brevity, we call just "weight-raising" the whole
++    sets of actions taken by BFQ to privilege these queues. In
++    particular, BFQ provides a milder form of weight-raising for
++    interactive applications, and a stronger form for soft real-time
++    applications.
++
++  - BFQ automatically deactivates idling for queues born in a burst of
++    queue creations. In fact, these queues are usually associated with
++    the processes of applications and services that benefit mostly
++    from a high throughput. Examples are systemd during boot, or git
++    grep.
++
++  - As CFQ, BFQ merges queues performing interleaved I/O, i.e.,
++    performing random I/O that becomes mostly sequential if
++    merged. Differently from CFQ, BFQ achieves this goal with a more
++    reactive mechanism, called Early Queue Merge (EQM). EQM is so
++    responsive in detecting interleaved I/O (cooperating processes),
++    that it enables BFQ to achieve a high throughput, by queue
++    merging, even for queues for which CFQ needs a different
++    mechanism, preemption, to get a high throughput. As such EQM is a
++    unified mechanism to achieve a high throughput with interleaved
++    I/O.
++
++  - Queues are scheduled according to a variant of WF2Q+, named
++    B-WF2Q+, and implemented using an augmented rb-tree to preserve an
++    O(log N) overall complexity.  See [2] for more details. B-WF2Q+ is
++    also ready for hierarchical scheduling. However, for a cleaner
++    logical breakdown, the code that enables and completes
++    hierarchical support is provided in the next commit, which focuses
++    exactly on this feature.
++
++  - B-WF2Q+ guarantees a tight deviation with respect to an ideal,
++    perfectly fair, and smooth service. In particular, B-WF2Q+
++    guarantees that each queue receives a fraction of the device
++    throughput proportional to its weight, even if the throughput
++    fluctuates, and regardless of: the device parameters, the current
++    workload and the budgets assigned to the queue.
++
++  - The last, budget-independence, property (although probably
++    counterintuitive in the first place) is definitely beneficial, for
++    the following reasons:
++
++    - First, with any proportional-share scheduler, the maximum
++      deviation with respect to an ideal service is proportional to
++      the maximum budget (slice) assigned to queues. As a consequence,
++      BFQ can keep this deviation tight not only because of the
++      accurate service of B-WF2Q+, but also because BFQ *does not*
++      need to assign a larger budget to a queue to let the queue
++      receive a higher fraction of the device throughput.
++
++    - Second, BFQ is free to choose, for every process (queue), the
++      budget that best fits the needs of the process, or best
++      leverages the I/O pattern of the process. In particular, BFQ
++      updates queue budgets with a simple feedback-loop algorithm that
++      allows a high throughput to be achieved, while still providing
++      tight latency guarantees to time-sensitive applications. When
++      the in-service queue expires, this algorithm computes the next
++      budget of the queue so as to:
++
++      - Let large budgets be eventually assigned to the queues
++	associated with I/O-bound applications performing sequential
++	I/O: in fact, the longer these applications are served once
++	got access to the device, the higher the throughput is.
++
++      - Let small budgets be eventually assigned to the queues
++	associated with time-sensitive applications (which typically
++	perform sporadic and short I/O), because, the smaller the
++	budget assigned to a queue waiting for service is, the sooner
++	B-WF2Q+ will serve that queue (Subsec 3.3 in [2]).
++
++- If several processes are competing for the device at the same time,
++  but all processes and groups have the same weight, then BFQ
++  guarantees the expected throughput distribution without ever idling
++  the device. It uses preemption instead. Throughput is then much
++  higher in this common scenario.
++
++- ioprio classes are served in strict priority order, i.e.,
++  lower-priority queues are not served as long as there are
++  higher-priority queues.  Among queues in the same class, the
++  bandwidth is distributed in proportion to the weight of each
++  queue. A very thin extra bandwidth is however guaranteed to
++  the Idle class, to prevent it from starving.
++
++
++3. What are BFQ's tunable?
++==========================
++
++The tunables back_seek-max, back_seek_penalty, fifo_expire_async and
++fifo_expire_sync below are the same as in CFQ. Their description is
++just copied from that for CFQ. Some considerations in the description
++of slice_idle are copied from CFQ too.
++
++per-process ioprio and weight
++-----------------------------
++
++Unless the cgroups interface is used, weights can be assigned to
++processes only indirectly, through I/O priorities, and according to
++the relation: weight = (IOPRIO_BE_NR - ioprio) * 10.
++
++slice_idle
++----------
++
++This parameter specifies how long BFQ should idle for next I/O
++request, when certain sync BFQ queues become empty. By default
++slice_idle is a non-zero value. Idling has a double purpose: boosting
++throughput and making sure that the desired throughput distribution is
++respected (see the description of how BFQ works, and, if needed, the
++papers referred there).
++
++As for throughput, idling can be very helpful on highly seeky media
++like single spindle SATA/SAS disks where we can cut down on overall
++number of seeks and see improved throughput.
++
++Setting slice_idle to 0 will remove all the idling on queues and one
++should see an overall improved throughput on faster storage devices
++like multiple SATA/SAS disks in hardware RAID configuration.
++
++So depending on storage and workload, it might be useful to set
++slice_idle=0.  In general for SATA/SAS disks and software RAID of
++SATA/SAS disks keeping slice_idle enabled should be useful. For any
++configurations where there are multiple spindles behind single LUN
++(Host based hardware RAID controller or for storage arrays), setting
++slice_idle=0 might end up in better throughput and acceptable
++latencies.
++
++Idling is however necessary to have service guarantees enforced in
++case of differentiated weights or differentiated I/O-request lengths.
++To see why, suppose that a given BFQ queue A must get several I/O
++requests served for each request served for another queue B. Idling
++ensures that, if A makes a new I/O request slightly after becoming
++empty, then no request of B is dispatched in the middle, and thus A
++does not lose the possibility to get more than one request dispatched
++before the next request of B is dispatched. Note that idling
++guarantees the desired differentiated treatment of queues only in
++terms of I/O-request dispatches. To guarantee that the actual service
++order then corresponds to the dispatch order, the strict_guarantees
++tunable must be set too.
++
++There is an important flipside for idling: apart from the above cases
++where it is beneficial also for throughput, idling can severely impact
++throughput. One important case is random workload. Because of this
++issue, BFQ tends to avoid idling as much as possible, when it is not
++beneficial also for throughput. As a consequence of this behavior, and
++of further issues described for the strict_guarantees tunable,
++short-term service guarantees may be occasionally violated. And, in
++some cases, these guarantees may be more important than guaranteeing
++maximum throughput. For example, in video playing/streaming, a very
++low drop rate may be more important than maximum throughput. In these
++cases, consider setting the strict_guarantees parameter.
++
++strict_guarantees
++-----------------
++
++If this parameter is set (default: unset), then BFQ
++
++- always performs idling when the in-service queue becomes empty;
++
++- forces the device to serve one I/O request at a time, by dispatching a
++  new request only if there is no outstanding request.
++
++In the presence of differentiated weights or I/O-request sizes, both
++the above conditions are needed to guarantee that every BFQ queue
++receives its allotted share of the bandwidth. The first condition is
++needed for the reasons explained in the description of the slice_idle
++tunable.  The second condition is needed because all modern storage
++devices reorder internally-queued requests, which may trivially break
++the service guarantees enforced by the I/O scheduler.
++
++Setting strict_guarantees may evidently affect throughput.
++
++back_seek_max
++-------------
++
++This specifies, given in Kbytes, the maximum "distance" for backward seeking.
++The distance is the amount of space from the current head location to the
++sectors that are backward in terms of distance.
++
++This parameter allows the scheduler to anticipate requests in the "backward"
++direction and consider them as being the "next" if they are within this
++distance from the current head location.
++
++back_seek_penalty
++-----------------
++
++This parameter is used to compute the cost of backward seeking. If the
++backward distance of request is just 1/back_seek_penalty from a "front"
++request, then the seeking cost of two requests is considered equivalent.
++
++So scheduler will not bias toward one or the other request (otherwise scheduler
++will bias toward front request). Default value of back_seek_penalty is 2.
++
++fifo_expire_async
++-----------------
++
++This parameter is used to set the timeout of asynchronous requests. Default
++value of this is 248ms.
++
++fifo_expire_sync
++----------------
++
++This parameter is used to set the timeout of synchronous requests. Default
++value of this is 124ms. In case to favor synchronous requests over asynchronous
++one, this value should be decreased relative to fifo_expire_async.
++
++low_latency
++-----------
++
++This parameter is used to enable/disable BFQ's low latency mode. By
++default, low latency mode is enabled. If enabled, interactive and soft
++real-time applications are privileged and experience a lower latency,
++as explained in more detail in the description of how BFQ works.
++
++timeout_sync
++------------
++
++Maximum amount of device time that can be given to a task (queue) once
++it has been selected for service. On devices with costly seeks,
++increasing this time usually increases maximum throughput. On the
++opposite end, increasing this time coarsens the granularity of the
++short-term bandwidth and latency guarantees, especially if the
++following parameter is set to zero.
++
++max_budget
++----------
++
++Maximum amount of service, measured in sectors, that can be provided
++to a BFQ queue once it is set in service (of course within the limits
++of the above timeout). According to what said in the description of
++the algorithm, larger values increase the throughput in proportion to
++the percentage of sequential I/O requests issued. The price of larger
++values is that they coarsen the granularity of short-term bandwidth
++and latency guarantees.
++
++The default value is 0, which enables auto-tuning: BFQ sets max_budget
++to the maximum number of sectors that can be served during
++timeout_sync, according to the estimated peak rate.
++
++weights
++-------
++
++Read-only parameter, used to show the weights of the currently active
++BFQ queues.
++
++
++wr_ tunables
++------------
++
++BFQ exports a few parameters to control/tune the behavior of
++low-latency heuristics.
++
++wr_coeff
++
++Factor by which the weight of a weight-raised queue is multiplied. If
++the queue is deemed soft real-time, then the weight is further
++multiplied by an additional, constant factor.
++
++wr_max_time
++
++Maximum duration of a weight-raising period for an interactive task
++(ms). If set to zero (default value), then this value is computed
++automatically, as a function of the peak rate of the device. In any
++case, when the value of this parameter is read, it always reports the
++current duration, regardless of whether it has been set manually or
++computed automatically.
++
++wr_max_softrt_rate
++
++Maximum service rate below which a queue is deemed to be associated
++with a soft real-time application, and is then weight-raised
++accordingly (sectors/sec).
++
++wr_min_idle_time
++
++Minimum idle period after which interactive weight-raising may be
++reactivated for a queue (in ms).
++
++wr_rt_max_time
++
++Maximum weight-raising duration for soft real-time queues (in ms). The
++start time from which this duration is considered is automatically
++moved forward if the queue is detected to be still soft real-time
++before the current soft real-time weight-raising period finishes.
++
++wr_min_inter_arr_async
++
++Minimum period between I/O request arrivals after which weight-raising
++may be reactivated for an already busy async queue (in ms).
++
++
++4. Group scheduling with BFQ
++============================
++
++BFQ supports both cgroup-v1 and cgroup-v2 io controllers, namely blkio
++and io. In particular, BFQ supports weight-based proportional
++share.
++
++4-1 Service guarantees provided
++-------------------------------
++
++With BFQ, proportional share means true proportional share of the
++device bandwidth, according to group weights. For example, a group
++with weight 200 gets twice the bandwidth, and not just twice the time,
++of a group with weight 100.
++
++BFQ supports hierarchies (group trees) of any depth. Bandwidth is
++distributed among groups and processes in the expected way: for each
++group, the children of the group share the whole bandwidth of the
++group in proportion to their weights. In particular, this implies
++that, for each leaf group, every process of the group receives the
++same share of the whole group bandwidth, unless the ioprio of the
++process is modified.
++
++The resource-sharing guarantee for a group may partially or totally
++switch from bandwidth to time, if providing bandwidth guarantees to
++the group lowers the throughput too much. This switch occurs on a
++per-process basis: if a process of a leaf group causes throughput loss
++if served in such a way to receive its share of the bandwidth, then
++BFQ switches back to just time-based proportional share for that
++process.
++
++4-2 Interface
++-------------
++
++To get proportional sharing of bandwidth with BFQ for a given device,
++BFQ must of course be the active scheduler for that device.
++
++Within each group directory, the names of the files associated with
++BFQ-specific cgroup parameters and stats begin with the "bfq."
++prefix. So, with cgroups-v1 or cgroups-v2, the full prefix for
++BFQ-specific files is "blkio.bfq." or "io.bfq." For example, the group
++parameter to set the weight of a group with BFQ is blkio.bfq.weight
++or io.bfq.weight.
++
++Parameters to set
++-----------------
++
++For each group, there is only the following parameter to set.
++
++weight (namely blkio.bfq.weight or io.bfq-weight): the weight of the
++group inside its parent. Available values: 1..10000 (default 100). The
++linear mapping between ioprio and weights, described at the beginning
++of the tunable section, is still valid, but all weights higher than
++IOPRIO_BE_NR*10 are mapped to ioprio 0.
++
++
++[1] P. Valente, A. Avanzini, "Evolution of the BFQ Storage I/O
++    Scheduler", Proceedings of the First Workshop on Mobile System
++    Technologies (MST-2015), May 2015.
++    http://algogroup.unimore.it/people/paolo/disk_sched/mst-2015.pdf
++
++[2] P. Valente and M. Andreolini, "Improving Application
++    Responsiveness with the BFQ Disk I/O Scheduler", Proceedings of
++    the 5th Annual International Systems and Storage Conference
++    (SYSTOR '12), June 2012.
++    Slightly extended version:
++    http://algogroup.unimore.it/people/paolo/disk_sched/bfq-v1-suite-
++							results.pdf
+diff --git a/Documentation/block/queue-sysfs.txt b/Documentation/block/queue-sysfs.txt
+index 2a39040..2847219 100644
+--- a/Documentation/block/queue-sysfs.txt
++++ b/Documentation/block/queue-sysfs.txt
+@@ -169,5 +169,18 @@ This is the number of bytes the device can write in a single write-same
+ command.  A value of '0' means write-same is not supported by this
+ device.
+ 
++wb_lat_usec (RW)
++----------------
++If the device is registered for writeback throttling, then this file shows
++the target minimum read latency. If this latency is exceeded in a given
++window of time (see wb_window_usec), then the writeback throttling will start
++scaling back writes.
++
++wb_window_usec (RW)
++-------------------
++If the device is registered for writeback throttling, then this file shows
++the value of the monitoring window in which we'll look at the target
++latency. See wb_lat_usec.
++
+ 
+ Jens Axboe <jens.axboe@oracle.com>, February 2009
 diff --git a/Documentation/device-mapper/dm-raid.txt b/Documentation/device-mapper/dm-raid.txt
 index e5b6497..c75b64a 100644
 --- a/Documentation/device-mapper/dm-raid.txt
@@ -2760,7 +3305,7 @@ index f593300..69604e4 100644
  S:	Supported
  F:	Documentation/filesystems/xfs.txt
 diff --git a/Makefile b/Makefile
-index 80b8671..5873b61 100644
+index 80b8671..be511ed 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -1,8 +1,8 @@
@@ -2769,7 +3314,7 @@ index 80b8671..5873b61 100644
 -SUBLEVEL = 0
 -EXTRAVERSION =
 -NAME = Psychotic Stoned Sheep
-+SUBLEVEL = 7
++SUBLEVEL = 8
 +EXTRAVERSION = -zen
 +NAME = Online Space Amplifier
  
@@ -4455,6 +5000,36 @@ index 263bf39..9bd84ba 100644
  #define _PAGE_EXEC		0x00001 /* execute permission */
  #define _PAGE_WRITE		0x00002 /* write access allowed */
  #define _PAGE_READ		0x00004	/* read access allowed */
+diff --git a/arch/powerpc/include/asm/checksum.h b/arch/powerpc/include/asm/checksum.h
+index ee655ed..1e8fceb 100644
+--- a/arch/powerpc/include/asm/checksum.h
++++ b/arch/powerpc/include/asm/checksum.h
+@@ -53,10 +53,8 @@ static inline __sum16 csum_fold(__wsum sum)
+ 	return (__force __sum16)(~((__force u32)sum + tmp) >> 16);
+ }
+ 
+-static inline __wsum csum_tcpudp_nofold(__be32 saddr, __be32 daddr,
+-                                     unsigned short len,
+-                                     unsigned short proto,
+-                                     __wsum sum)
++static inline __wsum csum_tcpudp_nofold(__be32 saddr, __be32 daddr, __u32 len,
++					__u8 proto, __wsum sum)
+ {
+ #ifdef __powerpc64__
+ 	unsigned long s = (__force u32)sum;
+@@ -83,10 +81,8 @@ static inline __wsum csum_tcpudp_nofold(__be32 saddr, __be32 daddr,
+  * computes the checksum of the TCP/UDP pseudo-header
+  * returns a 16-bit checksum, already complemented
+  */
+-static inline __sum16 csum_tcpudp_magic(__be32 saddr, __be32 daddr,
+-					unsigned short len,
+-					unsigned short proto,
+-					__wsum sum)
++static inline __sum16 csum_tcpudp_magic(__be32 saddr, __be32 daddr, __u32 len,
++					__u8 proto, __wsum sum)
+ {
+ 	return csum_fold(csum_tcpudp_nofold(saddr, daddr, len, proto, sum));
+ }
 diff --git a/arch/powerpc/include/asm/cpuidle.h b/arch/powerpc/include/asm/cpuidle.h
 index 01b8a13..3919332 100644
 --- a/arch/powerpc/include/asm/cpuidle.h
@@ -6096,6 +6671,18 @@ index 0b4d04c..6228403 100644
  	xen_setup_cpu_clockevents();
  
  	notify_cpu_starting(cpu);
+diff --git a/block/Kconfig b/block/Kconfig
+index 161491d..6da79e6 100644
+--- a/block/Kconfig
++++ b/block/Kconfig
+@@ -4,6 +4,7 @@
+ menuconfig BLOCK
+        bool "Enable the block layer" if EXPERT
+        default y
++       select WBT
+        help
+ 	 Provide block layer support for the kernel.
+ 
 diff --git a/block/Kconfig.iosched b/block/Kconfig.iosched
 index 421bef9..48145be 100644
 --- a/block/Kconfig.iosched
@@ -6153,9 +6740,18 @@ index 421bef9..48145be 100644
  
  endmenu
 diff --git a/block/Makefile b/block/Makefile
-index 9eda232..4a36683 100644
+index 9eda232..b7aa613 100644
 --- a/block/Makefile
 +++ b/block/Makefile
+@@ -5,7 +5,7 @@
+ obj-$(CONFIG_BLOCK) := bio.o elevator.o blk-core.o blk-tag.o blk-sysfs.o \
+ 			blk-flush.o blk-settings.o blk-ioc.o blk-map.o \
+ 			blk-exec.o blk-merge.o blk-softirq.o blk-timeout.o \
+-			blk-lib.o blk-mq.o blk-mq-tag.o \
++			blk-lib.o blk-mq.o blk-mq-tag.o blk-stat.o \
+ 			blk-mq-sysfs.o blk-mq-cpu.o blk-mq-cpumap.o ioctl.o \
+ 			genhd.o scsi_ioctl.o partition-generic.o ioprio.o \
+ 			badblocks.o partitions/
 @@ -18,6 +18,7 @@ obj-$(CONFIG_BLK_DEV_THROTTLING)	+= blk-throttle.o
  obj-$(CONFIG_IOSCHED_NOOP)	+= noop-iosched.o
  obj-$(CONFIG_IOSCHED_DEADLINE)	+= deadline-iosched.o
@@ -15120,8 +15716,840 @@ index dd38e5c..b08ccbb 100644
  
  			blkcg->cpd[pol->plid] = cpd;
  			cpd->blkcg = blkcg;
+diff --git a/block/blk-core.c b/block/blk-core.c
+index 36c7ac3..cdcb188 100644
+--- a/block/blk-core.c
++++ b/block/blk-core.c
+@@ -33,6 +33,7 @@
+ #include <linux/ratelimit.h>
+ #include <linux/pm_runtime.h>
+ #include <linux/blk-cgroup.h>
++#include <linux/wbt.h>
+ 
+ #define CREATE_TRACE_POINTS
+ #include <trace/events/block.h>
+@@ -882,6 +883,8 @@ blk_init_allocated_queue(struct request_queue *q, request_fn_proc *rfn,
+ 
+ fail:
+ 	blk_free_flush_queue(q->fq);
++	wbt_exit(q->rq_wb);
++	q->rq_wb = NULL;
+ 	return NULL;
+ }
+ EXPORT_SYMBOL(blk_init_allocated_queue);
+@@ -1346,6 +1349,7 @@ void blk_requeue_request(struct request_queue *q, struct request *rq)
+ 	blk_delete_timer(rq);
+ 	blk_clear_rq_complete(rq);
+ 	trace_block_rq_requeue(q, rq);
++	wbt_requeue(q->rq_wb, &rq->wb_stat);
+ 
+ 	if (rq->cmd_flags & REQ_QUEUED)
+ 		blk_queue_end_tag(q, rq);
+@@ -1436,6 +1440,8 @@ void __blk_put_request(struct request_queue *q, struct request *req)
+ 	/* this is a bio leak */
+ 	WARN_ON(req->bio != NULL);
+ 
++	wbt_done(q->rq_wb, &req->wb_stat);
++
+ 	/*
+ 	 * Request may not have originated from ll_rw_blk. if not,
+ 	 * it didn't come out of our reserved rq pools
+@@ -1667,6 +1673,7 @@ static blk_qc_t blk_queue_bio(struct request_queue *q, struct bio *bio)
+ 	int el_ret, rw_flags = 0, where = ELEVATOR_INSERT_SORT;
+ 	struct request *req;
+ 	unsigned int request_count = 0;
++	unsigned int wb_acct;
+ 
+ 	/*
+ 	 * low level driver can indicate that it wants pages above a
+@@ -1719,6 +1726,8 @@ static blk_qc_t blk_queue_bio(struct request_queue *q, struct bio *bio)
+ 	}
+ 
+ get_rq:
++	wb_acct = wbt_wait(q->rq_wb, bio->bi_opf, q->queue_lock);
++
+ 	/*
+ 	 * This sync check and mask will be re-done in init_request_from_bio(),
+ 	 * but we need to set it earlier to expose the sync flag to the
+@@ -1738,11 +1747,14 @@ get_rq:
+ 	 */
+ 	req = get_request(q, bio_data_dir(bio), rw_flags, bio, GFP_NOIO);
+ 	if (IS_ERR(req)) {
++		__wbt_done(q->rq_wb, wb_acct);
+ 		bio->bi_error = PTR_ERR(req);
+ 		bio_endio(bio);
+ 		goto out_unlock;
+ 	}
+ 
++	wbt_track(&req->wb_stat, wb_acct);
++
+ 	/*
+ 	 * After dropping the lock and possibly sleeping here, our request
+ 	 * may now be mergeable after it had proven unmergeable (above).
+@@ -2475,6 +2487,8 @@ void blk_start_request(struct request *req)
+ {
+ 	blk_dequeue_request(req);
+ 
++	wbt_issue(req->q->rq_wb, &req->wb_stat);
++
+ 	/*
+ 	 * We are now handing the request to the hardware, initialize
+ 	 * resid_len to full count and add the timeout handler.
+@@ -2542,6 +2556,8 @@ bool blk_update_request(struct request *req, int error, unsigned int nr_bytes)
+ 
+ 	trace_block_rq_complete(req->q, req, nr_bytes);
+ 
++	blk_stat_add(&req->q->rq_stats[rq_data_dir(req)], req);
++
+ 	if (!req->bio)
+ 		return false;
+ 
+@@ -2709,9 +2725,10 @@ void blk_finish_request(struct request *req, int error)
+ 
+ 	blk_account_io_done(req);
+ 
+-	if (req->end_io)
++	if (req->end_io) {
++		wbt_done(req->q->rq_wb, &req->wb_stat);
+ 		req->end_io(req, error);
+-	else {
++	} else {
+ 		if (blk_bidi_rq(req))
+ 			__blk_put_request(req->next_rq->q, req->next_rq);
+ 
+diff --git a/block/blk-mq-sysfs.c b/block/blk-mq-sysfs.c
+index fe822aa..b66bbf1 100644
+--- a/block/blk-mq-sysfs.c
++++ b/block/blk-mq-sysfs.c
+@@ -247,6 +247,47 @@ static ssize_t blk_mq_hw_sysfs_cpus_show(struct blk_mq_hw_ctx *hctx, char *page)
+ 	return ret;
+ }
+ 
++static void blk_mq_stat_clear(struct blk_mq_hw_ctx *hctx)
++{
++	struct blk_mq_ctx *ctx;
++	unsigned int i;
++
++	hctx_for_each_ctx(hctx, ctx, i) {
++		blk_stat_init(&ctx->stat[0]);
++		blk_stat_init(&ctx->stat[1]);
++	}
++}
++
++static ssize_t blk_mq_hw_sysfs_stat_store(struct blk_mq_hw_ctx *hctx,
++					  const char *page, size_t count)
++{
++	blk_mq_stat_clear(hctx);
++	return count;
++}
++
++static ssize_t print_stat(char *page, struct blk_rq_stat *stat, const char *pre)
++{
++	return sprintf(page, "%s samples=%llu, mean=%lld, min=%lld, max=%lld\n",
++			pre, (long long) stat->nr_samples,
++			(long long) stat->mean, (long long) stat->min,
++			(long long) stat->max);
++}
++
++static ssize_t blk_mq_hw_sysfs_stat_show(struct blk_mq_hw_ctx *hctx, char *page)
++{
++	struct blk_rq_stat stat[2];
++	ssize_t ret;
++
++	blk_stat_init(&stat[0]);
++	blk_stat_init(&stat[1]);
++
++	blk_hctx_stat_get(hctx, stat);
++
++	ret = print_stat(page, &stat[0], "read :");
++	ret += print_stat(page + ret, &stat[1], "write:");
++	return ret;
++}
++
+ static struct blk_mq_ctx_sysfs_entry blk_mq_sysfs_dispatched = {
+ 	.attr = {.name = "dispatched", .mode = S_IRUGO },
+ 	.show = blk_mq_sysfs_dispatched_show,
+@@ -304,6 +345,11 @@ static struct blk_mq_hw_ctx_sysfs_entry blk_mq_hw_sysfs_poll = {
+ 	.attr = {.name = "io_poll", .mode = S_IRUGO },
+ 	.show = blk_mq_hw_sysfs_poll_show,
+ };
++static struct blk_mq_hw_ctx_sysfs_entry blk_mq_hw_sysfs_stat = {
++	.attr = {.name = "stats", .mode = S_IRUGO | S_IWUSR },
++	.show = blk_mq_hw_sysfs_stat_show,
++	.store = blk_mq_hw_sysfs_stat_store,
++};
+ 
+ static struct attribute *default_hw_ctx_attrs[] = {
+ 	&blk_mq_hw_sysfs_queued.attr,
+@@ -314,6 +360,7 @@ static struct attribute *default_hw_ctx_attrs[] = {
+ 	&blk_mq_hw_sysfs_cpus.attr,
+ 	&blk_mq_hw_sysfs_active.attr,
+ 	&blk_mq_hw_sysfs_poll.attr,
++	&blk_mq_hw_sysfs_stat.attr,
+ 	NULL,
+ };
+ 
+diff --git a/block/blk-mq.c b/block/blk-mq.c
+index c207fa9..815e2ac 100644
+--- a/block/blk-mq.c
++++ b/block/blk-mq.c
+@@ -22,6 +22,7 @@
+ #include <linux/sched/sysctl.h>
+ #include <linux/delay.h>
+ #include <linux/crash_dump.h>
++#include <linux/wbt.h>
+ 
+ #include <trace/events/block.h>
+ 
+@@ -29,6 +30,7 @@
+ #include "blk.h"
+ #include "blk-mq.h"
+ #include "blk-mq-tag.h"
++#include "blk-stat.h"
+ 
+ static DEFINE_MUTEX(all_q_mutex);
+ static LIST_HEAD(all_q_list);
+@@ -330,6 +332,8 @@ static void __blk_mq_free_request(struct blk_mq_hw_ctx *hctx,
+ 
+ 	if (rq->cmd_flags & REQ_MQ_INFLIGHT)
+ 		atomic_dec(&hctx->nr_active);
++
++	wbt_done(q->rq_wb, &rq->wb_stat);
+ 	rq->cmd_flags = 0;
+ 
+ 	clear_bit(REQ_ATOM_STARTED, &rq->atomic_flags);
+@@ -362,6 +366,7 @@ inline void __blk_mq_end_request(struct request *rq, int error)
+ 	blk_account_io_done(rq);
+ 
+ 	if (rq->end_io) {
++		wbt_done(rq->q->rq_wb, &rq->wb_stat);
+ 		rq->end_io(rq, error);
+ 	} else {
+ 		if (unlikely(blk_bidi_rq(rq)))
+@@ -412,10 +417,19 @@ static void blk_mq_ipi_complete_request(struct request *rq)
+ 	put_cpu();
+ }
+ 
++static void blk_mq_stat_add(struct request *rq)
++{
++	struct blk_rq_stat *stat = &rq->mq_ctx->stat[rq_data_dir(rq)];
++
++	blk_stat_add(stat, rq);
++}
++
+ static void __blk_mq_complete_request(struct request *rq)
+ {
+ 	struct request_queue *q = rq->q;
+ 
++	blk_mq_stat_add(rq);
++
+ 	if (!q->softirq_done_fn)
+ 		blk_mq_end_request(rq, rq->errors);
+ 	else
+@@ -459,6 +473,8 @@ void blk_mq_start_request(struct request *rq)
+ 	if (unlikely(blk_bidi_rq(rq)))
+ 		rq->next_rq->resid_len = blk_rq_bytes(rq->next_rq);
+ 
++	wbt_issue(q->rq_wb, &rq->wb_stat);
++
+ 	blk_add_timer(rq);
+ 
+ 	/*
+@@ -494,6 +510,7 @@ static void __blk_mq_requeue_request(struct request *rq)
+ 	struct request_queue *q = rq->q;
+ 
+ 	trace_block_rq_requeue(q, rq);
++	wbt_requeue(q->rq_wb, &rq->wb_stat);
+ 
+ 	if (test_and_clear_bit(REQ_ATOM_STARTED, &rq->atomic_flags)) {
+ 		if (q->dma_drain_size && blk_rq_bytes(rq))
+@@ -1312,6 +1329,7 @@ static blk_qc_t blk_mq_make_request(struct request_queue *q, struct bio *bio)
+ 	struct blk_plug *plug;
+ 	struct request *same_queue_rq = NULL;
+ 	blk_qc_t cookie;
++	unsigned int wb_acct;
+ 
+ 	blk_queue_bounce(q, &bio);
+ 
+@@ -1326,9 +1344,15 @@ static blk_qc_t blk_mq_make_request(struct request_queue *q, struct bio *bio)
+ 	    blk_attempt_plug_merge(q, bio, &request_count, &same_queue_rq))
+ 		return BLK_QC_T_NONE;
+ 
++	wb_acct = wbt_wait(q->rq_wb, bio->bi_opf, NULL);
++
+ 	rq = blk_mq_map_request(q, bio, &data);
+-	if (unlikely(!rq))
++	if (unlikely(!rq)) {
++		__wbt_done(q->rq_wb, wb_acct);
+ 		return BLK_QC_T_NONE;
++	}
++
++	wbt_track(&rq->wb_stat, wb_acct);
+ 
+ 	cookie = blk_tag_to_qc_t(rq->tag, data.hctx->queue_num);
+ 
+@@ -1405,6 +1429,7 @@ static blk_qc_t blk_sq_make_request(struct request_queue *q, struct bio *bio)
+ 	struct blk_map_ctx data;
+ 	struct request *rq;
+ 	blk_qc_t cookie;
++	unsigned int wb_acct;
+ 
+ 	blk_queue_bounce(q, &bio);
+ 
+@@ -1421,9 +1446,15 @@ static blk_qc_t blk_sq_make_request(struct request_queue *q, struct bio *bio)
+ 	} else
+ 		request_count = blk_plug_queued_count(q);
+ 
++	wb_acct = wbt_wait(q->rq_wb, bio->bi_opf, NULL);
++
+ 	rq = blk_mq_map_request(q, bio, &data);
+-	if (unlikely(!rq))
++	if (unlikely(!rq)) {
++		__wbt_done(q->rq_wb, wb_acct);
+ 		return BLK_QC_T_NONE;
++	}
++
++	wbt_track(&rq->wb_stat, wb_acct);
+ 
+ 	cookie = blk_tag_to_qc_t(rq->tag, data.hctx->queue_num);
+ 
+@@ -1807,6 +1838,8 @@ static void blk_mq_init_cpu_queues(struct request_queue *q,
+ 		spin_lock_init(&__ctx->lock);
+ 		INIT_LIST_HEAD(&__ctx->rq_list);
+ 		__ctx->queue = q;
++		blk_stat_init(&__ctx->stat[0]);
++		blk_stat_init(&__ctx->stat[1]);
+ 
+ 		/* If the cpu isn't online, the cpu is mapped to first hctx */
+ 		if (!cpu_online(i))
+@@ -2145,6 +2178,9 @@ void blk_mq_free_queue(struct request_queue *q)
+ 	list_del_init(&q->all_q_node);
+ 	mutex_unlock(&all_q_mutex);
+ 
++	wbt_exit(q->rq_wb);
++	q->rq_wb = NULL;
++
+ 	blk_mq_del_queue_tag_set(q);
+ 
+ 	blk_mq_exit_hw_queues(q, set, set->nr_hw_queues);
+diff --git a/block/blk-mq.h b/block/blk-mq.h
+index 9087b11..e107f70 100644
+--- a/block/blk-mq.h
++++ b/block/blk-mq.h
+@@ -1,6 +1,8 @@
+ #ifndef INT_BLK_MQ_H
+ #define INT_BLK_MQ_H
+ 
++#include "blk-stat.h"
++
+ struct blk_mq_tag_set;
+ 
+ struct blk_mq_ctx {
+@@ -20,6 +22,7 @@ struct blk_mq_ctx {
+ 
+ 	/* incremented at completion time */
+ 	unsigned long		____cacheline_aligned_in_smp rq_completed[2];
++	struct blk_rq_stat	stat[2];
+ 
+ 	struct request_queue	*queue;
+ 	struct kobject		kobj;
+diff --git a/block/blk-settings.c b/block/blk-settings.c
+index f679ae1..746dc9f 100644
+--- a/block/blk-settings.c
++++ b/block/blk-settings.c
+@@ -832,6 +832,19 @@ void blk_queue_flush_queueable(struct request_queue *q, bool queueable)
+ EXPORT_SYMBOL_GPL(blk_queue_flush_queueable);
+ 
+ /**
++ * blk_set_queue_depth - tell the block layer about the device queue depth
++ * @q:		the request queue for the device
++ * @depth:		queue depth
++ *
++ */
++void blk_set_queue_depth(struct request_queue *q, unsigned int depth)
++{
++	q->queue_depth = depth;
++	wbt_set_queue_depth(q->rq_wb, depth);
++}
++EXPORT_SYMBOL(blk_set_queue_depth);
++
++/**
+  * blk_queue_write_cache - configure queue's write cache
+  * @q:		the request queue for the device
+  * @wc:		write back cache on or off
+@@ -851,6 +864,8 @@ void blk_queue_write_cache(struct request_queue *q, bool wc, bool fua)
+ 	else
+ 		queue_flag_clear(QUEUE_FLAG_FUA, q);
+ 	spin_unlock_irq(q->queue_lock);
++
++	wbt_set_write_cache(q->rq_wb, test_bit(QUEUE_FLAG_WC, &q->queue_flags));
+ }
+ EXPORT_SYMBOL_GPL(blk_queue_write_cache);
+ 
+diff --git a/block/blk-stat.c b/block/blk-stat.c
+new file mode 100644
+index 0000000..bdb16d8
+--- /dev/null
++++ b/block/blk-stat.c
+@@ -0,0 +1,221 @@
++/*
++ * Block stat tracking code
++ *
++ * Copyright (C) 2016 Jens Axboe
++ */
++#include <linux/kernel.h>
++#include <linux/blk-mq.h>
++
++#include "blk-stat.h"
++#include "blk-mq.h"
++
++static void blk_stat_flush_batch(struct blk_rq_stat *stat)
++{
++	if (!stat->nr_batch)
++		return;
++	if (!stat->nr_samples)
++		stat->mean = div64_s64(stat->batch, stat->nr_batch);
++	else {
++		stat->mean = div64_s64((stat->mean * stat->nr_samples) +
++					stat->batch,
++					stat->nr_samples + stat->nr_batch);
++	}
++
++	stat->nr_samples += stat->nr_batch;
++	stat->nr_batch = stat->batch = 0;
++}
++
++void blk_stat_sum(struct blk_rq_stat *dst, struct blk_rq_stat *src)
++{
++	if (!src->nr_samples)
++		return;
++
++	blk_stat_flush_batch(src);
++
++	dst->min = min(dst->min, src->min);
++	dst->max = max(dst->max, src->max);
++
++	if (!dst->nr_samples)
++		dst->mean = src->mean;
++	else {
++		dst->mean = div64_s64((src->mean * src->nr_samples) +
++					(dst->mean * dst->nr_samples),
++					dst->nr_samples + src->nr_samples);
++	}
++	dst->nr_samples += src->nr_samples;
++}
++
++static void blk_mq_stat_get(struct request_queue *q, struct blk_rq_stat *dst)
++{
++	struct blk_mq_hw_ctx *hctx;
++	struct blk_mq_ctx *ctx;
++	uint64_t latest = 0;
++	int i, j, nr;
++
++	blk_stat_init(&dst[0]);
++	blk_stat_init(&dst[1]);
++
++	nr = 0;
++	do {
++		uint64_t newest = 0;
++
++		queue_for_each_hw_ctx(q, hctx, i) {
++			hctx_for_each_ctx(hctx, ctx, j) {
++				if (!ctx->stat[0].nr_samples &&
++				    !ctx->stat[1].nr_samples)
++					continue;
++				if (ctx->stat[0].time > newest)
++					newest = ctx->stat[0].time;
++				if (ctx->stat[1].time > newest)
++					newest = ctx->stat[1].time;
++			}
++		}
++
++		/*
++		 * No samples
++		 */
++		if (!newest)
++			break;
++
++		if (newest > latest)
++			latest = newest;
++
++		queue_for_each_hw_ctx(q, hctx, i) {
++			hctx_for_each_ctx(hctx, ctx, j) {
++				if (ctx->stat[0].time == newest) {
++					blk_stat_sum(&dst[0], &ctx->stat[0]);
++					nr++;
++				}
++				if (ctx->stat[1].time == newest) {
++					blk_stat_sum(&dst[1], &ctx->stat[1]);
++					nr++;
++				}
++			}
++		}
++		/*
++		 * If we race on finding an entry, just loop back again.
++		 * Should be very rare.
++		 */
++	} while (!nr);
++
++	dst[0].time = dst[1].time = latest;
++}
++
++void blk_queue_stat_get(struct request_queue *q, struct blk_rq_stat *dst)
++{
++	if (q->mq_ops)
++		blk_mq_stat_get(q, dst);
++	else {
++		memcpy(&dst[0], &q->rq_stats[0], sizeof(struct blk_rq_stat));
++		memcpy(&dst[1], &q->rq_stats[1], sizeof(struct blk_rq_stat));
++	}
++}
++
++void blk_hctx_stat_get(struct blk_mq_hw_ctx *hctx, struct blk_rq_stat *dst)
++{
++	struct blk_mq_ctx *ctx;
++	unsigned int i, nr;
++
++	nr = 0;
++	do {
++		uint64_t newest = 0;
++
++		hctx_for_each_ctx(hctx, ctx, i) {
++			if (!ctx->stat[0].nr_samples &&
++			    !ctx->stat[1].nr_samples)
++				continue;
++
++			if (ctx->stat[0].time > newest)
++				newest = ctx->stat[0].time;
++			if (ctx->stat[1].time > newest)
++				newest = ctx->stat[1].time;
++		}
++
++		if (!newest)
++			break;
++
++		hctx_for_each_ctx(hctx, ctx, i) {
++			if (ctx->stat[0].time == newest) {
++				blk_stat_sum(&dst[0], &ctx->stat[0]);
++				nr++;
++			}
++			if (ctx->stat[1].time == newest) {
++				blk_stat_sum(&dst[1], &ctx->stat[1]);
++				nr++;
++			}
++		}
++		/*
++		 * If we race on finding an entry, just loop back again.
++		 * Should be very rare, as the window is only updated
++		 * occasionally
++		 */
++	} while (!nr);
++}
++
++static void __blk_stat_init(struct blk_rq_stat *stat, s64 time_now)
++{
++	stat->min = -1ULL;
++	stat->max = stat->nr_samples = stat->mean = 0;
++	stat->batch = stat->nr_batch = 0;
++	stat->time = time_now & BLK_STAT_MASK;
++}
++
++void blk_stat_init(struct blk_rq_stat *stat)
++{
++	__blk_stat_init(stat, ktime_to_ns(ktime_get()));
++}
++
++static bool __blk_stat_is_current(struct blk_rq_stat *stat, s64 now)
++{
++	return (now & BLK_STAT_MASK) == (stat->time & BLK_STAT_MASK);
++}
++
++bool blk_stat_is_current(struct blk_rq_stat *stat)
++{
++	return __blk_stat_is_current(stat, ktime_to_ns(ktime_get()));
++}
++
++void blk_stat_add(struct blk_rq_stat *stat, struct request *rq)
++{
++	s64 now, value;
++	u64 rq_time = wbt_issue_stat_get_time(&rq->wb_stat);
++
++	now = ktime_to_ns(ktime_get());
++	if (now < rq_time)
++		return;
++
++	if (!__blk_stat_is_current(stat, now))
++		__blk_stat_init(stat, now);
++
++	value = now - rq_time;
++	if (value > stat->max)
++		stat->max = value;
++	if (value < stat->min)
++		stat->min = value;
++
++	if (stat->batch + value < stat->batch ||
++	    stat->nr_batch + 1 == BLK_RQ_STAT_BATCH)
++		blk_stat_flush_batch(stat);
++
++	stat->batch += value;
++	stat->nr_batch++;
++}
++
++void blk_stat_clear(struct request_queue *q)
++{
++	if (q->mq_ops) {
++		struct blk_mq_hw_ctx *hctx;
++		struct blk_mq_ctx *ctx;
++		int i, j;
++
++		queue_for_each_hw_ctx(q, hctx, i) {
++			hctx_for_each_ctx(hctx, ctx, j) {
++				blk_stat_init(&ctx->stat[0]);
++				blk_stat_init(&ctx->stat[1]);
++			}
++		}
++	} else {
++		blk_stat_init(&q->rq_stats[0]);
++		blk_stat_init(&q->rq_stats[1]);
++	}
++}
+diff --git a/block/blk-stat.h b/block/blk-stat.h
+new file mode 100644
+index 0000000..376a6cc
+--- /dev/null
++++ b/block/blk-stat.h
+@@ -0,0 +1,18 @@
++#ifndef BLK_STAT_H
++#define BLK_STAT_H
++
++/*
++ * ~0.13s window as a power-of-2 (2^27 nsecs)
++ */
++#define BLK_STAT_NSEC	134217728ULL
++#define BLK_STAT_MASK	~(BLK_STAT_NSEC - 1)
++
++void blk_stat_add(struct blk_rq_stat *, struct request *);
++void blk_hctx_stat_get(struct blk_mq_hw_ctx *, struct blk_rq_stat *);
++void blk_queue_stat_get(struct request_queue *, struct blk_rq_stat *);
++void blk_stat_clear(struct request_queue *q);
++void blk_stat_init(struct blk_rq_stat *);
++void blk_stat_sum(struct blk_rq_stat *, struct blk_rq_stat *);
++bool blk_stat_is_current(struct blk_rq_stat *);
++
++#endif
+diff --git a/block/blk-sysfs.c b/block/blk-sysfs.c
+index f87a7e7..85c3dc2 100644
+--- a/block/blk-sysfs.c
++++ b/block/blk-sysfs.c
+@@ -10,6 +10,7 @@
+ #include <linux/blktrace_api.h>
+ #include <linux/blk-mq.h>
+ #include <linux/blk-cgroup.h>
++#include <linux/wbt.h>
+ 
+ #include "blk.h"
+ #include "blk-mq.h"
+@@ -41,6 +42,19 @@ queue_var_store(unsigned long *var, const char *page, size_t count)
+ 	return count;
+ }
+ 
++static ssize_t queue_var_store64(u64 *var, const char *page)
++{
++	int err;
++	u64 v;
++
++	err = kstrtou64(page, 10, &v);
++	if (err < 0)
++		return err;
++
++	*var = v;
++	return 0;
++}
++
+ static ssize_t queue_requests_show(struct request_queue *q, char *page)
+ {
+ 	return queue_var_show(q->nr_requests, (page));
+@@ -347,6 +361,58 @@ static ssize_t queue_poll_store(struct request_queue *q, const char *page,
+ 	return ret;
+ }
+ 
++static ssize_t queue_wb_win_show(struct request_queue *q, char *page)
++{
++	if (!q->rq_wb)
++		return -EINVAL;
++
++	return sprintf(page, "%llu\n", div_u64(q->rq_wb->win_nsec, 1000));
++}
++
++static ssize_t queue_wb_win_store(struct request_queue *q, const char *page,
++				  size_t count)
++{
++	ssize_t ret;
++	u64 val;
++
++	if (!q->rq_wb)
++		return -EINVAL;
++
++	ret = queue_var_store64(&val, page);
++	if (ret < 0)
++		return ret;
++
++	q->rq_wb->win_nsec = val * 1000ULL;
++	wbt_update_limits(q->rq_wb);
++	return count;
++}
++
++static ssize_t queue_wb_lat_show(struct request_queue *q, char *page)
++{
++	if (!q->rq_wb)
++		return -EINVAL;
++
++	return sprintf(page, "%llu\n", div_u64(q->rq_wb->min_lat_nsec, 1000));
++}
++
++static ssize_t queue_wb_lat_store(struct request_queue *q, const char *page,
++				  size_t count)
++{
++	ssize_t ret;
++	u64 val;
++
++	if (!q->rq_wb)
++		return -EINVAL;
++
++	ret = queue_var_store64(&val, page);
++	if (ret < 0)
++		return ret;
++
++	q->rq_wb->min_lat_nsec = val * 1000ULL;
++	wbt_update_limits(q->rq_wb);
++	return count;
++}
++
+ static ssize_t queue_wc_show(struct request_queue *q, char *page)
+ {
+ 	if (test_bit(QUEUE_FLAG_WC, &q->queue_flags))
+@@ -384,6 +450,26 @@ static ssize_t queue_dax_show(struct request_queue *q, char *page)
+ 	return queue_var_show(blk_queue_dax(q), page);
+ }
+ 
++static ssize_t print_stat(char *page, struct blk_rq_stat *stat, const char *pre)
++{
++	return sprintf(page, "%s samples=%llu, mean=%lld, min=%lld, max=%lld\n",
++			pre, (long long) stat->nr_samples,
++			(long long) stat->mean, (long long) stat->min,
++			(long long) stat->max);
++}
++
++static ssize_t queue_stats_show(struct request_queue *q, char *page)
++{
++	struct blk_rq_stat stat[2];
++	ssize_t ret;
++
++	blk_queue_stat_get(q, stat);
++
++	ret = print_stat(page, &stat[0], "read :");
++	ret += print_stat(page + ret, &stat[1], "write:");
++	return ret;
++}
++
+ static struct queue_sysfs_entry queue_requests_entry = {
+ 	.attr = {.name = "nr_requests", .mode = S_IRUGO | S_IWUSR },
+ 	.show = queue_requests_show,
+@@ -526,6 +612,23 @@ static struct queue_sysfs_entry queue_dax_entry = {
+ 	.show = queue_dax_show,
+ };
+ 
++static struct queue_sysfs_entry queue_stats_entry = {
++	.attr = {.name = "stats", .mode = S_IRUGO },
++	.show = queue_stats_show,
++};
++
++static struct queue_sysfs_entry queue_wb_lat_entry = {
++	.attr = {.name = "wbt_lat_usec", .mode = S_IRUGO | S_IWUSR },
++	.show = queue_wb_lat_show,
++	.store = queue_wb_lat_store,
++};
++
++static struct queue_sysfs_entry queue_wb_win_entry = {
++	.attr = {.name = "wbt_window_usec", .mode = S_IRUGO | S_IWUSR },
++	.show = queue_wb_win_show,
++	.store = queue_wb_win_store,
++};
++
+ static struct attribute *default_attrs[] = {
+ 	&queue_requests_entry.attr,
+ 	&queue_ra_entry.attr,
+@@ -553,6 +656,9 @@ static struct attribute *default_attrs[] = {
+ 	&queue_poll_entry.attr,
+ 	&queue_wc_entry.attr,
+ 	&queue_dax_entry.attr,
++	&queue_stats_entry.attr,
++	&queue_wb_lat_entry.attr,
++	&queue_wb_win_entry.attr,
+ 	NULL,
+ };
+ 
+@@ -667,6 +773,49 @@ struct kobj_type blk_queue_ktype = {
+ 	.release	= blk_release_queue,
+ };
+ 
++static void blk_wb_stat_get(void *data, struct blk_rq_stat *stat)
++{
++	blk_queue_stat_get(data, stat);
++}
++
++static void blk_wb_stat_clear(void *data)
++{
++	blk_stat_clear(data);
++}
++
++static bool blk_wb_stat_is_current(struct blk_rq_stat *stat)
++{
++	return blk_stat_is_current(stat);
++}
++
++static struct wb_stat_ops wb_stat_ops = {
++	.get		= blk_wb_stat_get,
++	.is_current	= blk_wb_stat_is_current,
++	.clear		= blk_wb_stat_clear,
++};
++
++static void blk_wb_init(struct request_queue *q)
++{
++	struct rq_wb *rwb;
++
++	rwb = wbt_init(&q->backing_dev_info, &wb_stat_ops, q);
++
++	/*
++	 * If this fails, we don't get throttling
++	 */
++	if (IS_ERR(rwb))
++		return;
++
++	if (blk_queue_nonrot(q))
++		rwb->min_lat_nsec = 2000000ULL;
++	else
++		rwb->min_lat_nsec = 75000000ULL;
++
++	wbt_set_queue_depth(rwb, blk_queue_depth(q));
++	wbt_set_write_cache(rwb, test_bit(QUEUE_FLAG_WC, &q->queue_flags));
++	q->rq_wb = rwb;
++}
++
+ int blk_register_queue(struct gendisk *disk)
+ {
+ 	int ret;
+@@ -706,6 +855,8 @@ int blk_register_queue(struct gendisk *disk)
+ 	if (q->mq_ops)
+ 		blk_mq_register_disk(disk);
+ 
++	blk_wb_init(q);
++
+ 	if (!q->request_fn)
+ 		return 0;
+ 
 diff --git a/block/cfq-iosched.c b/block/cfq-iosched.c
-index cc2f6db..5e24d88 100644
+index cc2f6db..f336dcb 100644
 --- a/block/cfq-iosched.c
 +++ b/block/cfq-iosched.c
 @@ -3042,7 +3042,6 @@ static struct request *cfq_check_fifo(struct cfq_queue *cfqq)
@@ -15164,7 +16592,37 @@ index cc2f6db..5e24d88 100644
  
  	/*
  	 * insert request into driver dispatch list
-@@ -3989,7 +3996,7 @@ cfq_should_preempt(struct cfq_data *cfqd, struct cfq_queue *new_cfqq,
+@@ -3764,9 +3771,11 @@ static void check_blkcg_changed(struct cfq_io_cq *cic, struct bio *bio)
+ 	struct cfq_data *cfqd = cic_to_cfqd(cic);
+ 	struct cfq_queue *cfqq;
+ 	uint64_t serial_nr;
++	bool nonroot_cg;
+ 
+ 	rcu_read_lock();
+ 	serial_nr = bio_blkcg(bio)->css.serial_nr;
++	nonroot_cg = bio_blkcg(bio) != &blkcg_root;
+ 	rcu_read_unlock();
+ 
+ 	/*
+@@ -3777,6 +3786,17 @@ static void check_blkcg_changed(struct cfq_io_cq *cic, struct bio *bio)
+ 		return;
+ 
+ 	/*
++	 * If we have a non-root cgroup, we can depend on that to
++	 * do proper throttling of writes. Turn off wbt for that
++	 * case.
++	 */
++	if (nonroot_cg) {
++		struct request_queue *q = cfqd->queue;
++
++		wbt_disable(q->rq_wb);
++	}
++
++	/*
+ 	 * Drop reference to queues.  New queues will be assigned in new
+ 	 * group upon arrival of fresh requests.
+ 	 */
+@@ -3989,7 +4009,7 @@ cfq_should_preempt(struct cfq_data *cfqd, struct cfq_queue *new_cfqq,
  	 * if the new request is sync, but the currently running queue is
  	 * not, let the sync request have priority.
  	 */
@@ -20548,6 +22006,324 @@ index 870b4f2..5911c53 100644
  {
  	if (qp->state != IB_QPS_RESET) {
  		qp->state = IB_QPS_RESET;
+diff --git a/drivers/infiniband/ulp/ipoib/ipoib.h b/drivers/infiniband/ulp/ipoib/ipoib.h
+index 9dbfcc0..5ff64af 100644
+--- a/drivers/infiniband/ulp/ipoib/ipoib.h
++++ b/drivers/infiniband/ulp/ipoib/ipoib.h
+@@ -63,6 +63,8 @@ enum ipoib_flush_level {
+ 
+ enum {
+ 	IPOIB_ENCAP_LEN		  = 4,
++	IPOIB_PSEUDO_LEN	  = 20,
++	IPOIB_HARD_LEN		  = IPOIB_ENCAP_LEN + IPOIB_PSEUDO_LEN,
+ 
+ 	IPOIB_UD_HEAD_SIZE	  = IB_GRH_BYTES + IPOIB_ENCAP_LEN,
+ 	IPOIB_UD_RX_SG		  = 2, /* max buffer needed for 4K mtu */
+@@ -134,15 +136,21 @@ struct ipoib_header {
+ 	u16	reserved;
+ };
+ 
+-struct ipoib_cb {
+-	struct qdisc_skb_cb	qdisc_cb;
+-	u8			hwaddr[INFINIBAND_ALEN];
++struct ipoib_pseudo_header {
++	u8	hwaddr[INFINIBAND_ALEN];
+ };
+ 
+-static inline struct ipoib_cb *ipoib_skb_cb(const struct sk_buff *skb)
++static inline void skb_add_pseudo_hdr(struct sk_buff *skb)
+ {
+-	BUILD_BUG_ON(sizeof(skb->cb) < sizeof(struct ipoib_cb));
+-	return (struct ipoib_cb *)skb->cb;
++	char *data = skb_push(skb, IPOIB_PSEUDO_LEN);
++
++	/*
++	 * only the ipoib header is present now, make room for a dummy
++	 * pseudo header and set skb field accordingly
++	 */
++	memset(data, 0, IPOIB_PSEUDO_LEN);
++	skb_reset_mac_header(skb);
++	skb_pull(skb, IPOIB_HARD_LEN);
+ }
+ 
+ /* Used for all multicast joins (broadcast, IPv4 mcast and IPv6 mcast) */
+diff --git a/drivers/infiniband/ulp/ipoib/ipoib_cm.c b/drivers/infiniband/ulp/ipoib/ipoib_cm.c
+index 4ad297d..339a1ee 100644
+--- a/drivers/infiniband/ulp/ipoib/ipoib_cm.c
++++ b/drivers/infiniband/ulp/ipoib/ipoib_cm.c
+@@ -63,6 +63,8 @@ MODULE_PARM_DESC(cm_data_debug_level,
+ #define IPOIB_CM_RX_DELAY       (3 * 256 * HZ)
+ #define IPOIB_CM_RX_UPDATE_MASK (0x3)
+ 
++#define IPOIB_CM_RX_RESERVE     (ALIGN(IPOIB_HARD_LEN, 16) - IPOIB_ENCAP_LEN)
++
+ static struct ib_qp_attr ipoib_cm_err_attr = {
+ 	.qp_state = IB_QPS_ERR
+ };
+@@ -146,15 +148,15 @@ static struct sk_buff *ipoib_cm_alloc_rx_skb(struct net_device *dev,
+ 	struct sk_buff *skb;
+ 	int i;
+ 
+-	skb = dev_alloc_skb(IPOIB_CM_HEAD_SIZE + 12);
++	skb = dev_alloc_skb(ALIGN(IPOIB_CM_HEAD_SIZE + IPOIB_PSEUDO_LEN, 16));
+ 	if (unlikely(!skb))
+ 		return NULL;
+ 
+ 	/*
+-	 * IPoIB adds a 4 byte header. So we need 12 more bytes to align the
++	 * IPoIB adds a IPOIB_ENCAP_LEN byte header, this will align the
+ 	 * IP header to a multiple of 16.
+ 	 */
+-	skb_reserve(skb, 12);
++	skb_reserve(skb, IPOIB_CM_RX_RESERVE);
+ 
+ 	mapping[0] = ib_dma_map_single(priv->ca, skb->data, IPOIB_CM_HEAD_SIZE,
+ 				       DMA_FROM_DEVICE);
+@@ -624,9 +626,9 @@ void ipoib_cm_handle_rx_wc(struct net_device *dev, struct ib_wc *wc)
+ 	if (wc->byte_len < IPOIB_CM_COPYBREAK) {
+ 		int dlen = wc->byte_len;
+ 
+-		small_skb = dev_alloc_skb(dlen + 12);
++		small_skb = dev_alloc_skb(dlen + IPOIB_CM_RX_RESERVE);
+ 		if (small_skb) {
+-			skb_reserve(small_skb, 12);
++			skb_reserve(small_skb, IPOIB_CM_RX_RESERVE);
+ 			ib_dma_sync_single_for_cpu(priv->ca, rx_ring[wr_id].mapping[0],
+ 						   dlen, DMA_FROM_DEVICE);
+ 			skb_copy_from_linear_data(skb, small_skb->data, dlen);
+@@ -663,8 +665,7 @@ void ipoib_cm_handle_rx_wc(struct net_device *dev, struct ib_wc *wc)
+ 
+ copied:
+ 	skb->protocol = ((struct ipoib_header *) skb->data)->proto;
+-	skb_reset_mac_header(skb);
+-	skb_pull(skb, IPOIB_ENCAP_LEN);
++	skb_add_pseudo_hdr(skb);
+ 
+ 	++dev->stats.rx_packets;
+ 	dev->stats.rx_bytes += skb->len;
+diff --git a/drivers/infiniband/ulp/ipoib/ipoib_ib.c b/drivers/infiniband/ulp/ipoib/ipoib_ib.c
+index be11d5d..830fecb 100644
+--- a/drivers/infiniband/ulp/ipoib/ipoib_ib.c
++++ b/drivers/infiniband/ulp/ipoib/ipoib_ib.c
+@@ -128,16 +128,15 @@ static struct sk_buff *ipoib_alloc_rx_skb(struct net_device *dev, int id)
+ 
+ 	buf_size = IPOIB_UD_BUF_SIZE(priv->max_ib_mtu);
+ 
+-	skb = dev_alloc_skb(buf_size + IPOIB_ENCAP_LEN);
++	skb = dev_alloc_skb(buf_size + IPOIB_HARD_LEN);
+ 	if (unlikely(!skb))
+ 		return NULL;
+ 
+ 	/*
+-	 * IB will leave a 40 byte gap for a GRH and IPoIB adds a 4 byte
+-	 * header.  So we need 4 more bytes to get to 48 and align the
+-	 * IP header to a multiple of 16.
++	 * the IP header will be at IPOIP_HARD_LEN + IB_GRH_BYTES, that is
++	 * 64 bytes aligned
+ 	 */
+-	skb_reserve(skb, 4);
++	skb_reserve(skb, sizeof(struct ipoib_pseudo_header));
+ 
+ 	mapping = priv->rx_ring[id].mapping;
+ 	mapping[0] = ib_dma_map_single(priv->ca, skb->data, buf_size,
+@@ -253,8 +252,7 @@ static void ipoib_ib_handle_rx_wc(struct net_device *dev, struct ib_wc *wc)
+ 	skb_pull(skb, IB_GRH_BYTES);
+ 
+ 	skb->protocol = ((struct ipoib_header *) skb->data)->proto;
+-	skb_reset_mac_header(skb);
+-	skb_pull(skb, IPOIB_ENCAP_LEN);
++	skb_add_pseudo_hdr(skb);
+ 
+ 	++dev->stats.rx_packets;
+ 	dev->stats.rx_bytes += skb->len;
+diff --git a/drivers/infiniband/ulp/ipoib/ipoib_main.c b/drivers/infiniband/ulp/ipoib/ipoib_main.c
+index cc1c1b0..823a528 100644
+--- a/drivers/infiniband/ulp/ipoib/ipoib_main.c
++++ b/drivers/infiniband/ulp/ipoib/ipoib_main.c
+@@ -925,9 +925,12 @@ static void neigh_add_path(struct sk_buff *skb, u8 *daddr,
+ 				ipoib_neigh_free(neigh);
+ 				goto err_drop;
+ 			}
+-			if (skb_queue_len(&neigh->queue) < IPOIB_MAX_PATH_REC_QUEUE)
++			if (skb_queue_len(&neigh->queue) <
++			    IPOIB_MAX_PATH_REC_QUEUE) {
++				/* put pseudoheader back on for next time */
++				skb_push(skb, IPOIB_PSEUDO_LEN);
+ 				__skb_queue_tail(&neigh->queue, skb);
+-			else {
++			} else {
+ 				ipoib_warn(priv, "queue length limit %d. Packet drop.\n",
+ 					   skb_queue_len(&neigh->queue));
+ 				goto err_drop;
+@@ -964,7 +967,7 @@ err_drop:
+ }
+ 
+ static void unicast_arp_send(struct sk_buff *skb, struct net_device *dev,
+-			     struct ipoib_cb *cb)
++			     struct ipoib_pseudo_header *phdr)
+ {
+ 	struct ipoib_dev_priv *priv = netdev_priv(dev);
+ 	struct ipoib_path *path;
+@@ -972,16 +975,18 @@ static void unicast_arp_send(struct sk_buff *skb, struct net_device *dev,
+ 
+ 	spin_lock_irqsave(&priv->lock, flags);
+ 
+-	path = __path_find(dev, cb->hwaddr + 4);
++	path = __path_find(dev, phdr->hwaddr + 4);
+ 	if (!path || !path->valid) {
+ 		int new_path = 0;
+ 
+ 		if (!path) {
+-			path = path_rec_create(dev, cb->hwaddr + 4);
++			path = path_rec_create(dev, phdr->hwaddr + 4);
+ 			new_path = 1;
+ 		}
+ 		if (path) {
+ 			if (skb_queue_len(&path->queue) < IPOIB_MAX_PATH_REC_QUEUE) {
++				/* put pseudoheader back on for next time */
++				skb_push(skb, IPOIB_PSEUDO_LEN);
+ 				__skb_queue_tail(&path->queue, skb);
+ 			} else {
+ 				++dev->stats.tx_dropped;
+@@ -1009,10 +1014,12 @@ static void unicast_arp_send(struct sk_buff *skb, struct net_device *dev,
+ 			  be16_to_cpu(path->pathrec.dlid));
+ 
+ 		spin_unlock_irqrestore(&priv->lock, flags);
+-		ipoib_send(dev, skb, path->ah, IPOIB_QPN(cb->hwaddr));
++		ipoib_send(dev, skb, path->ah, IPOIB_QPN(phdr->hwaddr));
+ 		return;
+ 	} else if ((path->query || !path_rec_start(dev, path)) &&
+ 		   skb_queue_len(&path->queue) < IPOIB_MAX_PATH_REC_QUEUE) {
++		/* put pseudoheader back on for next time */
++		skb_push(skb, IPOIB_PSEUDO_LEN);
+ 		__skb_queue_tail(&path->queue, skb);
+ 	} else {
+ 		++dev->stats.tx_dropped;
+@@ -1026,13 +1033,15 @@ static int ipoib_start_xmit(struct sk_buff *skb, struct net_device *dev)
+ {
+ 	struct ipoib_dev_priv *priv = netdev_priv(dev);
+ 	struct ipoib_neigh *neigh;
+-	struct ipoib_cb *cb = ipoib_skb_cb(skb);
++	struct ipoib_pseudo_header *phdr;
+ 	struct ipoib_header *header;
+ 	unsigned long flags;
+ 
++	phdr = (struct ipoib_pseudo_header *) skb->data;
++	skb_pull(skb, sizeof(*phdr));
+ 	header = (struct ipoib_header *) skb->data;
+ 
+-	if (unlikely(cb->hwaddr[4] == 0xff)) {
++	if (unlikely(phdr->hwaddr[4] == 0xff)) {
+ 		/* multicast, arrange "if" according to probability */
+ 		if ((header->proto != htons(ETH_P_IP)) &&
+ 		    (header->proto != htons(ETH_P_IPV6)) &&
+@@ -1045,13 +1054,13 @@ static int ipoib_start_xmit(struct sk_buff *skb, struct net_device *dev)
+ 			return NETDEV_TX_OK;
+ 		}
+ 		/* Add in the P_Key for multicast*/
+-		cb->hwaddr[8] = (priv->pkey >> 8) & 0xff;
+-		cb->hwaddr[9] = priv->pkey & 0xff;
++		phdr->hwaddr[8] = (priv->pkey >> 8) & 0xff;
++		phdr->hwaddr[9] = priv->pkey & 0xff;
+ 
+-		neigh = ipoib_neigh_get(dev, cb->hwaddr);
++		neigh = ipoib_neigh_get(dev, phdr->hwaddr);
+ 		if (likely(neigh))
+ 			goto send_using_neigh;
+-		ipoib_mcast_send(dev, cb->hwaddr, skb);
++		ipoib_mcast_send(dev, phdr->hwaddr, skb);
+ 		return NETDEV_TX_OK;
+ 	}
+ 
+@@ -1060,16 +1069,16 @@ static int ipoib_start_xmit(struct sk_buff *skb, struct net_device *dev)
+ 	case htons(ETH_P_IP):
+ 	case htons(ETH_P_IPV6):
+ 	case htons(ETH_P_TIPC):
+-		neigh = ipoib_neigh_get(dev, cb->hwaddr);
++		neigh = ipoib_neigh_get(dev, phdr->hwaddr);
+ 		if (unlikely(!neigh)) {
+-			neigh_add_path(skb, cb->hwaddr, dev);
++			neigh_add_path(skb, phdr->hwaddr, dev);
+ 			return NETDEV_TX_OK;
+ 		}
+ 		break;
+ 	case htons(ETH_P_ARP):
+ 	case htons(ETH_P_RARP):
+ 		/* for unicast ARP and RARP should always perform path find */
+-		unicast_arp_send(skb, dev, cb);
++		unicast_arp_send(skb, dev, phdr);
+ 		return NETDEV_TX_OK;
+ 	default:
+ 		/* ethertype not supported by IPoIB */
+@@ -1086,11 +1095,13 @@ send_using_neigh:
+ 			goto unref;
+ 		}
+ 	} else if (neigh->ah) {
+-		ipoib_send(dev, skb, neigh->ah, IPOIB_QPN(cb->hwaddr));
++		ipoib_send(dev, skb, neigh->ah, IPOIB_QPN(phdr->hwaddr));
+ 		goto unref;
+ 	}
+ 
+ 	if (skb_queue_len(&neigh->queue) < IPOIB_MAX_PATH_REC_QUEUE) {
++		/* put pseudoheader back on for next time */
++		skb_push(skb, sizeof(*phdr));
+ 		spin_lock_irqsave(&priv->lock, flags);
+ 		__skb_queue_tail(&neigh->queue, skb);
+ 		spin_unlock_irqrestore(&priv->lock, flags);
+@@ -1122,8 +1133,8 @@ static int ipoib_hard_header(struct sk_buff *skb,
+ 			     unsigned short type,
+ 			     const void *daddr, const void *saddr, unsigned len)
+ {
++	struct ipoib_pseudo_header *phdr;
+ 	struct ipoib_header *header;
+-	struct ipoib_cb *cb = ipoib_skb_cb(skb);
+ 
+ 	header = (struct ipoib_header *) skb_push(skb, sizeof *header);
+ 
+@@ -1132,12 +1143,13 @@ static int ipoib_hard_header(struct sk_buff *skb,
+ 
+ 	/*
+ 	 * we don't rely on dst_entry structure,  always stuff the
+-	 * destination address into skb->cb so we can figure out where
++	 * destination address into skb hard header so we can figure out where
+ 	 * to send the packet later.
+ 	 */
+-	memcpy(cb->hwaddr, daddr, INFINIBAND_ALEN);
++	phdr = (struct ipoib_pseudo_header *) skb_push(skb, sizeof(*phdr));
++	memcpy(phdr->hwaddr, daddr, INFINIBAND_ALEN);
+ 
+-	return sizeof *header;
++	return IPOIB_HARD_LEN;
+ }
+ 
+ static void ipoib_set_mcast_list(struct net_device *dev)
+@@ -1759,7 +1771,7 @@ void ipoib_setup(struct net_device *dev)
+ 
+ 	dev->flags		|= IFF_BROADCAST | IFF_MULTICAST;
+ 
+-	dev->hard_header_len	 = IPOIB_ENCAP_LEN;
++	dev->hard_header_len	 = IPOIB_HARD_LEN;
+ 	dev->addr_len		 = INFINIBAND_ALEN;
+ 	dev->type		 = ARPHRD_INFINIBAND;
+ 	dev->tx_queue_len	 = ipoib_sendq_size * 2;
+diff --git a/drivers/infiniband/ulp/ipoib/ipoib_multicast.c b/drivers/infiniband/ulp/ipoib/ipoib_multicast.c
+index d3394b6..1909dd2 100644
+--- a/drivers/infiniband/ulp/ipoib/ipoib_multicast.c
++++ b/drivers/infiniband/ulp/ipoib/ipoib_multicast.c
+@@ -796,9 +796,11 @@ void ipoib_mcast_send(struct net_device *dev, u8 *daddr, struct sk_buff *skb)
+ 			__ipoib_mcast_add(dev, mcast);
+ 			list_add_tail(&mcast->list, &priv->multicast_list);
+ 		}
+-		if (skb_queue_len(&mcast->pkt_queue) < IPOIB_MAX_MCAST_QUEUE)
++		if (skb_queue_len(&mcast->pkt_queue) < IPOIB_MAX_MCAST_QUEUE) {
++			/* put pseudoheader back on for next time */
++			skb_push(skb, sizeof(struct ipoib_pseudo_header));
+ 			skb_queue_tail(&mcast->pkt_queue, skb);
+-		else {
++		} else {
+ 			++dev->stats.tx_dropped;
+ 			dev_kfree_skb_any(skb);
+ 		}
 diff --git a/drivers/infiniband/ulp/srp/ib_srp.c b/drivers/infiniband/ulp/srp/ib_srp.c
 index 3322ed7..6b07d4b 100644
 --- a/drivers/infiniband/ulp/srp/ib_srp.c
@@ -22671,6 +24447,47 @@ index f453326..b419c7c 100644
  	mutex_unlock(&ubi->move_mutex);
  	return 0;
  
+diff --git a/drivers/net/ethernet/freescale/fec_main.c b/drivers/net/ethernet/freescale/fec_main.c
+index 692ee24..3474de5 100644
+--- a/drivers/net/ethernet/freescale/fec_main.c
++++ b/drivers/net/ethernet/freescale/fec_main.c
+@@ -913,13 +913,11 @@ fec_restart(struct net_device *ndev)
+ 	 * enet-mac reset will reset mac address registers too,
+ 	 * so need to reconfigure it.
+ 	 */
+-	if (fep->quirks & FEC_QUIRK_ENET_MAC) {
+-		memcpy(&temp_mac, ndev->dev_addr, ETH_ALEN);
+-		writel((__force u32)cpu_to_be32(temp_mac[0]),
+-		       fep->hwp + FEC_ADDR_LOW);
+-		writel((__force u32)cpu_to_be32(temp_mac[1]),
+-		       fep->hwp + FEC_ADDR_HIGH);
+-	}
++	memcpy(&temp_mac, ndev->dev_addr, ETH_ALEN);
++	writel((__force u32)cpu_to_be32(temp_mac[0]),
++	       fep->hwp + FEC_ADDR_LOW);
++	writel((__force u32)cpu_to_be32(temp_mac[1]),
++	       fep->hwp + FEC_ADDR_HIGH);
+ 
+ 	/* Clear any outstanding interrupt. */
+ 	writel(0xffffffff, fep->hwp + FEC_IEVENT);
+@@ -1432,14 +1430,14 @@ fec_enet_rx_queue(struct net_device *ndev, int budget, u16 queue_id)
+ 		skb_put(skb, pkt_len - 4);
+ 		data = skb->data;
+ 
++		if (!is_copybreak && need_swap)
++			swap_buffer(data, pkt_len);
++
+ #if !defined(CONFIG_M5272)
+ 		if (fep->quirks & FEC_QUIRK_HAS_RACC)
+ 			data = skb_pull_inline(skb, 2);
+ #endif
+ 
+-		if (!is_copybreak && need_swap)
+-			swap_buffer(data, pkt_len);
+-
+ 		/* Extract the enhanced buffer descriptor */
+ 		ebdp = NULL;
+ 		if (fep->bufdesc_ex)
 diff --git a/drivers/net/ethernet/intel/i40e/i40e_client.c b/drivers/net/ethernet/intel/i40e/i40e_client.c
 index 618f184..c65e17f 100644
 --- a/drivers/net/ethernet/intel/i40e/i40e_client.c
@@ -22769,6 +24586,217 @@ index d0b3a1b..c74d164 100644
  	/* shutdown all operations */
  	if (!test_bit(__I40E_SUSPENDED, &pf->state)) {
  		rtnl_lock();
+diff --git a/drivers/net/ethernet/mellanox/mlx4/en_cq.c b/drivers/net/ethernet/mellanox/mlx4/en_cq.c
+index 132cea6..e3be7e4 100644
+--- a/drivers/net/ethernet/mellanox/mlx4/en_cq.c
++++ b/drivers/net/ethernet/mellanox/mlx4/en_cq.c
+@@ -127,7 +127,15 @@ int mlx4_en_activate_cq(struct mlx4_en_priv *priv, struct mlx4_en_cq *cq,
+ 		/* For TX we use the same irq per
+ 		ring we assigned for the RX    */
+ 		struct mlx4_en_cq *rx_cq;
+-
++		int xdp_index;
++
++		/* The xdp tx irq must align with the rx ring that forwards to
++		 * it, so reindex these from 0. This should only happen when
++		 * tx_ring_num is not a multiple of rx_ring_num.
++		 */
++		xdp_index = (priv->xdp_ring_num - priv->tx_ring_num) + cq_idx;
++		if (xdp_index >= 0)
++			cq_idx = xdp_index;
+ 		cq_idx = cq_idx % priv->rx_ring_num;
+ 		rx_cq = priv->rx_cq[cq_idx];
+ 		cq->vector = rx_cq->vector;
+diff --git a/drivers/net/geneve.c b/drivers/net/geneve.c
+index 3c20e87..16af1ce 100644
+--- a/drivers/net/geneve.c
++++ b/drivers/net/geneve.c
+@@ -453,7 +453,7 @@ static struct sk_buff **geneve_gro_receive(struct sock *sk,
+ 
+ 	skb_gro_pull(skb, gh_len);
+ 	skb_gro_postpull_rcsum(skb, gh, gh_len);
+-	pp = ptype->callbacks.gro_receive(head, skb);
++	pp = call_gro_receive(ptype->callbacks.gro_receive, head, skb);
+ 	flush = 0;
+ 
+ out_unlock:
+diff --git a/drivers/net/hyperv/netvsc_drv.c b/drivers/net/hyperv/netvsc_drv.c
+index 3ba29fc..c4d9653 100644
+--- a/drivers/net/hyperv/netvsc_drv.c
++++ b/drivers/net/hyperv/netvsc_drv.c
+@@ -624,15 +624,18 @@ static struct sk_buff *netvsc_alloc_recv_skb(struct net_device *net,
+ 	       packet->total_data_buflen);
+ 
+ 	skb->protocol = eth_type_trans(skb, net);
+-	if (csum_info) {
+-		/* We only look at the IP checksum here.
+-		 * Should we be dropping the packet if checksum
+-		 * failed? How do we deal with other checksums - TCP/UDP?
+-		 */
+-		if (csum_info->receive.ip_checksum_succeeded)
++
++	/* skb is already created with CHECKSUM_NONE */
++	skb_checksum_none_assert(skb);
++
++	/*
++	 * In Linux, the IP checksum is always checked.
++	 * Do L4 checksum offload if enabled and present.
++	 */
++	if (csum_info && (net->features & NETIF_F_RXCSUM)) {
++		if (csum_info->receive.tcp_checksum_succeeded ||
++		    csum_info->receive.udp_checksum_succeeded)
+ 			skb->ip_summed = CHECKSUM_UNNECESSARY;
+-		else
+-			skb->ip_summed = CHECKSUM_NONE;
+ 	}
+ 
+ 	if (vlan_tci & VLAN_TAG_PRESENT)
+diff --git a/drivers/net/macsec.c b/drivers/net/macsec.c
+index 351e701..b72ddc6 100644
+--- a/drivers/net/macsec.c
++++ b/drivers/net/macsec.c
+@@ -397,6 +397,14 @@ static struct macsec_cb *macsec_skb_cb(struct sk_buff *skb)
+ #define DEFAULT_ENCRYPT false
+ #define DEFAULT_ENCODING_SA 0
+ 
++static bool send_sci(const struct macsec_secy *secy)
++{
++	const struct macsec_tx_sc *tx_sc = &secy->tx_sc;
++
++	return tx_sc->send_sci ||
++		(secy->n_rx_sc > 1 && !tx_sc->end_station && !tx_sc->scb);
++}
++
+ static sci_t make_sci(u8 *addr, __be16 port)
+ {
+ 	sci_t sci;
+@@ -437,15 +445,15 @@ static unsigned int macsec_extra_len(bool sci_present)
+ 
+ /* Fill SecTAG according to IEEE 802.1AE-2006 10.5.3 */
+ static void macsec_fill_sectag(struct macsec_eth_header *h,
+-			       const struct macsec_secy *secy, u32 pn)
++			       const struct macsec_secy *secy, u32 pn,
++			       bool sci_present)
+ {
+ 	const struct macsec_tx_sc *tx_sc = &secy->tx_sc;
+ 
+-	memset(&h->tci_an, 0, macsec_sectag_len(tx_sc->send_sci));
++	memset(&h->tci_an, 0, macsec_sectag_len(sci_present));
+ 	h->eth.h_proto = htons(ETH_P_MACSEC);
+ 
+-	if (tx_sc->send_sci ||
+-	    (secy->n_rx_sc > 1 && !tx_sc->end_station && !tx_sc->scb)) {
++	if (sci_present) {
+ 		h->tci_an |= MACSEC_TCI_SC;
+ 		memcpy(&h->secure_channel_id, &secy->sci,
+ 		       sizeof(h->secure_channel_id));
+@@ -650,6 +658,7 @@ static struct sk_buff *macsec_encrypt(struct sk_buff *skb,
+ 	struct macsec_tx_sc *tx_sc;
+ 	struct macsec_tx_sa *tx_sa;
+ 	struct macsec_dev *macsec = macsec_priv(dev);
++	bool sci_present;
+ 	u32 pn;
+ 
+ 	secy = &macsec->secy;
+@@ -687,7 +696,8 @@ static struct sk_buff *macsec_encrypt(struct sk_buff *skb,
+ 
+ 	unprotected_len = skb->len;
+ 	eth = eth_hdr(skb);
+-	hh = (struct macsec_eth_header *)skb_push(skb, macsec_extra_len(tx_sc->send_sci));
++	sci_present = send_sci(secy);
++	hh = (struct macsec_eth_header *)skb_push(skb, macsec_extra_len(sci_present));
+ 	memmove(hh, eth, 2 * ETH_ALEN);
+ 
+ 	pn = tx_sa_update_pn(tx_sa, secy);
+@@ -696,7 +706,7 @@ static struct sk_buff *macsec_encrypt(struct sk_buff *skb,
+ 		kfree_skb(skb);
+ 		return ERR_PTR(-ENOLINK);
+ 	}
+-	macsec_fill_sectag(hh, secy, pn);
++	macsec_fill_sectag(hh, secy, pn, sci_present);
+ 	macsec_set_shortlen(hh, unprotected_len - 2 * ETH_ALEN);
+ 
+ 	skb_put(skb, secy->icv_len);
+@@ -726,10 +736,10 @@ static struct sk_buff *macsec_encrypt(struct sk_buff *skb,
+ 	skb_to_sgvec(skb, sg, 0, skb->len);
+ 
+ 	if (tx_sc->encrypt) {
+-		int len = skb->len - macsec_hdr_len(tx_sc->send_sci) -
++		int len = skb->len - macsec_hdr_len(sci_present) -
+ 			  secy->icv_len;
+ 		aead_request_set_crypt(req, sg, sg, len, iv);
+-		aead_request_set_ad(req, macsec_hdr_len(tx_sc->send_sci));
++		aead_request_set_ad(req, macsec_hdr_len(sci_present));
+ 	} else {
+ 		aead_request_set_crypt(req, sg, sg, 0, iv);
+ 		aead_request_set_ad(req, skb->len - secy->icv_len);
+diff --git a/drivers/net/phy/phy.c b/drivers/net/phy/phy.c
+index c6f6683..f424b86 100644
+--- a/drivers/net/phy/phy.c
++++ b/drivers/net/phy/phy.c
+@@ -608,6 +608,21 @@ void phy_start_machine(struct phy_device *phydev)
+ }
+ 
+ /**
++ * phy_trigger_machine - trigger the state machine to run
++ *
++ * @phydev: the phy_device struct
++ *
++ * Description: There has been a change in state which requires that the
++ *   state machine runs.
++ */
++
++static void phy_trigger_machine(struct phy_device *phydev)
++{
++	cancel_delayed_work_sync(&phydev->state_queue);
++	queue_delayed_work(system_power_efficient_wq, &phydev->state_queue, 0);
++}
++
++/**
+  * phy_stop_machine - stop the PHY state machine tracking
+  * @phydev: target phy_device struct
+  *
+@@ -639,6 +654,8 @@ static void phy_error(struct phy_device *phydev)
+ 	mutex_lock(&phydev->lock);
+ 	phydev->state = PHY_HALTED;
+ 	mutex_unlock(&phydev->lock);
++
++	phy_trigger_machine(phydev);
+ }
+ 
+ /**
+@@ -800,8 +817,7 @@ void phy_change(struct work_struct *work)
+ 	}
+ 
+ 	/* reschedule state queue work to run as soon as possible */
+-	cancel_delayed_work_sync(&phydev->state_queue);
+-	queue_delayed_work(system_power_efficient_wq, &phydev->state_queue, 0);
++	phy_trigger_machine(phydev);
+ 	return;
+ 
+ ignore:
+@@ -890,6 +906,8 @@ void phy_start(struct phy_device *phydev)
+ 	/* if phy was suspended, bring the physical link up again */
+ 	if (do_resume)
+ 		phy_resume(phydev);
++
++	phy_trigger_machine(phydev);
+ }
+ EXPORT_SYMBOL(phy_start);
+ 
+diff --git a/drivers/net/vxlan.c b/drivers/net/vxlan.c
+index 6e65832..5ae664c 100644
+--- a/drivers/net/vxlan.c
++++ b/drivers/net/vxlan.c
+@@ -584,7 +584,7 @@ static struct sk_buff **vxlan_gro_receive(struct sock *sk,
+ 		}
+ 	}
+ 
+-	pp = eth_gro_receive(head, skb);
++	pp = call_gro_receive(eth_gro_receive, head, skb);
+ 	flush = 0;
+ 
+ out:
 diff --git a/drivers/net/wireless/ath/ath10k/ce.c b/drivers/net/wireless/ath/ath10k/ce.c
 index 9fb8d74..da9998e 100644
 --- a/drivers/net/wireless/ath/ath10k/ce.c
@@ -27399,6 +29427,18 @@ index fbab29d..243b233 100644
  	RAPL_CPU(INTEL_FAM6_ATOM_GOLDMONT,	rapl_defaults_core),
  	RAPL_CPU(INTEL_FAM6_ATOM_DENVERTON,	rapl_defaults_core),
  
+diff --git a/drivers/ptp/ptp_chardev.c b/drivers/ptp/ptp_chardev.c
+index d637c93..58a97d4 100644
+--- a/drivers/ptp/ptp_chardev.c
++++ b/drivers/ptp/ptp_chardev.c
+@@ -193,6 +193,7 @@ long ptp_ioctl(struct posix_clock *pc, unsigned int cmd, unsigned long arg)
+ 		if (err)
+ 			break;
+ 
++		memset(&precise_offset, 0, sizeof(precise_offset));
+ 		ts = ktime_to_timespec64(xtstamp.device);
+ 		precise_offset.device.sec = ts.tv_sec;
+ 		precise_offset.device.nsec = ts.tv_nsec;
 diff --git a/drivers/pwm/core.c b/drivers/pwm/core.c
 index 0dbd29e..172ef82 100644
 --- a/drivers/pwm/core.c
@@ -28276,6 +30316,45 @@ index ab67ec4..79c9860 100644
  
  	/* Clean out the queue */
  	memset(crq->msgs, 0, PAGE_SIZE);
+diff --git a/drivers/scsi/megaraid/megaraid_sas.h b/drivers/scsi/megaraid/megaraid_sas.h
+index ca86c88..3aaea71 100644
+--- a/drivers/scsi/megaraid/megaraid_sas.h
++++ b/drivers/scsi/megaraid/megaraid_sas.h
+@@ -2233,7 +2233,7 @@ struct megasas_instance_template {
+ };
+ 
+ #define MEGASAS_IS_LOGICAL(scp)						\
+-	(scp->device->channel < MEGASAS_MAX_PD_CHANNELS) ? 0 : 1
++	((scp->device->channel < MEGASAS_MAX_PD_CHANNELS) ? 0 : 1)
+ 
+ #define MEGASAS_DEV_INDEX(scp)						\
+ 	(((scp->device->channel % 2) * MEGASAS_MAX_DEV_PER_CHANNEL) +	\
+diff --git a/drivers/scsi/megaraid/megaraid_sas_base.c b/drivers/scsi/megaraid/megaraid_sas_base.c
+index c1ed25a..71e4899 100644
+--- a/drivers/scsi/megaraid/megaraid_sas_base.c
++++ b/drivers/scsi/megaraid/megaraid_sas_base.c
+@@ -1713,16 +1713,13 @@ megasas_queue_command(struct Scsi_Host *shost, struct scsi_cmnd *scmd)
+ 		goto out_done;
+ 	}
+ 
+-	switch (scmd->cmnd[0]) {
+-	case SYNCHRONIZE_CACHE:
+-		/*
+-		 * FW takes care of flush cache on its own
+-		 * No need to send it down
+-		 */
++	/*
++	 * FW takes care of flush cache on its own for Virtual Disk.
++	 * No need to send it down for VD. For JBOD send SYNCHRONIZE_CACHE to FW.
++	 */
++	if ((scmd->cmnd[0] == SYNCHRONIZE_CACHE) && MEGASAS_IS_LOGICAL(scmd)) {
+ 		scmd->result = DID_OK << 16;
+ 		goto out_done;
+-	default:
+-		break;
+ 	}
+ 
+ 	return instance->instancet->build_and_issue_cmd(instance, scmd);
 diff --git a/drivers/scsi/mpt3sas/mpt3sas_scsih.c b/drivers/scsi/mpt3sas/mpt3sas_scsih.c
 index cd91a68..4cb7990 100644
 --- a/drivers/scsi/mpt3sas/mpt3sas_scsih.c
@@ -28289,6 +30368,20 @@ index cd91a68..4cb7990 100644
  		     ((scmd->sense_buffer[2] == UNIT_ATTENTION) ||
  		     (scmd->sense_buffer[2] == MEDIUM_ERROR) ||
  		     (scmd->sense_buffer[2] == HARDWARE_ERROR)))
+diff --git a/drivers/scsi/scsi.c b/drivers/scsi/scsi.c
+index 1deb6ad..75455d4 100644
+--- a/drivers/scsi/scsi.c
++++ b/drivers/scsi/scsi.c
+@@ -621,6 +621,9 @@ int scsi_change_queue_depth(struct scsi_device *sdev, int depth)
+ 		wmb();
+ 	}
+ 
++	if (sdev->request_queue)
++		blk_set_queue_depth(sdev->request_queue, depth);
++
+ 	return sdev->queue_depth;
+ }
+ EXPORT_SYMBOL(scsi_change_queue_depth);
 diff --git a/drivers/scsi/scsi_debug.c b/drivers/scsi/scsi_debug.c
 index 6a219a0..05e892a 100644
 --- a/drivers/scsi/scsi_debug.c
@@ -30072,7 +32165,7 @@ index 917a55c..ffe9f88 100644
  		return -ENOMEM;
  
 diff --git a/drivers/usb/dwc3/gadget.c b/drivers/usb/dwc3/gadget.c
-index 122e64d..6443cfb 100644
+index 122e64d..dc3b596 100644
 --- a/drivers/usb/dwc3/gadget.c
 +++ b/drivers/usb/dwc3/gadget.c
 @@ -348,7 +348,8 @@ static int dwc3_send_clear_stall_ep_cmd(struct dwc3_ep *dep)
@@ -30085,7 +32178,35 @@ index 122e64d..6443cfb 100644
  		cmd |= DWC3_DEPCMD_CLEARPENDIN;
  
  	memset(&params, 0, sizeof(params));
-@@ -3054,7 +3055,7 @@ err3:
+@@ -788,6 +789,7 @@ static void dwc3_prepare_one_trb(struct dwc3_ep *dep,
+ 		req->trb = trb;
+ 		req->trb_dma = dwc3_trb_dma_offset(dep, trb);
+ 		req->first_trb_index = dep->trb_enqueue;
++		dep->queued_requests++;
+ 	}
+ 
+ 	dwc3_ep_inc_enq(dep);
+@@ -840,8 +842,6 @@ static void dwc3_prepare_one_trb(struct dwc3_ep *dep,
+ 
+ 	trb->ctrl |= DWC3_TRB_CTRL_HWO;
+ 
+-	dep->queued_requests++;
+-
+ 	trace_dwc3_prepare_trb(dep, trb);
+ }
+ 
+@@ -1962,7 +1962,9 @@ static int __dwc3_cleanup_done_trbs(struct dwc3 *dwc, struct dwc3_ep *dep,
+ 	unsigned int		s_pkt = 0;
+ 	unsigned int		trb_status;
+ 
+-	dep->queued_requests--;
++	if (req->trb == trb)
++		dep->queued_requests--;
++
+ 	trace_dwc3_complete_trb(dep, trb);
+ 
+ 	/*
+@@ -3054,7 +3056,7 @@ err3:
  	kfree(dwc->setup_buf);
  
  err2:
@@ -30094,7 +32215,7 @@ index 122e64d..6443cfb 100644
  			dwc->ep0_trb, dwc->ep0_trb_addr);
  
  err1:
-@@ -3079,7 +3080,7 @@ void dwc3_gadget_exit(struct dwc3 *dwc)
+@@ -3079,7 +3081,7 @@ void dwc3_gadget_exit(struct dwc3 *dwc)
  	kfree(dwc->setup_buf);
  	kfree(dwc->zlp_buf);
  
@@ -122101,6 +124222,19 @@ index ef9c55b..90e1198 100644
  	root->log_transid_committed++;
  	atomic_set(&root->log_commit[index1], 0);
  	mutex_unlock(&root->log_mutex);
+diff --git a/fs/buffer.c b/fs/buffer.c
+index 9c8eb9b..6a5f1a0 100644
+--- a/fs/buffer.c
++++ b/fs/buffer.c
+@@ -1698,7 +1698,7 @@ int __block_write_full_page(struct inode *inode, struct page *page,
+ 	struct buffer_head *bh, *head;
+ 	unsigned int blocksize, bbits;
+ 	int nr_underway = 0;
+-	int write_flags = (wbc->sync_mode == WB_SYNC_ALL ? WRITE_SYNC : 0);
++	int write_flags = wbc_to_write_flags(wbc);
+ 
+ 	head = create_page_buffers(page, inode,
+ 					(1 << BH_Dirty)|(1 << BH_Uptodate));
 diff --git a/fs/cachefiles/interface.c b/fs/cachefiles/interface.c
 index ce5f345..e7f16a7 100644
 --- a/fs/cachefiles/interface.c
@@ -136081,6 +138215,32 @@ index 4dcc9e2..3134424 100644
  		}
  		break;
  
+diff --git a/fs/f2fs/data.c b/fs/f2fs/data.c
+index ccb401e..cb0528b 100644
+--- a/fs/f2fs/data.c
++++ b/fs/f2fs/data.c
+@@ -1240,7 +1240,7 @@ static int f2fs_write_data_page(struct page *page,
+ 		.sbi = sbi,
+ 		.type = DATA,
+ 		.op = REQ_OP_WRITE,
+-		.op_flags = (wbc->sync_mode == WB_SYNC_ALL) ? WRITE_SYNC : 0,
++		.op_flags = wbc_to_write_flags(wbc),
+ 		.page = page,
+ 		.encrypted_page = NULL,
+ 	};
+diff --git a/fs/f2fs/node.c b/fs/f2fs/node.c
+index f75d197..c1713da 100644
+--- a/fs/f2fs/node.c
++++ b/fs/f2fs/node.c
+@@ -1561,7 +1561,7 @@ static int f2fs_write_node_page(struct page *page,
+ 		.sbi = sbi,
+ 		.type = NODE,
+ 		.op = REQ_OP_WRITE,
+-		.op_flags = (wbc->sync_mode == WB_SYNC_ALL) ? WRITE_SYNC : 0,
++		.op_flags = wbc_to_write_flags(wbc),
+ 		.page = page,
+ 		.encrypted_page = NULL,
+ 	};
 diff --git a/fs/fcntl.c b/fs/fcntl.c
 index 350a2c8..04fd33c 100644
 --- a/fs/fcntl.c
@@ -136260,6 +138420,20 @@ index 363ba9e..2524807 100644
  	}
  
  	if (acl) {
+diff --git a/fs/gfs2/meta_io.c b/fs/gfs2/meta_io.c
+index 950b8be..7991c62 100644
+--- a/fs/gfs2/meta_io.c
++++ b/fs/gfs2/meta_io.c
+@@ -37,8 +37,7 @@ static int gfs2_aspace_writepage(struct page *page, struct writeback_control *wb
+ {
+ 	struct buffer_head *bh, *head;
+ 	int nr_underway = 0;
+-	int write_flags = REQ_META | REQ_PRIO |
+-		(wbc->sync_mode == WB_SYNC_ALL ? WRITE_SYNC : 0);
++	int write_flags = REQ_META | REQ_PRIO | wbc_to_write_flags(wbc);
+ 
+ 	BUG_ON(!PageLocked(page));
+ 	BUG_ON(!page_has_buffers(page));
 diff --git a/fs/hfsplus/posix_acl.c b/fs/hfsplus/posix_acl.c
 index ab7ea25..9b92058 100644
 --- a/fs/hfsplus/posix_acl.c
@@ -136432,6 +138606,19 @@ index 21fa92b..3a1e155 100644
  		}
  		break;
  	case ACL_TYPE_DEFAULT:
+diff --git a/fs/mpage.c b/fs/mpage.c
+index d2413af..d6f1afe 100644
+--- a/fs/mpage.c
++++ b/fs/mpage.c
+@@ -489,7 +489,7 @@ static int __mpage_writepage(struct page *page, struct writeback_control *wbc,
+ 	struct buffer_head map_bh;
+ 	loff_t i_size = i_size_read(inode);
+ 	int ret = 0;
+-	int op_flags = (wbc->sync_mode == WB_SYNC_ALL ?  WRITE_SYNC : 0);
++	int op_flags = wbc_to_write_flags(wbc);
+ 
+ 	if (page_has_buffers(page)) {
+ 		struct buffer_head *head = page_buffers(page);
 diff --git a/fs/namespace.c b/fs/namespace.c
 index 7bb2cda..88ec098 100644
 --- a/fs/namespace.c
@@ -137494,6 +139681,31 @@ index b6e527b..8a0dec8 100644
  		error = xfs_set_mode(inode, mode);
  		if (error)
  			return error;
+diff --git a/fs/xfs/xfs_aops.c b/fs/xfs/xfs_aops.c
+index 7575cfc..a68645a 100644
+--- a/fs/xfs/xfs_aops.c
++++ b/fs/xfs/xfs_aops.c
+@@ -447,8 +447,8 @@ xfs_submit_ioend(
+ 
+ 	ioend->io_bio->bi_private = ioend;
+ 	ioend->io_bio->bi_end_io = xfs_end_bio;
+-	bio_set_op_attrs(ioend->io_bio, REQ_OP_WRITE,
+-			 (wbc->sync_mode == WB_SYNC_ALL) ? WRITE_SYNC : 0);
++	bio_set_op_attrs(ioend->io_bio, REQ_OP_WRITE, wbc_to_write_flags(wbc));
++
+ 	/*
+ 	 * If we are failing the IO now, just mark the ioend with an
+ 	 * error and finish it. This will run IO completion immediately
+@@ -519,8 +519,7 @@ xfs_chain_bio(
+ 
+ 	bio_chain(ioend->io_bio, new);
+ 	bio_get(ioend->io_bio);		/* for xfs_destroy_ioend */
+-	bio_set_op_attrs(ioend->io_bio, REQ_OP_WRITE,
+-			  (wbc->sync_mode == WB_SYNC_ALL) ? WRITE_SYNC : 0);
++	bio_set_op_attrs(ioend->io_bio, REQ_OP_WRITE, wbc_to_write_flags(wbc));
+ 	submit_bio(ioend->io_bio);
+ 	ioend->io_bio = new;
+ }
 diff --git a/fs/xfs/xfs_xattr.c b/fs/xfs/xfs_xattr.c
 index ea62245..6290093 100644
 --- a/fs/xfs/xfs_xattr.c
@@ -137563,12 +139775,82 @@ index 2905033..da59fd9 100644
 +#define IMX6QDL_CLK_END				261
  
  #endif /* __DT_BINDINGS_CLOCK_IMX6QDL_H */
+diff --git a/include/linux/backing-dev-defs.h b/include/linux/backing-dev-defs.h
+index c357f27..dc5f76d 100644
+--- a/include/linux/backing-dev-defs.h
++++ b/include/linux/backing-dev-defs.h
+@@ -116,6 +116,8 @@ struct bdi_writeback {
+ 	struct list_head work_list;
+ 	struct delayed_work dwork;	/* work item used for writeback */
+ 
++	unsigned long dirty_sleep;	/* last wait */
++
+ 	struct list_head bdi_node;	/* anchored at bdi->wb_list */
+ 
+ #ifdef CONFIG_CGROUP_WRITEBACK
+diff --git a/include/linux/blk_types.h b/include/linux/blk_types.h
+index 436f43f..95fbfa1 100644
+--- a/include/linux/blk_types.h
++++ b/include/linux/blk_types.h
+@@ -155,6 +155,7 @@ enum rq_flag_bits {
+ 	__REQ_INTEGRITY,	/* I/O includes block integrity payload */
+ 	__REQ_FUA,		/* forced unit access */
+ 	__REQ_PREFLUSH,		/* request for cache flush */
++	__REQ_BG,		/* background activity */
+ 
+ 	/* bio only flags */
+ 	__REQ_RAHEAD,		/* read ahead, can fail anytime */
+@@ -198,7 +199,7 @@ enum rq_flag_bits {
+ 	(REQ_FAILFAST_DEV | REQ_FAILFAST_TRANSPORT | REQ_FAILFAST_DRIVER)
+ #define REQ_COMMON_MASK \
+ 	(REQ_FAILFAST_MASK | REQ_SYNC | REQ_META | REQ_PRIO | REQ_NOIDLE | \
+-	 REQ_PREFLUSH | REQ_FUA | REQ_INTEGRITY | REQ_NOMERGE)
++	 REQ_PREFLUSH | REQ_FUA | REQ_INTEGRITY | REQ_NOMERGE | REQ_BG)
+ #define REQ_CLONE_MASK		REQ_COMMON_MASK
+ 
+ /* This mask is used for both bio and request merge checking */
+@@ -223,6 +224,7 @@ enum rq_flag_bits {
+ #define REQ_COPY_USER		(1ULL << __REQ_COPY_USER)
+ #define REQ_PREFLUSH		(1ULL << __REQ_PREFLUSH)
+ #define REQ_FLUSH_SEQ		(1ULL << __REQ_FLUSH_SEQ)
++#define REQ_BG			(1ULL << __REQ_BG)
+ #define REQ_IO_STAT		(1ULL << __REQ_IO_STAT)
+ #define REQ_MIXED_MERGE		(1ULL << __REQ_MIXED_MERGE)
+ #define REQ_PM			(1ULL << __REQ_PM)
+@@ -264,4 +266,16 @@ static inline unsigned int blk_qc_t_to_tag(blk_qc_t cookie)
+ 	return cookie & ((1u << BLK_QC_T_SHIFT) - 1);
+ }
+ 
++#define BLK_RQ_STAT_BATCH	64
++
++struct blk_rq_stat {
++	s64 mean;
++	u64 min;
++	u64 max;
++	s32 nr_samples;
++	s32 nr_batch;
++	u64 batch;
++	s64 time;
++};
++
+ #endif /* __LINUX_BLK_TYPES_H */
 diff --git a/include/linux/blkdev.h b/include/linux/blkdev.h
-index e79055c..034be8e 100644
+index e79055c..fccdcd9 100644
 --- a/include/linux/blkdev.h
 +++ b/include/linux/blkdev.h
-@@ -39,13 +39,17 @@ struct blk_flush_queue;
+@@ -24,6 +24,7 @@
+ #include <linux/rcupdate.h>
+ #include <linux/percpu-refcount.h>
+ #include <linux/scatterlist.h>
++#include <linux/wbt.h>
+ 
+ struct module;
+ struct scsi_ioctl_command;
+@@ -37,15 +38,20 @@ struct bsg_job;
+ struct blkcg_gq;
+ struct blk_flush_queue;
  struct pr_ops;
++struct rq_wb;
  
  #define BLKDEV_MIN_RQ	4
 +#ifdef CONFIG_ZEN_INTERACTIVE
@@ -137586,6 +139868,65 @@ index e79055c..034be8e 100644
  
  typedef void (rq_end_io_fn)(struct request *, int);
  
+@@ -151,6 +157,7 @@ struct request {
+ 	struct gendisk *rq_disk;
+ 	struct hd_struct *part;
+ 	unsigned long start_time;
++	struct wb_issue_stat wb_stat;
+ #ifdef CONFIG_BLK_CGROUP
+ 	struct request_list *rl;		/* rl this rq is alloced from */
+ 	unsigned long long start_time_ns;
+@@ -302,6 +309,8 @@ struct request_queue {
+ 	int			nr_rqs[2];	/* # allocated [a]sync rqs */
+ 	int			nr_rqs_elvpriv;	/* # allocated rqs w/ elvpriv */
+ 
++	struct rq_wb		*rq_wb;
++
+ 	/*
+ 	 * If blkcg is not used, @q->root_rl serves all requests.  If blkcg
+ 	 * is used, root blkg allocates from @q->root_rl and all other
+@@ -327,6 +336,8 @@ struct request_queue {
+ 	struct blk_mq_ctx __percpu	*queue_ctx;
+ 	unsigned int		nr_queues;
+ 
++	unsigned int		queue_depth;
++
+ 	/* hw dispatch queues */
+ 	struct blk_mq_hw_ctx	**queue_hw_ctx;
+ 	unsigned int		nr_hw_queues;
+@@ -412,6 +423,9 @@ struct request_queue {
+ 
+ 	unsigned int		nr_sorted;
+ 	unsigned int		in_flight[2];
++
++	struct blk_rq_stat	rq_stats[2];
++
+ 	/*
+ 	 * Number of active block driver functions for which blk_drain_queue()
+ 	 * must wait. Must be incremented around functions that unlock the
+@@ -683,6 +697,14 @@ static inline bool blk_write_same_mergeable(struct bio *a, struct bio *b)
+ 	return false;
+ }
+ 
++static inline unsigned int blk_queue_depth(struct request_queue *q)
++{
++	if (q->queue_depth)
++		return q->queue_depth;
++
++	return q->nr_requests;
++}
++
+ /*
+  * q->prep_rq_fn return values
+  */
+@@ -999,6 +1021,7 @@ extern void blk_limits_io_min(struct queue_limits *limits, unsigned int min);
+ extern void blk_queue_io_min(struct request_queue *q, unsigned int min);
+ extern void blk_limits_io_opt(struct queue_limits *limits, unsigned int opt);
+ extern void blk_queue_io_opt(struct request_queue *q, unsigned int opt);
++extern void blk_set_queue_depth(struct request_queue *q, unsigned int depth);
+ extern void blk_set_default_limits(struct queue_limits *lim);
+ extern void blk_set_stacking_limits(struct queue_limits *lim);
+ extern int blk_stack_limits(struct queue_limits *t, struct queue_limits *b,
 diff --git a/include/linux/cpufreq.h b/include/linux/cpufreq.h
 index 631ba33b..32dc0cbd 100644
 --- a/include/linux/cpufreq.h
@@ -137863,10 +140204,27 @@ index 7444f5f..bdac0be 100644
  static inline void fput_light(struct file *file, int fput_needed)
  {
 diff --git a/include/linux/fs.h b/include/linux/fs.h
-index 901e25d..1b59994 100644
+index 901e25d..6f180af 100644
 --- a/include/linux/fs.h
 +++ b/include/linux/fs.h
-@@ -224,6 +224,7 @@ typedef int (dio_iodone_t)(struct kiocb *iocb, loff_t offset,
+@@ -189,6 +189,8 @@ typedef int (dio_iodone_t)(struct kiocb *iocb, loff_t offset,
+  * WRITE_FLUSH_FUA	Combination of WRITE_FLUSH and FUA. The IO is preceded
+  *			by a cache flush and data is guaranteed to be on
+  *			non-volatile media on completion.
++ * WRITE_BG		Background write. This is for background activity like
++ *			the periodic flush and background threshold writeback
+  *
+  */
+ #define RW_MASK			REQ_OP_WRITE
+@@ -202,6 +204,7 @@ typedef int (dio_iodone_t)(struct kiocb *iocb, loff_t offset,
+ #define WRITE_FLUSH		(REQ_SYNC | REQ_NOIDLE | REQ_PREFLUSH)
+ #define WRITE_FUA		(REQ_SYNC | REQ_NOIDLE | REQ_FUA)
+ #define WRITE_FLUSH_FUA		(REQ_SYNC | REQ_NOIDLE | REQ_PREFLUSH | REQ_FUA)
++#define WRITE_BG		(REQ_NOIDLE | REQ_BG)
+ 
+ /*
+  * Attribute flags.  These should be or-ed together to figure out what
+@@ -224,6 +227,7 @@ typedef int (dio_iodone_t)(struct kiocb *iocb, loff_t offset,
  #define ATTR_KILL_PRIV	(1 << 14)
  #define ATTR_OPEN	(1 << 15) /* Truncating from open(O_TRUNC) */
  #define ATTR_TIMES_SET	(1 << 16)
@@ -137874,7 +140232,7 @@ index 901e25d..1b59994 100644
  
  /*
   * Whiteout is represented by a char device.  The following constants define the
-@@ -1275,6 +1276,7 @@ extern void fasync_free(struct fasync_struct *);
+@@ -1275,6 +1279,7 @@ extern void fasync_free(struct fasync_struct *);
  /* can be called from interrupts */
  extern void kill_fasync(struct fasync_struct **, int, int);
  
@@ -137882,7 +140240,7 @@ index 901e25d..1b59994 100644
  extern void __f_setown(struct file *filp, struct pid *, enum pid_type, int force);
  extern void f_setown(struct file *filp, unsigned long arg, int force);
  extern void f_delown(struct file *filp);
-@@ -1699,6 +1701,7 @@ struct file_operations {
+@@ -1699,6 +1704,7 @@ struct file_operations {
  	ssize_t (*sendpage) (struct file *, struct page *, int, size_t, loff_t *, int);
  	unsigned long (*get_unmapped_area)(struct file *, unsigned long, unsigned long, unsigned long, unsigned long);
  	int (*check_flags)(int);
@@ -137890,7 +140248,7 @@ index 901e25d..1b59994 100644
  	int (*flock) (struct file *, int, struct file_lock *);
  	ssize_t (*splice_write)(struct pipe_inode_info *, struct file *, loff_t *, size_t, unsigned int);
  	ssize_t (*splice_read)(struct file *, loff_t *, struct pipe_inode_info *, size_t, unsigned int);
-@@ -1759,6 +1762,12 @@ ssize_t rw_copy_check_uvector(int type, const struct iovec __user * uvector,
+@@ -1759,6 +1765,12 @@ ssize_t rw_copy_check_uvector(int type, const struct iovec __user * uvector,
  			      struct iovec *fast_pointer,
  			      struct iovec **ret_pointer);
  
@@ -137903,7 +140261,7 @@ index 901e25d..1b59994 100644
  extern ssize_t __vfs_read(struct file *, char __user *, size_t, loff_t *);
  extern ssize_t __vfs_write(struct file *, const char __user *, size_t, loff_t *);
  extern ssize_t vfs_read(struct file *, char __user *, size_t, loff_t *);
-@@ -2123,6 +2132,7 @@ extern int current_umask(void);
+@@ -2123,6 +2135,7 @@ extern int current_umask(void);
  extern void ihold(struct inode * inode);
  extern void iput(struct inode *);
  extern int generic_update_time(struct inode *, struct timespec *, int);
@@ -138196,6 +140554,72 @@ index 903200f..55fc528 100644
  	void * vm_private_data;		/* was vm_pte (shared mem) */
  
  #ifndef CONFIG_MMU
+diff --git a/include/linux/netdevice.h b/include/linux/netdevice.h
+index e8d79d4..e942c67 100644
+--- a/include/linux/netdevice.h
++++ b/include/linux/netdevice.h
+@@ -2154,7 +2154,10 @@ struct napi_gro_cb {
+ 	/* Used to determine if flush_id can be ignored */
+ 	u8	is_atomic:1;
+ 
+-	/* 5 bit hole */
++	/* Number of gro_receive callbacks this packet already went through */
++	u8 recursion_counter:4;
++
++	/* 1 bit hole */
+ 
+ 	/* used to support CHECKSUM_COMPLETE for tunneling protocols */
+ 	__wsum	csum;
+@@ -2165,6 +2168,40 @@ struct napi_gro_cb {
+ 
+ #define NAPI_GRO_CB(skb) ((struct napi_gro_cb *)(skb)->cb)
+ 
++#define GRO_RECURSION_LIMIT 15
++static inline int gro_recursion_inc_test(struct sk_buff *skb)
++{
++	return ++NAPI_GRO_CB(skb)->recursion_counter == GRO_RECURSION_LIMIT;
++}
++
++typedef struct sk_buff **(*gro_receive_t)(struct sk_buff **, struct sk_buff *);
++static inline struct sk_buff **call_gro_receive(gro_receive_t cb,
++						struct sk_buff **head,
++						struct sk_buff *skb)
++{
++	if (unlikely(gro_recursion_inc_test(skb))) {
++		NAPI_GRO_CB(skb)->flush |= 1;
++		return NULL;
++	}
++
++	return cb(head, skb);
++}
++
++typedef struct sk_buff **(*gro_receive_sk_t)(struct sock *, struct sk_buff **,
++					     struct sk_buff *);
++static inline struct sk_buff **call_gro_receive_sk(gro_receive_sk_t cb,
++						   struct sock *sk,
++						   struct sk_buff **head,
++						   struct sk_buff *skb)
++{
++	if (unlikely(gro_recursion_inc_test(skb))) {
++		NAPI_GRO_CB(skb)->flush |= 1;
++		return NULL;
++	}
++
++	return cb(sk, head, skb);
++}
++
+ struct packet_type {
+ 	__be16			type;	/* This is really htons(ether_type). */
+ 	struct net_device	*dev;	/* NULL is wildcarded here	     */
+@@ -3862,7 +3899,7 @@ struct net_device *netdev_all_lower_get_next_rcu(struct net_device *dev,
+ 	     ldev = netdev_all_lower_get_next(dev, &(iter)))
+ 
+ #define netdev_for_each_all_lower_dev_rcu(dev, ldev, iter) \
+-	for (iter = (dev)->all_adj_list.lower.next, \
++	for (iter = &(dev)->all_adj_list.lower, \
+ 	     ldev = netdev_all_lower_get_next_rcu(dev, &(iter)); \
+ 	     ldev; \
+ 	     ldev = netdev_all_lower_get_next_rcu(dev, &(iter)))
 diff --git a/include/linux/posix_acl.h b/include/linux/posix_acl.h
 index d5d3d74..bf1046d 100644
 --- a/include/linux/posix_acl.h
@@ -138555,6 +140979,174 @@ index 0000000..1b80d7e
 +
 +#endif /* __KERNEL */
 +#endif /* _THINKPAD_EC_H */
+diff --git a/include/linux/wbt.h b/include/linux/wbt.h
+new file mode 100644
+index 0000000..68ba75e
+--- /dev/null
++++ b/include/linux/wbt.h
+@@ -0,0 +1,141 @@
++#ifndef WB_THROTTLE_H
++#define WB_THROTTLE_H
++
++#include <linux/atomic.h>
++#include <linux/wait.h>
++#include <linux/timer.h>
++#include <linux/ktime.h>
++
++enum wbt_flags {
++	WBT_TRACKED		= 1,	/* write, tracked for throttling */
++	WBT_READ		= 2,	/* read */
++	WBT_KSWAPD		= 4,	/* write, from kswapd */
++
++	WBT_NR_BITS		= 3,	/* number of bits */
++};
++
++enum {
++	/*
++	 * Set aside 3 bits for state, rest is a time stamp
++	 */
++	ISSUE_STAT_SHIFT	= 64 - WBT_NR_BITS,
++	ISSUE_STAT_MASK 	= ~((1ULL << ISSUE_STAT_SHIFT) - 1),
++	ISSUE_STAT_TIME_MASK	= ~ISSUE_STAT_MASK,
++
++	WBT_NUM_RWQ		= 2,
++};
++
++struct wb_issue_stat {
++	u64 time;
++};
++
++static inline void wbt_issue_stat_set_time(struct wb_issue_stat *stat)
++{
++	stat->time = (stat->time & ISSUE_STAT_MASK) |
++			(ktime_to_ns(ktime_get()) & ISSUE_STAT_TIME_MASK);
++}
++
++static inline u64 wbt_issue_stat_get_time(struct wb_issue_stat *stat)
++{
++	return stat->time & ISSUE_STAT_TIME_MASK;
++}
++
++static inline void wbt_clear_state(struct wb_issue_stat *stat)
++{
++	stat->time &= ISSUE_STAT_TIME_MASK;
++}
++
++static inline enum wbt_flags wbt_stat_to_mask(struct wb_issue_stat *stat)
++{
++	return (stat->time & ISSUE_STAT_MASK) >> ISSUE_STAT_SHIFT;
++}
++
++static inline void wbt_track(struct wb_issue_stat *stat, enum wbt_flags wb_acct)
++{
++	stat->time |= ((u64) wb_acct) << ISSUE_STAT_SHIFT;
++}
++
++static inline bool wbt_is_tracked(struct wb_issue_stat *stat)
++{
++	return (stat->time >> ISSUE_STAT_SHIFT) & WBT_TRACKED;
++}
++
++static inline bool wbt_is_read(struct wb_issue_stat *stat)
++{
++	return (stat->time >> ISSUE_STAT_SHIFT) & WBT_READ;
++}
++
++struct wb_stat_ops {
++	void (*get)(void *, struct blk_rq_stat *);
++	bool (*is_current)(struct blk_rq_stat *);
++	void (*clear)(void *);
++};
++
++struct rq_wait {
++	wait_queue_head_t wait;
++	atomic_t inflight;
++};
++
++struct rq_wb {
++	/*
++	 * Settings that govern how we throttle
++	 */
++	unsigned int wb_background;		/* background writeback */
++	unsigned int wb_normal;			/* normal writeback */
++	unsigned int wb_max;			/* max throughput writeback */
++	int scale_step;
++	bool scaled_max;
++
++	/*
++	 * Number of consecutive periods where we don't have enough
++	 * information to make a firm scale up/down decision.
++	 */
++	unsigned int unknown_cnt;
++
++	u64 win_nsec;				/* default window size */
++	u64 cur_win_nsec;			/* current window size */
++
++	struct timer_list window_timer;
++
++	s64 sync_issue;
++	void *sync_cookie;
++
++	unsigned int wc;
++	unsigned int queue_depth;
++
++	unsigned long last_issue;		/* last non-throttled issue */
++	unsigned long last_comp;		/* last non-throttled comp */
++	unsigned long min_lat_nsec;
++	struct backing_dev_info *bdi;
++	struct rq_wait rq_wait[WBT_NUM_RWQ];
++
++	struct wb_stat_ops *stat_ops;
++	void *ops_data;
++};
++
++static inline unsigned int wbt_inflight(struct rq_wb *rwb)
++{
++	unsigned int i, ret = 0;
++
++	for (i = 0; i < WBT_NUM_RWQ; i++)
++		ret += atomic_read(&rwb->rq_wait[i].inflight);
++
++	return ret;
++}
++
++struct backing_dev_info;
++
++void __wbt_done(struct rq_wb *, enum wbt_flags);
++void wbt_done(struct rq_wb *, struct wb_issue_stat *);
++enum wbt_flags wbt_wait(struct rq_wb *, unsigned int, spinlock_t *);
++struct rq_wb *wbt_init(struct backing_dev_info *, struct wb_stat_ops *, void *);
++void wbt_exit(struct rq_wb *);
++void wbt_update_limits(struct rq_wb *);
++void wbt_requeue(struct rq_wb *, struct wb_issue_stat *);
++void wbt_issue(struct rq_wb *, struct wb_issue_stat *);
++void wbt_disable(struct rq_wb *);
++
++void wbt_set_queue_depth(struct rq_wb *, unsigned int);
++void wbt_set_write_cache(struct rq_wb *, bool);
++
++#endif
+diff --git a/include/linux/writeback.h b/include/linux/writeback.h
+index fc1e16c..e53abf2 100644
+--- a/include/linux/writeback.h
++++ b/include/linux/writeback.h
+@@ -100,6 +100,16 @@ struct writeback_control {
+ #endif
+ };
+ 
++static inline int wbc_to_write_flags(struct writeback_control *wbc)
++{
++	if (wbc->sync_mode == WB_SYNC_ALL)
++		return WRITE_SYNC;
++	else if (wbc->for_kupdate || wbc->for_background)
++		return WRITE_BG;
++
++	return 0;
++}
++
+ /*
+  * A wb_domain represents a domain that wb's (bdi_writeback's) belong to
+  * and are measured against each other in.  There always is one global
 diff --git a/include/media/rcar-fcp.h b/include/media/rcar-fcp.h
 index 4c7fc77..8723f05 100644
 --- a/include/media/rcar-fcp.h
@@ -138568,6 +141160,40 @@ index 4c7fc77..8723f05 100644
  }
  static inline void rcar_fcp_disable(struct rcar_fcp_device *fcp) { }
  #endif
+diff --git a/include/net/ip.h b/include/net/ip.h
+index 9742b92..156b0c1 100644
+--- a/include/net/ip.h
++++ b/include/net/ip.h
+@@ -549,7 +549,7 @@ int ip_options_rcv_srr(struct sk_buff *skb);
+  */
+ 
+ void ipv4_pktinfo_prepare(const struct sock *sk, struct sk_buff *skb);
+-void ip_cmsg_recv_offset(struct msghdr *msg, struct sk_buff *skb, int offset);
++void ip_cmsg_recv_offset(struct msghdr *msg, struct sk_buff *skb, int tlen, int offset);
+ int ip_cmsg_send(struct sock *sk, struct msghdr *msg,
+ 		 struct ipcm_cookie *ipc, bool allow_ipv6);
+ int ip_setsockopt(struct sock *sk, int level, int optname, char __user *optval,
+@@ -571,7 +571,7 @@ void ip_local_error(struct sock *sk, int err, __be32 daddr, __be16 dport,
+ 
+ static inline void ip_cmsg_recv(struct msghdr *msg, struct sk_buff *skb)
+ {
+-	ip_cmsg_recv_offset(msg, skb, 0);
++	ip_cmsg_recv_offset(msg, skb, 0, 0);
+ }
+ 
+ bool icmp_global_allow(void);
+diff --git a/include/net/ip6_route.h b/include/net/ip6_route.h
+index d97305d..0a2d270 100644
+--- a/include/net/ip6_route.h
++++ b/include/net/ip6_route.h
+@@ -32,6 +32,7 @@ struct route_info {
+ #define RT6_LOOKUP_F_SRCPREF_TMP	0x00000008
+ #define RT6_LOOKUP_F_SRCPREF_PUBLIC	0x00000010
+ #define RT6_LOOKUP_F_SRCPREF_COA	0x00000020
++#define RT6_LOOKUP_F_IGNORE_LINKSTATE	0x00000040
+ 
+ /* We do not (yet ?) support IPv6 jumbograms (RFC 2675)
+  * Unlike IPv4, hdr->seg_len doesn't include the IPv6 header
 diff --git a/include/target/target_core_base.h b/include/target/target_core_base.h
 index fb8e3b6..c211900 100644
 --- a/include/target/target_core_base.h
@@ -138636,6 +141262,165 @@ index 0000000..fb634b7
 +);
 +
 +#endif /* _TRACE_FS_H */
++
++/* This part must be outside protection */
++#include <trace/define_trace.h>
+diff --git a/include/trace/events/wbt.h b/include/trace/events/wbt.h
+new file mode 100644
+index 0000000..926c7ee
+--- /dev/null
++++ b/include/trace/events/wbt.h
+@@ -0,0 +1,153 @@
++#undef TRACE_SYSTEM
++#define TRACE_SYSTEM wbt
++
++#if !defined(_TRACE_WBT_H) || defined(TRACE_HEADER_MULTI_READ)
++#define _TRACE_WBT_H
++
++#include <linux/tracepoint.h>
++#include <linux/wbt.h>
++
++/**
++ * wbt_stat - trace stats for blk_wb
++ * @stat: array of read/write stats
++ */
++TRACE_EVENT(wbt_stat,
++
++	TP_PROTO(struct backing_dev_info *bdi, struct blk_rq_stat *stat),
++
++	TP_ARGS(bdi, stat),
++
++	TP_STRUCT__entry(
++		__array(char, name, 32)
++		__field(s64, rmean)
++		__field(u64, rmin)
++		__field(u64, rmax)
++		__field(s64, rnr_samples)
++		__field(s64, rtime)
++		__field(s64, wmean)
++		__field(u64, wmin)
++		__field(u64, wmax)
++		__field(s64, wnr_samples)
++		__field(s64, wtime)
++	),
++
++	TP_fast_assign(
++		strncpy(__entry->name, dev_name(bdi->dev), 32);
++		__entry->rmean		= stat[0].mean;
++		__entry->rmin		= stat[0].min;
++		__entry->rmax		= stat[0].max;
++		__entry->rnr_samples	= stat[0].nr_samples;
++		__entry->wmean		= stat[1].mean;
++		__entry->wmin		= stat[1].min;
++		__entry->wmax		= stat[1].max;
++		__entry->wnr_samples	= stat[1].nr_samples;
++	),
++
++	TP_printk("%s: rmean=%llu, rmin=%llu, rmax=%llu, rsamples=%llu, "
++		  "wmean=%llu, wmin=%llu, wmax=%llu, wsamples=%llu\n",
++		  __entry->name, __entry->rmean, __entry->rmin, __entry->rmax,
++		  __entry->rnr_samples, __entry->wmean, __entry->wmin,
++		  __entry->wmax, __entry->wnr_samples)
++);
++
++/**
++ * wbt_lat - trace latency event
++ * @lat: latency trigger
++ */
++TRACE_EVENT(wbt_lat,
++
++	TP_PROTO(struct backing_dev_info *bdi, unsigned long lat),
++
++	TP_ARGS(bdi, lat),
++
++	TP_STRUCT__entry(
++		__array(char, name, 32)
++		__field(unsigned long, lat)
++	),
++
++	TP_fast_assign(
++		strncpy(__entry->name, dev_name(bdi->dev), 32);
++		__entry->lat = div_u64(lat, 1000);
++	),
++
++	TP_printk("%s: latency %lluus\n", __entry->name,
++			(unsigned long long) __entry->lat)
++);
++
++/**
++ * wbt_step - trace wb event step
++ * @msg: context message
++ * @step: the current scale step count
++ * @window: the current monitoring window
++ * @bg: the current background queue limit
++ * @normal: the current normal writeback limit
++ * @max: the current max throughput writeback limit
++ */
++TRACE_EVENT(wbt_step,
++
++	TP_PROTO(struct backing_dev_info *bdi, const char *msg,
++		 int step, unsigned long window, unsigned int bg,
++		 unsigned int normal, unsigned int max),
++
++	TP_ARGS(bdi, msg, step, window, bg, normal, max),
++
++	TP_STRUCT__entry(
++		__array(char, name, 32)
++		__field(const char *, msg)
++		__field(int, step)
++		__field(unsigned long, window)
++		__field(unsigned int, bg)
++		__field(unsigned int, normal)
++		__field(unsigned int, max)
++	),
++
++	TP_fast_assign(
++		strncpy(__entry->name, dev_name(bdi->dev), 32);
++		__entry->msg	= msg;
++		__entry->step	= step;
++		__entry->window	= div_u64(window, 1000);
++		__entry->bg	= bg;
++		__entry->normal	= normal;
++		__entry->max	= max;
++	),
++
++	TP_printk("%s: %s: step=%d, window=%luus, background=%u, normal=%u, max=%u\n",
++		  __entry->name, __entry->msg, __entry->step, __entry->window,
++		  __entry->bg, __entry->normal, __entry->max)
++);
++
++/**
++ * wbt_timer - trace wb timer event
++ * @status: timer state status
++ * @step: the current scale step count
++ * @inflight: tracked writes inflight
++ */
++TRACE_EVENT(wbt_timer,
++
++	TP_PROTO(struct backing_dev_info *bdi, unsigned int status,
++		 int step, unsigned int inflight),
++
++	TP_ARGS(bdi, status, step, inflight),
++
++	TP_STRUCT__entry(
++		__array(char, name, 32)
++		__field(unsigned int, status)
++		__field(int, step)
++		__field(unsigned int, inflight)
++	),
++
++	TP_fast_assign(
++		strncpy(__entry->name, dev_name(bdi->dev), 32);
++		__entry->status		= status;
++		__entry->step		= step;
++		__entry->inflight	= inflight;
++	),
++
++	TP_printk("%s: status=%u, step=%d, inflight=%u\n", __entry->name,
++		  __entry->status, __entry->step, __entry->inflight)
++);
++
++#endif /* _TRACE_WBT_H */
 +
 +/* This part must be outside protection */
 +#include <trace/define_trace.h>
@@ -139094,6 +141879,19 @@ index ac5eacd..db4c253 100644
  
  #define BTRFS_FEATURE_INCOMPAT_MIXED_BACKREF	(1ULL << 0)
  #define BTRFS_FEATURE_INCOMPAT_DEFAULT_SUBVOL	(1ULL << 1)
+diff --git a/include/uapi/linux/rtnetlink.h b/include/uapi/linux/rtnetlink.h
+index 262f037..5a78be5 100644
+--- a/include/uapi/linux/rtnetlink.h
++++ b/include/uapi/linux/rtnetlink.h
+@@ -350,7 +350,7 @@ struct rtnexthop {
+ #define RTNH_F_OFFLOAD		8	/* offloaded route */
+ #define RTNH_F_LINKDOWN		16	/* carrier-down on nexthop */
+ 
+-#define RTNH_COMPARE_MASK	(RTNH_F_DEAD | RTNH_F_LINKDOWN)
++#define RTNH_COMPARE_MASK	(RTNH_F_DEAD | RTNH_F_LINKDOWN | RTNH_F_OFFLOAD)
+ 
+ /* Macros to handle hexthops */
+ 
 diff --git a/include/uapi/linux/sched.h b/include/uapi/linux/sched.h
 index 5f0fe01..950a481 100644
 --- a/include/uapi/linux/sched.h
@@ -148713,6 +151511,18 @@ index b0f86ea..69ee53a 100644
  	};
  	struct wakeup_test_data *x = data;
  
+diff --git a/lib/Kconfig b/lib/Kconfig
+index d79909d..c585e4c 100644
+--- a/lib/Kconfig
++++ b/lib/Kconfig
+@@ -550,4 +550,7 @@ config STACKDEPOT
+ 	bool
+ 	select STACKTRACE
+ 
++config WBT
++	bool
++
+ endmenu
 diff --git a/lib/Kconfig.debug b/lib/Kconfig.debug
 index cab7405..6f1b7a7 100644
 --- a/lib/Kconfig.debug
@@ -148734,6 +151544,18 @@ index cab7405..6f1b7a7 100644
  	select FRAME_POINTER if !MIPS && !PPC && !S390 && !MICROBLAZE && !ARM_UNWIND && !ARC
  	select KALLSYMS
  	select KALLSYMS_ALL
+diff --git a/lib/Makefile b/lib/Makefile
+index 5dc77a8..23afd63 100644
+--- a/lib/Makefile
++++ b/lib/Makefile
+@@ -177,6 +177,7 @@ obj-$(CONFIG_SG_SPLIT) += sg_split.o
+ obj-$(CONFIG_SG_POOL) += sg_pool.o
+ obj-$(CONFIG_STMP_DEVICE) += stmp_device.o
+ obj-$(CONFIG_IRQ_POLL) += irq_poll.o
++obj-$(CONFIG_WBT) += wbt.o
+ 
+ obj-$(CONFIG_STACKDEPOT) += stackdepot.o
+ KASAN_SANITIZE_stackdepot.o := n
 diff --git a/lib/radix-tree.c b/lib/radix-tree.c
 index 91f0727..8e6d552 100644
 --- a/lib/radix-tree.c
@@ -148767,6 +151589,715 @@ index 91f0727..8e6d552 100644
  }
  
  /**
+diff --git a/lib/wbt.c b/lib/wbt.c
+new file mode 100644
+index 0000000..257c7b0
+--- /dev/null
++++ b/lib/wbt.c
+@@ -0,0 +1,703 @@
++/*
++ * buffered writeback throttling. loosely based on CoDel. We can't drop
++ * packets for IO scheduling, so the logic is something like this:
++ *
++ * - Monitor latencies in a defined window of time.
++ * - If the minimum latency in the above window exceeds some target, increment
++ *   scaling step and scale down queue depth by a factor of 2x. The monitoring
++ *   window is then shrunk to 100 / sqrt(scaling step + 1).
++ * - For any window where we don't have solid data on what the latencies
++ *   look like, retain status quo.
++ * - If latencies look good, decrement scaling step.
++ * - If we're only doing writes, allow the scaling step to go negative. This
++ *   will temporarily boost write performance, snapping back to a stable
++ *   scaling step of 0 if reads show up or the heavy writers finish. Unlike
++ *   positive scaling steps where we shrink the monitoring window, a negative
++ *   scaling step retains the default step==0 window size.
++ *
++ * Copyright (C) 2016 Jens Axboe
++ *
++ */
++#include <linux/kernel.h>
++#include <linux/blk_types.h>
++#include <linux/slab.h>
++#include <linux/backing-dev.h>
++#include <linux/wbt.h>
++#include <linux/swap.h>
++
++#define CREATE_TRACE_POINTS
++#include <trace/events/wbt.h>
++
++enum {
++	/*
++	 * Default setting, we'll scale up (to 75% of QD max) or down (min 1)
++	 * from here depending on device stats
++	 */
++	RWB_DEF_DEPTH	= 16,
++
++	/*
++	 * 100msec window
++	 */
++	RWB_WINDOW_NSEC		= 100 * 1000 * 1000ULL,
++
++	/*
++	 * Disregard stats, if we don't meet this minimum
++	 */
++	RWB_MIN_WRITE_SAMPLES	= 3,
++
++	/*
++	 * If we have this number of consecutive windows with not enough
++	 * information to scale up or down, scale up.
++	 */
++	RWB_UNKNOWN_BUMP	= 5,
++};
++
++static inline bool rwb_enabled(struct rq_wb *rwb)
++{
++	return rwb && rwb->wb_normal != 0;
++}
++
++/*
++ * Increment 'v', if 'v' is below 'below'. Returns true if we succeeded,
++ * false if 'v' + 1 would be bigger than 'below'.
++ */
++static bool atomic_inc_below(atomic_t *v, int below)
++{
++	int cur = atomic_read(v);
++
++	for (;;) {
++		int old;
++
++		if (cur >= below)
++			return false;
++		old = atomic_cmpxchg(v, cur, cur + 1);
++		if (old == cur)
++			break;
++		cur = old;
++	}
++
++	return true;
++}
++
++static void wb_timestamp(struct rq_wb *rwb, unsigned long *var)
++{
++	if (rwb_enabled(rwb)) {
++		const unsigned long cur = jiffies;
++
++		if (cur != *var)
++			*var = cur;
++	}
++}
++
++/*
++ * If a task was rate throttled in balance_dirty_pages() within the last
++ * second or so, use that to indicate a higher cleaning rate.
++ */
++static bool wb_recent_wait(struct rq_wb *rwb)
++{
++	struct bdi_writeback *wb = &rwb->bdi->wb;
++
++	return time_before(jiffies, wb->dirty_sleep + HZ);
++}
++
++static inline struct rq_wait *get_rq_wait(struct rq_wb *rwb, bool is_kswapd)
++{
++	return &rwb->rq_wait[is_kswapd];
++}
++
++static void rwb_wake_all(struct rq_wb *rwb)
++{
++	int i;
++
++	for (i = 0; i < WBT_NUM_RWQ; i++) {
++		struct rq_wait *rqw = &rwb->rq_wait[i];
++
++		if (waitqueue_active(&rqw->wait))
++			wake_up_all(&rqw->wait);
++	}
++}
++
++void __wbt_done(struct rq_wb *rwb, enum wbt_flags wb_acct)
++{
++	struct rq_wait *rqw;
++	int inflight, limit;
++
++	if (!(wb_acct & WBT_TRACKED))
++		return;
++
++	rqw = get_rq_wait(rwb, wb_acct & WBT_KSWAPD);
++	inflight = atomic_dec_return(&rqw->inflight);
++
++	/*
++	 * wbt got disabled with IO in flight. Wake up any potential
++	 * waiters, we don't have to do more than that.
++	 */
++	if (unlikely(!rwb_enabled(rwb))) {
++		rwb_wake_all(rwb);
++		return;
++	}
++
++	/*
++	 * If the device does write back caching, drop further down
++	 * before we wake people up.
++	 */
++	if (rwb->wc && !wb_recent_wait(rwb))
++		limit = 0;
++	else
++		limit = rwb->wb_normal;
++
++	/*
++	 * Don't wake anyone up if we are above the normal limit.
++	 */
++	if (inflight && inflight >= limit)
++		return;
++
++	if (waitqueue_active(&rqw->wait)) {
++		int diff = limit - inflight;
++
++		if (!inflight || diff >= rwb->wb_background / 2)
++			wake_up(&rqw->wait);
++	}
++}
++
++/*
++ * Called on completion of a request. Note that it's also called when
++ * a request is merged, when the request gets freed.
++ */
++void wbt_done(struct rq_wb *rwb, struct wb_issue_stat *stat)
++{
++	if (!rwb)
++		return;
++
++	if (!wbt_is_tracked(stat)) {
++		if (rwb->sync_cookie == stat) {
++			rwb->sync_issue = 0;
++			rwb->sync_cookie = NULL;
++		}
++
++		if (wbt_is_read(stat))
++			wb_timestamp(rwb, &rwb->last_comp);
++		wbt_clear_state(stat);
++	} else {
++		WARN_ON_ONCE(stat == rwb->sync_cookie);
++		__wbt_done(rwb, wbt_stat_to_mask(stat));
++		wbt_clear_state(stat);
++	}
++}
++
++/*
++ * Return true, if we can't increase the depth further by scaling
++ */
++static bool calc_wb_limits(struct rq_wb *rwb)
++{
++	unsigned int depth;
++	bool ret = false;
++
++	if (!rwb->min_lat_nsec) {
++		rwb->wb_max = rwb->wb_normal = rwb->wb_background = 0;
++		return false;
++	}
++
++	/*
++	 * For QD=1 devices, this is a special case. It's important for those
++	 * to have one request ready when one completes, so force a depth of
++	 * 2 for those devices. On the backend, it'll be a depth of 1 anyway,
++	 * since the device can't have more than that in flight. If we're
++	 * scaling down, then keep a setting of 1/1/1.
++	 */
++	if (rwb->queue_depth == 1) {
++		if (rwb->scale_step > 0)
++			rwb->wb_max = rwb->wb_normal = 1;
++		else {
++			rwb->wb_max = rwb->wb_normal = 2;
++			ret = true;
++		}
++		rwb->wb_background = 1;
++	} else {
++		/*
++		 * scale_step == 0 is our default state. If we have suffered
++		 * latency spikes, step will be > 0, and we shrink the
++		 * allowed write depths. If step is < 0, we're only doing
++		 * writes, and we allow a temporarily higher depth to
++		 * increase performance.
++		 */
++		depth = min_t(unsigned int, RWB_DEF_DEPTH, rwb->queue_depth);
++		if (rwb->scale_step > 0)
++			depth = 1 + ((depth - 1) >> min(31, rwb->scale_step));
++		else if (rwb->scale_step < 0) {
++			unsigned int maxd = 3 * rwb->queue_depth / 4;
++
++			depth = 1 + ((depth - 1) << -rwb->scale_step);
++			if (depth > maxd) {
++				depth = maxd;
++				ret = true;
++			}
++		}
++
++		/*
++		 * Set our max/normal/bg queue depths based on how far
++		 * we have scaled down (->scale_step).
++		 */
++		rwb->wb_max = depth;
++		rwb->wb_normal = (rwb->wb_max + 1) / 2;
++		rwb->wb_background = (rwb->wb_max + 3) / 4;
++	}
++
++	return ret;
++}
++
++static bool inline stat_sample_valid(struct blk_rq_stat *stat)
++{
++	/*
++	 * We need at least one read sample, and a minimum of
++	 * RWB_MIN_WRITE_SAMPLES. We require some write samples to know
++	 * that it's writes impacting us, and not just some sole read on
++	 * a device that is in a lower power state.
++	 */
++	return stat[0].nr_samples >= 1 &&
++		stat[1].nr_samples >= RWB_MIN_WRITE_SAMPLES;
++}
++
++static u64 rwb_sync_issue_lat(struct rq_wb *rwb)
++{
++	u64 now, issue = ACCESS_ONCE(rwb->sync_issue);
++
++	if (!issue || !rwb->sync_cookie)
++		return 0;
++
++	now = ktime_to_ns(ktime_get());
++	return now - issue;
++}
++
++enum {
++	LAT_OK = 1,
++	LAT_UNKNOWN,
++	LAT_UNKNOWN_WRITES,
++	LAT_EXCEEDED,
++};
++
++static int __latency_exceeded(struct rq_wb *rwb, struct blk_rq_stat *stat)
++{
++	u64 thislat;
++
++	/*
++	 * If our stored sync issue exceeds the window size, or it
++	 * exceeds our min target AND we haven't logged any entries,
++	 * flag the latency as exceeded. wbt works off completion latencies,
++	 * but for a flooded device, a single sync IO can take a long time
++	 * to complete after being issued. If this time exceeds our
++	 * monitoring window AND we didn't see any other completions in that
++	 * window, then count that sync IO as a violation of the latency.
++	 */
++	thislat = rwb_sync_issue_lat(rwb);
++	if (thislat > rwb->cur_win_nsec ||
++	    (thislat > rwb->min_lat_nsec && !stat[0].nr_samples)) {
++		trace_wbt_lat(rwb->bdi, thislat);
++		return LAT_EXCEEDED;
++	}
++
++	/*
++	 * No read/write mix, if stat isn't valid
++	 */
++	if (!stat_sample_valid(stat)) {
++		/*
++		 * If we had writes in this stat window and the window is
++		 * current, we're only doing writes. If a task recently
++		 * waited or still has writes in flights, consider us doing
++		 * just writes as well.
++		 */
++		if ((stat[1].nr_samples && rwb->stat_ops->is_current(stat)) ||
++		    wb_recent_wait(rwb) || wbt_inflight(rwb))
++			return LAT_UNKNOWN_WRITES;
++		return LAT_UNKNOWN;
++	}
++
++	/*
++	 * If the 'min' latency exceeds our target, step down.
++	 */
++	if (stat[0].min > rwb->min_lat_nsec) {
++		trace_wbt_lat(rwb->bdi, stat[0].min);
++		trace_wbt_stat(rwb->bdi, stat);
++		return LAT_EXCEEDED;
++	}
++
++	if (rwb->scale_step)
++		trace_wbt_stat(rwb->bdi, stat);
++
++	return LAT_OK;
++}
++
++static int latency_exceeded(struct rq_wb *rwb)
++{
++	struct blk_rq_stat stat[2];
++
++	rwb->stat_ops->get(rwb->ops_data, stat);
++	return __latency_exceeded(rwb, stat);
++}
++
++static void rwb_trace_step(struct rq_wb *rwb, const char *msg)
++{
++	trace_wbt_step(rwb->bdi, msg, rwb->scale_step, rwb->cur_win_nsec,
++			rwb->wb_background, rwb->wb_normal, rwb->wb_max);
++}
++
++static void scale_up(struct rq_wb *rwb)
++{
++	/*
++	 * Hit max in previous round, stop here
++	 */
++	if (rwb->scaled_max)
++		return;
++
++	rwb->scale_step--;
++	rwb->unknown_cnt = 0;
++	rwb->stat_ops->clear(rwb->ops_data);
++
++	rwb->scaled_max = calc_wb_limits(rwb);
++
++	rwb_wake_all(rwb);
++
++	rwb_trace_step(rwb, "step up");
++}
++
++/*
++ * Scale rwb down. If 'hard_throttle' is set, do it quicker, since we
++ * had a latency violation.
++ */
++static void scale_down(struct rq_wb *rwb, bool hard_throttle)
++{
++	/*
++	 * Stop scaling down when we've hit the limit. This also prevents
++	 * ->scale_step from going to crazy values, if the device can't
++	 * keep up.
++	 */
++	if (rwb->wb_max == 1)
++		return;
++
++	if (rwb->scale_step < 0 && hard_throttle)
++		rwb->scale_step = 0;
++	else
++		rwb->scale_step++;
++
++	rwb->scaled_max = false;
++	rwb->unknown_cnt = 0;
++	rwb->stat_ops->clear(rwb->ops_data);
++	calc_wb_limits(rwb);
++	rwb_trace_step(rwb, "step down");
++}
++
++static void rwb_arm_timer(struct rq_wb *rwb)
++{
++	unsigned long expires;
++
++	if (rwb->scale_step > 0) {
++		/*
++		 * We should speed this up, using some variant of a fast
++		 * integer inverse square root calculation. Since we only do
++		 * this for every window expiration, it's not a huge deal,
++		 * though.
++		 */
++		rwb->cur_win_nsec = div_u64(rwb->win_nsec << 4,
++					int_sqrt((rwb->scale_step + 1) << 8));
++	} else {
++		/*
++		 * For step < 0, we don't want to increase/decrease the
++		 * window size.
++		 */
++		rwb->cur_win_nsec = rwb->win_nsec;
++	}
++
++	expires = jiffies + nsecs_to_jiffies(rwb->cur_win_nsec);
++	mod_timer(&rwb->window_timer, expires);
++}
++
++static void wb_timer_fn(unsigned long data)
++{
++	struct rq_wb *rwb = (struct rq_wb *) data;
++	unsigned int inflight = wbt_inflight(rwb);
++	int status;
++
++	status = latency_exceeded(rwb);
++
++	trace_wbt_timer(rwb->bdi, status, rwb->scale_step, inflight);
++
++	/*
++	 * If we exceeded the latency target, step down. If we did not,
++	 * step one level up. If we don't know enough to say either exceeded
++	 * or ok, then don't do anything.
++	 */
++	switch (status) {
++	case LAT_EXCEEDED:
++		scale_down(rwb, true);
++		break;
++	case LAT_OK:
++		scale_up(rwb);
++		break;
++	case LAT_UNKNOWN_WRITES:
++		scale_up(rwb);
++		break;
++	case LAT_UNKNOWN:
++		if (++rwb->unknown_cnt < RWB_UNKNOWN_BUMP)
++			break;
++		/*
++		 * We get here for two reasons:
++		 *
++		 * 1) We previously scaled reduced depth, and we currently
++		 *    don't have a valid read/write sample. For that case,
++		 *    slowly return to center state (step == 0).
++		 * 2) We started a the center step, but don't have a valid
++		 *    read/write sample, but we do have writes going on.
++		 *    Allow step to go negative, to increase write perf.
++		 */
++		if (rwb->scale_step > 0)
++			scale_up(rwb);
++		else if (rwb->scale_step < 0)
++			scale_down(rwb, false);
++		break;
++	default:
++		break;
++	}
++
++	/*
++	 * Re-arm timer, if we have IO in flight
++	 */
++	if (rwb->scale_step || inflight)
++		rwb_arm_timer(rwb);
++}
++
++void wbt_update_limits(struct rq_wb *rwb)
++{
++	rwb->scale_step = 0;
++	rwb->scaled_max = false;
++	calc_wb_limits(rwb);
++
++	rwb_wake_all(rwb);
++}
++
++static bool close_io(struct rq_wb *rwb)
++{
++	const unsigned long now = jiffies;
++
++	return time_before(now, rwb->last_issue + HZ / 10) ||
++		time_before(now, rwb->last_comp + HZ / 10);
++}
++
++#define REQ_HIPRIO	(REQ_SYNC | REQ_META | REQ_PRIO)
++
++static inline unsigned int get_limit(struct rq_wb *rwb, unsigned long rw)
++{
++	unsigned int limit;
++
++	/*
++	 * At this point we know it's a buffered write. If this is
++	 * kswapd trying to free memory, or REQ_SYNC is set, set, then
++	 * it's WB_SYNC_ALL writeback, and we'll use the max limit for
++	 * that. If the write is marked as a background write, then use
++	 * the idle limit, or go to normal if we haven't had competing
++	 * IO for a bit.
++	 */
++	if ((rw & REQ_HIPRIO) || wb_recent_wait(rwb) || current_is_kswapd())
++		limit = rwb->wb_max;
++	else if ((rw & REQ_BG) || close_io(rwb)) {
++		/*
++		 * If less than 100ms since we completed unrelated IO,
++		 * limit us to half the depth for background writeback.
++		 */
++		limit = rwb->wb_background;
++	} else
++		limit = rwb->wb_normal;
++
++	return limit;
++}
++
++static inline bool may_queue(struct rq_wb *rwb, struct rq_wait *rqw,
++			     unsigned long rw)
++{
++	/*
++	 * inc it here even if disabled, since we'll dec it at completion.
++	 * this only happens if the task was sleeping in __wbt_wait(),
++	 * and someone turned it off at the same time.
++	 */
++	if (!rwb_enabled(rwb)) {
++		atomic_inc(&rqw->inflight);
++		return true;
++	}
++
++	return atomic_inc_below(&rqw->inflight, get_limit(rwb, rw));
++}
++
++/*
++ * Block if we will exceed our limit, or if we are currently waiting for
++ * the timer to kick off queuing again.
++ */
++static void __wbt_wait(struct rq_wb *rwb, unsigned long rw, spinlock_t *lock)
++{
++	struct rq_wait *rqw = get_rq_wait(rwb, current_is_kswapd());
++	DEFINE_WAIT(wait);
++
++	if (may_queue(rwb, rqw, rw))
++		return;
++
++	do {
++		prepare_to_wait_exclusive(&rqw->wait, &wait,
++						TASK_UNINTERRUPTIBLE);
++
++		if (may_queue(rwb, rqw, rw))
++			break;
++
++		if (lock)
++			spin_unlock_irq(lock);
++
++		io_schedule();
++
++		if (lock)
++			spin_lock_irq(lock);
++	} while (1);
++
++	finish_wait(&rqw->wait, &wait);
++}
++
++static inline bool wbt_should_throttle(struct rq_wb *rwb, unsigned int rw)
++{
++	const int op = rw >> BIO_OP_SHIFT;
++
++	/*
++	 * If not a WRITE (or a discard), do nothing
++	 */
++	if (!(op == REQ_OP_WRITE || op == REQ_OP_DISCARD))
++		return false;
++
++	/*
++	 * Don't throttle WRITE_ODIRECT
++	 */
++	if ((rw & (REQ_SYNC | REQ_NOIDLE)) == REQ_SYNC)
++		return false;
++
++	return true;
++}
++
++/*
++ * Returns true if the IO request should be accounted, false if not.
++ * May sleep, if we have exceeded the writeback limits. Caller can pass
++ * in an irq held spinlock, if it holds one when calling this function.
++ * If we do sleep, we'll release and re-grab it.
++ */
++unsigned int wbt_wait(struct rq_wb *rwb, unsigned int rw, spinlock_t *lock)
++{
++	unsigned int ret = 0;
++
++	if (!rwb_enabled(rwb))
++		return 0;
++
++	if ((rw >> BIO_OP_SHIFT) == REQ_OP_READ)
++		ret = WBT_READ;
++
++	if (!wbt_should_throttle(rwb, rw)) {
++		if (ret & WBT_READ)
++			wb_timestamp(rwb, &rwb->last_issue);
++		return ret;
++	}
++
++	__wbt_wait(rwb, rw, lock);
++
++	if (!timer_pending(&rwb->window_timer))
++		rwb_arm_timer(rwb);
++
++	if (current_is_kswapd())
++		ret |= WBT_KSWAPD;
++
++	return ret | WBT_TRACKED;
++}
++
++void wbt_issue(struct rq_wb *rwb, struct wb_issue_stat *stat)
++{
++	if (!rwb_enabled(rwb))
++		return;
++
++	wbt_issue_stat_set_time(stat);
++
++	/*
++	 * Track sync issue, in case it takes a long time to complete. Allows
++	 * us to react quicker, if a sync IO takes a long time to complete.
++	 * Note that this is just a hint. 'stat' can go away when the
++	 * request completes, so it's important we never dereference it. We
++	 * only use the address to compare with, which is why we store the
++	 * sync_issue time locally.
++	 */
++	if (wbt_is_read(stat) && !rwb->sync_issue) {
++		rwb->sync_cookie = stat;
++		rwb->sync_issue = wbt_issue_stat_get_time(stat);
++	}
++}
++
++void wbt_requeue(struct rq_wb *rwb, struct wb_issue_stat *stat)
++{
++	if (!rwb_enabled(rwb))
++		return;
++	if (stat == rwb->sync_cookie) {
++		rwb->sync_issue = 0;
++		rwb->sync_cookie = NULL;
++	}
++}
++
++void wbt_set_queue_depth(struct rq_wb *rwb, unsigned int depth)
++{
++	if (rwb) {
++		rwb->queue_depth = depth;
++		wbt_update_limits(rwb);
++	}
++}
++
++void wbt_set_write_cache(struct rq_wb *rwb, bool write_cache_on)
++{
++	if (rwb)
++		rwb->wc = write_cache_on;
++}
++
++void wbt_disable(struct rq_wb *rwb)
++{
++	if (rwb) {
++		del_timer_sync(&rwb->window_timer);
++		rwb->win_nsec = rwb->min_lat_nsec = 0;
++		wbt_update_limits(rwb);
++	}
++}
++EXPORT_SYMBOL_GPL(wbt_disable);
++
++struct rq_wb *wbt_init(struct backing_dev_info *bdi, struct wb_stat_ops *ops,
++		       void *ops_data)
++{
++	struct rq_wb *rwb;
++	int i;
++
++	if (!ops->get || !ops->is_current || !ops->clear)
++		return ERR_PTR(-EINVAL);
++
++	rwb = kzalloc(sizeof(*rwb), GFP_KERNEL);
++	if (!rwb)
++		return ERR_PTR(-ENOMEM);
++
++	for (i = 0; i < WBT_NUM_RWQ; i++) {
++		atomic_set(&rwb->rq_wait[i].inflight, 0);
++		init_waitqueue_head(&rwb->rq_wait[i].wait);
++	}
++
++	setup_timer(&rwb->window_timer, wb_timer_fn, (unsigned long) rwb);
++	rwb->wc = 1;
++	rwb->queue_depth = RWB_DEF_DEPTH;
++	rwb->last_comp = rwb->last_issue = jiffies;
++	rwb->bdi = bdi;
++	rwb->win_nsec = RWB_WINDOW_NSEC;
++	rwb->stat_ops = ops;
++	rwb->ops_data = ops_data;
++	wbt_update_limits(rwb);
++	return rwb;
++}
++
++void wbt_exit(struct rq_wb *rwb)
++{
++	if (rwb) {
++		del_timer_sync(&rwb->window_timer);
++		kfree(rwb);
++	}
++}
 diff --git a/mm/Makefile b/mm/Makefile
 index 2ca1faf..6b9da3f 100644
 --- a/mm/Makefile
@@ -148780,6 +152311,18 @@ index 2ca1faf..6b9da3f 100644
  
  obj-y += init-mm.o
  
+diff --git a/mm/backing-dev.c b/mm/backing-dev.c
+index 8fde443..3bfed5ab 100644
+--- a/mm/backing-dev.c
++++ b/mm/backing-dev.c
+@@ -310,6 +310,7 @@ static int wb_init(struct bdi_writeback *wb, struct backing_dev_info *bdi,
+ 	spin_lock_init(&wb->work_lock);
+ 	INIT_LIST_HEAD(&wb->work_list);
+ 	INIT_DELAYED_WORK(&wb->dwork, wb_workfn);
++	wb->dirty_sleep = jiffies;
+ 
+ 	wb->congested = wb_congested_get_create(bdi, blkcg_id, gfp);
+ 	if (!wb->congested)
 diff --git a/mm/filemap.c b/mm/filemap.c
 index 2d0986a..ea47a7d 100644
 --- a/mm/filemap.c
@@ -149203,7 +152746,7 @@ index 95daf81..5086a29 100644
  	return ret;
  
 diff --git a/mm/page-writeback.c b/mm/page-writeback.c
-index f4cd7d8..6b2aceb 100644
+index f4cd7d8..8bc7e09 100644
 --- a/mm/page-writeback.c
 +++ b/mm/page-writeback.c
 @@ -70,7 +70,11 @@ static long ratelimit_pages = 32;
@@ -149230,6 +152773,14 @@ index f4cd7d8..6b2aceb 100644
  
  /*
   * vm_dirty_bytes starts at 0 (disabled) so that it is a function of
+@@ -1778,6 +1786,7 @@ pause:
+ 					  pause,
+ 					  start_time);
+ 		__set_current_state(TASK_KILLABLE);
++		wb->dirty_sleep = now;
+ 		io_schedule_timeout(pause);
+ 
+ 		current->dirty_paused_when = now + pause;
 diff --git a/mm/prfile.c b/mm/prfile.c
 new file mode 100644
 index 0000000..b323b8a
@@ -149349,6 +152900,477 @@ index 0fe8b71..ba0fad7 100644
  
  	trace_mm_vmscan_memcg_reclaim_end(nr_reclaimed);
  
+diff --git a/net/8021q/vlan.c b/net/8021q/vlan.c
+index 8de138d..f2531ad 100644
+--- a/net/8021q/vlan.c
++++ b/net/8021q/vlan.c
+@@ -664,7 +664,7 @@ static struct sk_buff **vlan_gro_receive(struct sk_buff **head,
+ 
+ 	skb_gro_pull(skb, sizeof(*vhdr));
+ 	skb_gro_postpull_rcsum(skb, vhdr, sizeof(*vhdr));
+-	pp = ptype->callbacks.gro_receive(head, skb);
++	pp = call_gro_receive(ptype->callbacks.gro_receive, head, skb);
+ 
+ out_unlock:
+ 	rcu_read_unlock();
+diff --git a/net/bridge/br_multicast.c b/net/bridge/br_multicast.c
+index c5fea93..2136e45 100644
+--- a/net/bridge/br_multicast.c
++++ b/net/bridge/br_multicast.c
+@@ -972,13 +972,12 @@ static void br_multicast_enable(struct bridge_mcast_own_query *query)
+ 		mod_timer(&query->timer, jiffies);
+ }
+ 
+-void br_multicast_enable_port(struct net_bridge_port *port)
++static void __br_multicast_enable_port(struct net_bridge_port *port)
+ {
+ 	struct net_bridge *br = port->br;
+ 
+-	spin_lock(&br->multicast_lock);
+ 	if (br->multicast_disabled || !netif_running(br->dev))
+-		goto out;
++		return;
+ 
+ 	br_multicast_enable(&port->ip4_own_query);
+ #if IS_ENABLED(CONFIG_IPV6)
+@@ -987,8 +986,14 @@ void br_multicast_enable_port(struct net_bridge_port *port)
+ 	if (port->multicast_router == MDB_RTR_TYPE_PERM &&
+ 	    hlist_unhashed(&port->rlist))
+ 		br_multicast_add_router(br, port);
++}
+ 
+-out:
++void br_multicast_enable_port(struct net_bridge_port *port)
++{
++	struct net_bridge *br = port->br;
++
++	spin_lock(&br->multicast_lock);
++	__br_multicast_enable_port(port);
+ 	spin_unlock(&br->multicast_lock);
+ }
+ 
+@@ -1994,8 +1999,9 @@ static void br_multicast_start_querier(struct net_bridge *br,
+ 
+ int br_multicast_toggle(struct net_bridge *br, unsigned long val)
+ {
+-	int err = 0;
+ 	struct net_bridge_mdb_htable *mdb;
++	struct net_bridge_port *port;
++	int err = 0;
+ 
+ 	spin_lock_bh(&br->multicast_lock);
+ 	if (br->multicast_disabled == !val)
+@@ -2023,10 +2029,9 @@ rollback:
+ 			goto rollback;
+ 	}
+ 
+-	br_multicast_start_querier(br, &br->ip4_own_query);
+-#if IS_ENABLED(CONFIG_IPV6)
+-	br_multicast_start_querier(br, &br->ip6_own_query);
+-#endif
++	br_multicast_open(br);
++	list_for_each_entry(port, &br->port_list, list)
++		__br_multicast_enable_port(port);
+ 
+ unlock:
+ 	spin_unlock_bh(&br->multicast_lock);
+diff --git a/net/core/dev.c b/net/core/dev.c
+index ea63120..44b3ba4 100644
+--- a/net/core/dev.c
++++ b/net/core/dev.c
+@@ -3035,6 +3035,7 @@ struct sk_buff *validate_xmit_skb_list(struct sk_buff *skb, struct net_device *d
+ 	}
+ 	return head;
+ }
++EXPORT_SYMBOL_GPL(validate_xmit_skb_list);
+ 
+ static void qdisc_pkt_len_init(struct sk_buff *skb)
+ {
+@@ -4496,6 +4497,7 @@ static enum gro_result dev_gro_receive(struct napi_struct *napi, struct sk_buff
+ 		NAPI_GRO_CB(skb)->flush = 0;
+ 		NAPI_GRO_CB(skb)->free = 0;
+ 		NAPI_GRO_CB(skb)->encap_mark = 0;
++		NAPI_GRO_CB(skb)->recursion_counter = 0;
+ 		NAPI_GRO_CB(skb)->is_fou = 0;
+ 		NAPI_GRO_CB(skb)->is_atomic = 1;
+ 		NAPI_GRO_CB(skb)->gro_remcsum_start = 0;
+@@ -5500,10 +5502,14 @@ struct net_device *netdev_all_lower_get_next_rcu(struct net_device *dev,
+ {
+ 	struct netdev_adjacent *lower;
+ 
+-	lower = list_first_or_null_rcu(&dev->all_adj_list.lower,
+-				       struct netdev_adjacent, list);
++	lower = list_entry_rcu((*iter)->next, struct netdev_adjacent, list);
++
++	if (&lower->list == &dev->all_adj_list.lower)
++		return NULL;
++
++	*iter = &lower->list;
+ 
+-	return lower ? lower->dev : NULL;
++	return lower->dev;
+ }
+ EXPORT_SYMBOL(netdev_all_lower_get_next_rcu);
+ 
+@@ -5578,6 +5584,7 @@ static inline bool netdev_adjacent_is_neigh_list(struct net_device *dev,
+ 
+ static int __netdev_adjacent_dev_insert(struct net_device *dev,
+ 					struct net_device *adj_dev,
++					u16 ref_nr,
+ 					struct list_head *dev_list,
+ 					void *private, bool master)
+ {
+@@ -5587,7 +5594,7 @@ static int __netdev_adjacent_dev_insert(struct net_device *dev,
+ 	adj = __netdev_find_adj(adj_dev, dev_list);
+ 
+ 	if (adj) {
+-		adj->ref_nr++;
++		adj->ref_nr += ref_nr;
+ 		return 0;
+ 	}
+ 
+@@ -5597,7 +5604,7 @@ static int __netdev_adjacent_dev_insert(struct net_device *dev,
+ 
+ 	adj->dev = adj_dev;
+ 	adj->master = master;
+-	adj->ref_nr = 1;
++	adj->ref_nr = ref_nr;
+ 	adj->private = private;
+ 	dev_hold(adj_dev);
+ 
+@@ -5636,6 +5643,7 @@ free_adj:
+ 
+ static void __netdev_adjacent_dev_remove(struct net_device *dev,
+ 					 struct net_device *adj_dev,
++					 u16 ref_nr,
+ 					 struct list_head *dev_list)
+ {
+ 	struct netdev_adjacent *adj;
+@@ -5648,10 +5656,10 @@ static void __netdev_adjacent_dev_remove(struct net_device *dev,
+ 		BUG();
+ 	}
+ 
+-	if (adj->ref_nr > 1) {
+-		pr_debug("%s to %s ref_nr-- = %d\n", dev->name, adj_dev->name,
+-			 adj->ref_nr-1);
+-		adj->ref_nr--;
++	if (adj->ref_nr > ref_nr) {
++		pr_debug("%s to %s ref_nr-%d = %d\n", dev->name, adj_dev->name,
++			 ref_nr, adj->ref_nr-ref_nr);
++		adj->ref_nr -= ref_nr;
+ 		return;
+ 	}
+ 
+@@ -5670,21 +5678,22 @@ static void __netdev_adjacent_dev_remove(struct net_device *dev,
+ 
+ static int __netdev_adjacent_dev_link_lists(struct net_device *dev,
+ 					    struct net_device *upper_dev,
++					    u16 ref_nr,
+ 					    struct list_head *up_list,
+ 					    struct list_head *down_list,
+ 					    void *private, bool master)
+ {
+ 	int ret;
+ 
+-	ret = __netdev_adjacent_dev_insert(dev, upper_dev, up_list, private,
+-					   master);
++	ret = __netdev_adjacent_dev_insert(dev, upper_dev, ref_nr, up_list,
++					   private, master);
+ 	if (ret)
+ 		return ret;
+ 
+-	ret = __netdev_adjacent_dev_insert(upper_dev, dev, down_list, private,
+-					   false);
++	ret = __netdev_adjacent_dev_insert(upper_dev, dev, ref_nr, down_list,
++					   private, false);
+ 	if (ret) {
+-		__netdev_adjacent_dev_remove(dev, upper_dev, up_list);
++		__netdev_adjacent_dev_remove(dev, upper_dev, ref_nr, up_list);
+ 		return ret;
+ 	}
+ 
+@@ -5692,9 +5701,10 @@ static int __netdev_adjacent_dev_link_lists(struct net_device *dev,
+ }
+ 
+ static int __netdev_adjacent_dev_link(struct net_device *dev,
+-				      struct net_device *upper_dev)
++				      struct net_device *upper_dev,
++				      u16 ref_nr)
+ {
+-	return __netdev_adjacent_dev_link_lists(dev, upper_dev,
++	return __netdev_adjacent_dev_link_lists(dev, upper_dev, ref_nr,
+ 						&dev->all_adj_list.upper,
+ 						&upper_dev->all_adj_list.lower,
+ 						NULL, false);
+@@ -5702,17 +5712,19 @@ static int __netdev_adjacent_dev_link(struct net_device *dev,
+ 
+ static void __netdev_adjacent_dev_unlink_lists(struct net_device *dev,
+ 					       struct net_device *upper_dev,
++					       u16 ref_nr,
+ 					       struct list_head *up_list,
+ 					       struct list_head *down_list)
+ {
+-	__netdev_adjacent_dev_remove(dev, upper_dev, up_list);
+-	__netdev_adjacent_dev_remove(upper_dev, dev, down_list);
++	__netdev_adjacent_dev_remove(dev, upper_dev, ref_nr, up_list);
++	__netdev_adjacent_dev_remove(upper_dev, dev, ref_nr, down_list);
+ }
+ 
+ static void __netdev_adjacent_dev_unlink(struct net_device *dev,
+-					 struct net_device *upper_dev)
++					 struct net_device *upper_dev,
++					 u16 ref_nr)
+ {
+-	__netdev_adjacent_dev_unlink_lists(dev, upper_dev,
++	__netdev_adjacent_dev_unlink_lists(dev, upper_dev, ref_nr,
+ 					   &dev->all_adj_list.upper,
+ 					   &upper_dev->all_adj_list.lower);
+ }
+@@ -5721,17 +5733,17 @@ static int __netdev_adjacent_dev_link_neighbour(struct net_device *dev,
+ 						struct net_device *upper_dev,
+ 						void *private, bool master)
+ {
+-	int ret = __netdev_adjacent_dev_link(dev, upper_dev);
++	int ret = __netdev_adjacent_dev_link(dev, upper_dev, 1);
+ 
+ 	if (ret)
+ 		return ret;
+ 
+-	ret = __netdev_adjacent_dev_link_lists(dev, upper_dev,
++	ret = __netdev_adjacent_dev_link_lists(dev, upper_dev, 1,
+ 					       &dev->adj_list.upper,
+ 					       &upper_dev->adj_list.lower,
+ 					       private, master);
+ 	if (ret) {
+-		__netdev_adjacent_dev_unlink(dev, upper_dev);
++		__netdev_adjacent_dev_unlink(dev, upper_dev, 1);
+ 		return ret;
+ 	}
+ 
+@@ -5741,8 +5753,8 @@ static int __netdev_adjacent_dev_link_neighbour(struct net_device *dev,
+ static void __netdev_adjacent_dev_unlink_neighbour(struct net_device *dev,
+ 						   struct net_device *upper_dev)
+ {
+-	__netdev_adjacent_dev_unlink(dev, upper_dev);
+-	__netdev_adjacent_dev_unlink_lists(dev, upper_dev,
++	__netdev_adjacent_dev_unlink(dev, upper_dev, 1);
++	__netdev_adjacent_dev_unlink_lists(dev, upper_dev, 1,
+ 					   &dev->adj_list.upper,
+ 					   &upper_dev->adj_list.lower);
+ }
+@@ -5795,7 +5807,7 @@ static int __netdev_upper_dev_link(struct net_device *dev,
+ 		list_for_each_entry(j, &upper_dev->all_adj_list.upper, list) {
+ 			pr_debug("Interlinking %s with %s, non-neighbour\n",
+ 				 i->dev->name, j->dev->name);
+-			ret = __netdev_adjacent_dev_link(i->dev, j->dev);
++			ret = __netdev_adjacent_dev_link(i->dev, j->dev, i->ref_nr);
+ 			if (ret)
+ 				goto rollback_mesh;
+ 		}
+@@ -5805,7 +5817,7 @@ static int __netdev_upper_dev_link(struct net_device *dev,
+ 	list_for_each_entry(i, &upper_dev->all_adj_list.upper, list) {
+ 		pr_debug("linking %s's upper device %s with %s\n",
+ 			 upper_dev->name, i->dev->name, dev->name);
+-		ret = __netdev_adjacent_dev_link(dev, i->dev);
++		ret = __netdev_adjacent_dev_link(dev, i->dev, i->ref_nr);
+ 		if (ret)
+ 			goto rollback_upper_mesh;
+ 	}
+@@ -5814,7 +5826,7 @@ static int __netdev_upper_dev_link(struct net_device *dev,
+ 	list_for_each_entry(i, &dev->all_adj_list.lower, list) {
+ 		pr_debug("linking %s's lower device %s with %s\n", dev->name,
+ 			 i->dev->name, upper_dev->name);
+-		ret = __netdev_adjacent_dev_link(i->dev, upper_dev);
++		ret = __netdev_adjacent_dev_link(i->dev, upper_dev, i->ref_nr);
+ 		if (ret)
+ 			goto rollback_lower_mesh;
+ 	}
+@@ -5832,7 +5844,7 @@ rollback_lower_mesh:
+ 	list_for_each_entry(i, &dev->all_adj_list.lower, list) {
+ 		if (i == to_i)
+ 			break;
+-		__netdev_adjacent_dev_unlink(i->dev, upper_dev);
++		__netdev_adjacent_dev_unlink(i->dev, upper_dev, i->ref_nr);
+ 	}
+ 
+ 	i = NULL;
+@@ -5842,7 +5854,7 @@ rollback_upper_mesh:
+ 	list_for_each_entry(i, &upper_dev->all_adj_list.upper, list) {
+ 		if (i == to_i)
+ 			break;
+-		__netdev_adjacent_dev_unlink(dev, i->dev);
++		__netdev_adjacent_dev_unlink(dev, i->dev, i->ref_nr);
+ 	}
+ 
+ 	i = j = NULL;
+@@ -5854,7 +5866,7 @@ rollback_mesh:
+ 		list_for_each_entry(j, &upper_dev->all_adj_list.upper, list) {
+ 			if (i == to_i && j == to_j)
+ 				break;
+-			__netdev_adjacent_dev_unlink(i->dev, j->dev);
++			__netdev_adjacent_dev_unlink(i->dev, j->dev, i->ref_nr);
+ 		}
+ 		if (i == to_i)
+ 			break;
+@@ -5934,16 +5946,16 @@ void netdev_upper_dev_unlink(struct net_device *dev,
+ 	 */
+ 	list_for_each_entry(i, &dev->all_adj_list.lower, list)
+ 		list_for_each_entry(j, &upper_dev->all_adj_list.upper, list)
+-			__netdev_adjacent_dev_unlink(i->dev, j->dev);
++			__netdev_adjacent_dev_unlink(i->dev, j->dev, i->ref_nr);
+ 
+ 	/* remove also the devices itself from lower/upper device
+ 	 * list
+ 	 */
+ 	list_for_each_entry(i, &dev->all_adj_list.lower, list)
+-		__netdev_adjacent_dev_unlink(i->dev, upper_dev);
++		__netdev_adjacent_dev_unlink(i->dev, upper_dev, i->ref_nr);
+ 
+ 	list_for_each_entry(i, &upper_dev->all_adj_list.upper, list)
+-		__netdev_adjacent_dev_unlink(dev, i->dev);
++		__netdev_adjacent_dev_unlink(dev, i->dev, i->ref_nr);
+ 
+ 	call_netdevice_notifiers_info(NETDEV_CHANGEUPPER, dev,
+ 				      &changeupper_info.info);
+diff --git a/net/core/pktgen.c b/net/core/pktgen.c
+index bbd118b..306b8f0 100644
+--- a/net/core/pktgen.c
++++ b/net/core/pktgen.c
+@@ -216,8 +216,8 @@
+ #define M_QUEUE_XMIT		2	/* Inject packet into qdisc */
+ 
+ /* If lock -- protects updating of if_list */
+-#define   if_lock(t)           spin_lock(&(t->if_lock));
+-#define   if_unlock(t)           spin_unlock(&(t->if_lock));
++#define   if_lock(t)           mutex_lock(&(t->if_lock));
++#define   if_unlock(t)           mutex_unlock(&(t->if_lock));
+ 
+ /* Used to help with determining the pkts on receive */
+ #define PKTGEN_MAGIC 0xbe9be955
+@@ -423,7 +423,7 @@ struct pktgen_net {
+ };
+ 
+ struct pktgen_thread {
+-	spinlock_t if_lock;		/* for list of devices */
++	struct mutex if_lock;		/* for list of devices */
+ 	struct list_head if_list;	/* All device here */
+ 	struct list_head th_list;
+ 	struct task_struct *tsk;
+@@ -2010,11 +2010,13 @@ static void pktgen_change_name(const struct pktgen_net *pn, struct net_device *d
+ {
+ 	struct pktgen_thread *t;
+ 
++	mutex_lock(&pktgen_thread_lock);
++
+ 	list_for_each_entry(t, &pn->pktgen_threads, th_list) {
+ 		struct pktgen_dev *pkt_dev;
+ 
+-		rcu_read_lock();
+-		list_for_each_entry_rcu(pkt_dev, &t->if_list, list) {
++		if_lock(t);
++		list_for_each_entry(pkt_dev, &t->if_list, list) {
+ 			if (pkt_dev->odev != dev)
+ 				continue;
+ 
+@@ -2029,8 +2031,9 @@ static void pktgen_change_name(const struct pktgen_net *pn, struct net_device *d
+ 				       dev->name);
+ 			break;
+ 		}
+-		rcu_read_unlock();
++		if_unlock(t);
+ 	}
++	mutex_unlock(&pktgen_thread_lock);
+ }
+ 
+ static int pktgen_device_event(struct notifier_block *unused,
+@@ -2286,7 +2289,7 @@ out:
+ 
+ static inline void set_pkt_overhead(struct pktgen_dev *pkt_dev)
+ {
+-	pkt_dev->pkt_overhead = LL_RESERVED_SPACE(pkt_dev->odev);
++	pkt_dev->pkt_overhead = 0;
+ 	pkt_dev->pkt_overhead += pkt_dev->nr_labels*sizeof(u32);
+ 	pkt_dev->pkt_overhead += VLAN_TAG_SIZE(pkt_dev);
+ 	pkt_dev->pkt_overhead += SVLAN_TAG_SIZE(pkt_dev);
+@@ -2777,13 +2780,13 @@ static void pktgen_finalize_skb(struct pktgen_dev *pkt_dev, struct sk_buff *skb,
+ }
+ 
+ static struct sk_buff *pktgen_alloc_skb(struct net_device *dev,
+-					struct pktgen_dev *pkt_dev,
+-					unsigned int extralen)
++					struct pktgen_dev *pkt_dev)
+ {
++	unsigned int extralen = LL_RESERVED_SPACE(dev);
+ 	struct sk_buff *skb = NULL;
+-	unsigned int size = pkt_dev->cur_pkt_size + 64 + extralen +
+-			    pkt_dev->pkt_overhead;
++	unsigned int size;
+ 
++	size = pkt_dev->cur_pkt_size + 64 + extralen + pkt_dev->pkt_overhead;
+ 	if (pkt_dev->flags & F_NODE) {
+ 		int node = pkt_dev->node >= 0 ? pkt_dev->node : numa_node_id();
+ 
+@@ -2796,8 +2799,9 @@ static struct sk_buff *pktgen_alloc_skb(struct net_device *dev,
+ 		 skb = __netdev_alloc_skb(dev, size, GFP_NOWAIT);
+ 	}
+ 
++	/* the caller pre-fetches from skb->data and reserves for the mac hdr */
+ 	if (likely(skb))
+-		skb_reserve(skb, LL_RESERVED_SPACE(dev));
++		skb_reserve(skb, extralen - 16);
+ 
+ 	return skb;
+ }
+@@ -2830,16 +2834,14 @@ static struct sk_buff *fill_packet_ipv4(struct net_device *odev,
+ 	mod_cur_headers(pkt_dev);
+ 	queue_map = pkt_dev->cur_queue_map;
+ 
+-	datalen = (odev->hard_header_len + 16) & ~0xf;
+-
+-	skb = pktgen_alloc_skb(odev, pkt_dev, datalen);
++	skb = pktgen_alloc_skb(odev, pkt_dev);
+ 	if (!skb) {
+ 		sprintf(pkt_dev->result, "No memory");
+ 		return NULL;
+ 	}
+ 
+ 	prefetchw(skb->data);
+-	skb_reserve(skb, datalen);
++	skb_reserve(skb, 16);
+ 
+ 	/*  Reserve for ethernet and IP header  */
+ 	eth = (__u8 *) skb_push(skb, 14);
+@@ -2959,7 +2961,7 @@ static struct sk_buff *fill_packet_ipv6(struct net_device *odev,
+ 	mod_cur_headers(pkt_dev);
+ 	queue_map = pkt_dev->cur_queue_map;
+ 
+-	skb = pktgen_alloc_skb(odev, pkt_dev, 16);
++	skb = pktgen_alloc_skb(odev, pkt_dev);
+ 	if (!skb) {
+ 		sprintf(pkt_dev->result, "No memory");
+ 		return NULL;
+@@ -3763,7 +3765,7 @@ static int __net_init pktgen_create_thread(int cpu, struct pktgen_net *pn)
+ 		return -ENOMEM;
+ 	}
+ 
+-	spin_lock_init(&t->if_lock);
++	mutex_init(&t->if_lock);
+ 	t->cpu = cpu;
+ 
+ 	INIT_LIST_HEAD(&t->if_list);
+diff --git a/net/ethernet/eth.c b/net/ethernet/eth.c
+index 66dff5e..02acfff 100644
+--- a/net/ethernet/eth.c
++++ b/net/ethernet/eth.c
+@@ -439,7 +439,7 @@ struct sk_buff **eth_gro_receive(struct sk_buff **head,
+ 
+ 	skb_gro_pull(skb, sizeof(*eh));
+ 	skb_gro_postpull_rcsum(skb, eh, sizeof(*eh));
+-	pp = ptype->callbacks.gro_receive(head, skb);
++	pp = call_gro_receive(ptype->callbacks.gro_receive, head, skb);
+ 
+ out_unlock:
+ 	rcu_read_unlock();
 diff --git a/net/ipv4/Kconfig b/net/ipv4/Kconfig
 index 50d6a9b..21a240a 100644
 --- a/net/ipv4/Kconfig
@@ -149371,6 +153393,298 @@ index 50d6a9b..21a240a 100644
  	default "westwood" if DEFAULT_WESTWOOD
  	default "veno" if DEFAULT_VENO
  	default "reno" if DEFAULT_RENO
+diff --git a/net/ipv4/af_inet.c b/net/ipv4/af_inet.c
+index 55513e6..eebbc0f 100644
+--- a/net/ipv4/af_inet.c
++++ b/net/ipv4/af_inet.c
+@@ -1388,7 +1388,7 @@ struct sk_buff **inet_gro_receive(struct sk_buff **head, struct sk_buff *skb)
+ 	skb_gro_pull(skb, sizeof(*iph));
+ 	skb_set_transport_header(skb, skb_gro_offset(skb));
+ 
+-	pp = ops->callbacks.gro_receive(head, skb);
++	pp = call_gro_receive(ops->callbacks.gro_receive, head, skb);
+ 
+ out_unlock:
+ 	rcu_read_unlock();
+diff --git a/net/ipv4/fou.c b/net/ipv4/fou.c
+index 321d57f..5351b61 100644
+--- a/net/ipv4/fou.c
++++ b/net/ipv4/fou.c
+@@ -249,7 +249,7 @@ static struct sk_buff **fou_gro_receive(struct sock *sk,
+ 	if (!ops || !ops->callbacks.gro_receive)
+ 		goto out_unlock;
+ 
+-	pp = ops->callbacks.gro_receive(head, skb);
++	pp = call_gro_receive(ops->callbacks.gro_receive, head, skb);
+ 
+ out_unlock:
+ 	rcu_read_unlock();
+@@ -441,7 +441,7 @@ next_proto:
+ 	if (WARN_ON_ONCE(!ops || !ops->callbacks.gro_receive))
+ 		goto out_unlock;
+ 
+-	pp = ops->callbacks.gro_receive(head, skb);
++	pp = call_gro_receive(ops->callbacks.gro_receive, head, skb);
+ 	flush = 0;
+ 
+ out_unlock:
+diff --git a/net/ipv4/gre_offload.c b/net/ipv4/gre_offload.c
+index ecd1e09..6871f59 100644
+--- a/net/ipv4/gre_offload.c
++++ b/net/ipv4/gre_offload.c
+@@ -227,7 +227,7 @@ static struct sk_buff **gre_gro_receive(struct sk_buff **head,
+ 	/* Adjusted NAPI_GRO_CB(skb)->csum after skb_gro_pull()*/
+ 	skb_gro_postpull_rcsum(skb, greh, grehlen);
+ 
+-	pp = ptype->callbacks.gro_receive(head, skb);
++	pp = call_gro_receive(ptype->callbacks.gro_receive, head, skb);
+ 	flush = 0;
+ 
+ out_unlock:
+diff --git a/net/ipv4/ip_sockglue.c b/net/ipv4/ip_sockglue.c
+index 71a52f4d..11ef96e 100644
+--- a/net/ipv4/ip_sockglue.c
++++ b/net/ipv4/ip_sockglue.c
+@@ -98,7 +98,7 @@ static void ip_cmsg_recv_retopts(struct msghdr *msg, struct sk_buff *skb)
+ }
+ 
+ static void ip_cmsg_recv_checksum(struct msghdr *msg, struct sk_buff *skb,
+-				  int offset)
++				  int tlen, int offset)
+ {
+ 	__wsum csum = skb->csum;
+ 
+@@ -106,8 +106,9 @@ static void ip_cmsg_recv_checksum(struct msghdr *msg, struct sk_buff *skb,
+ 		return;
+ 
+ 	if (offset != 0)
+-		csum = csum_sub(csum, csum_partial(skb_transport_header(skb),
+-						   offset, 0));
++		csum = csum_sub(csum,
++				csum_partial(skb_transport_header(skb) + tlen,
++					     offset, 0));
+ 
+ 	put_cmsg(msg, SOL_IP, IP_CHECKSUM, sizeof(__wsum), &csum);
+ }
+@@ -153,7 +154,7 @@ static void ip_cmsg_recv_dstaddr(struct msghdr *msg, struct sk_buff *skb)
+ }
+ 
+ void ip_cmsg_recv_offset(struct msghdr *msg, struct sk_buff *skb,
+-			 int offset)
++			 int tlen, int offset)
+ {
+ 	struct inet_sock *inet = inet_sk(skb->sk);
+ 	unsigned int flags = inet->cmsg_flags;
+@@ -216,7 +217,7 @@ void ip_cmsg_recv_offset(struct msghdr *msg, struct sk_buff *skb,
+ 	}
+ 
+ 	if (flags & IP_CMSG_CHECKSUM)
+-		ip_cmsg_recv_checksum(msg, skb, offset);
++		ip_cmsg_recv_checksum(msg, skb, tlen, offset);
+ }
+ EXPORT_SYMBOL(ip_cmsg_recv_offset);
+ 
+diff --git a/net/ipv4/sysctl_net_ipv4.c b/net/ipv4/sysctl_net_ipv4.c
+index 1cb67de..80bc36b 100644
+--- a/net/ipv4/sysctl_net_ipv4.c
++++ b/net/ipv4/sysctl_net_ipv4.c
+@@ -96,11 +96,11 @@ static void inet_get_ping_group_range_table(struct ctl_table *table, kgid_t *low
+ 		container_of(table->data, struct net, ipv4.ping_group_range.range);
+ 	unsigned int seq;
+ 	do {
+-		seq = read_seqbegin(&net->ipv4.ip_local_ports.lock);
++		seq = read_seqbegin(&net->ipv4.ping_group_range.lock);
+ 
+ 		*low = data[0];
+ 		*high = data[1];
+-	} while (read_seqretry(&net->ipv4.ip_local_ports.lock, seq));
++	} while (read_seqretry(&net->ipv4.ping_group_range.lock, seq));
+ }
+ 
+ /* Update system visible IP port range */
+@@ -109,10 +109,10 @@ static void set_ping_group_range(struct ctl_table *table, kgid_t low, kgid_t hig
+ 	kgid_t *data = table->data;
+ 	struct net *net =
+ 		container_of(table->data, struct net, ipv4.ping_group_range.range);
+-	write_seqlock(&net->ipv4.ip_local_ports.lock);
++	write_seqlock(&net->ipv4.ping_group_range.lock);
+ 	data[0] = low;
+ 	data[1] = high;
+-	write_sequnlock(&net->ipv4.ip_local_ports.lock);
++	write_sequnlock(&net->ipv4.ping_group_range.lock);
+ }
+ 
+ /* Validate changes from /proc interface. */
+diff --git a/net/ipv4/udp.c b/net/ipv4/udp.c
+index 5fdcb8d..c0d71e7 100644
+--- a/net/ipv4/udp.c
++++ b/net/ipv4/udp.c
+@@ -1327,7 +1327,7 @@ try_again:
+ 		*addr_len = sizeof(*sin);
+ 	}
+ 	if (inet->cmsg_flags)
+-		ip_cmsg_recv_offset(msg, skb, sizeof(struct udphdr) + off);
++		ip_cmsg_recv_offset(msg, skb, sizeof(struct udphdr), off);
+ 
+ 	err = copied;
+ 	if (flags & MSG_TRUNC)
+diff --git a/net/ipv4/udp_offload.c b/net/ipv4/udp_offload.c
+index 81f253b..6de9f97 100644
+--- a/net/ipv4/udp_offload.c
++++ b/net/ipv4/udp_offload.c
+@@ -293,7 +293,7 @@ unflush:
+ 
+ 	skb_gro_pull(skb, sizeof(struct udphdr)); /* pull encapsulating udp header */
+ 	skb_gro_postpull_rcsum(skb, uh, sizeof(struct udphdr));
+-	pp = udp_sk(sk)->gro_receive(sk, head, skb);
++	pp = call_gro_receive_sk(udp_sk(sk)->gro_receive, sk, head, skb);
+ 
+ out_unlock:
+ 	rcu_read_unlock();
+diff --git a/net/ipv6/addrconf.c b/net/ipv6/addrconf.c
+index 2f1f5d4..f5432d6 100644
+--- a/net/ipv6/addrconf.c
++++ b/net/ipv6/addrconf.c
+@@ -2995,7 +2995,7 @@ static void init_loopback(struct net_device *dev)
+ 				 * lo device down, release this obsolete dst and
+ 				 * reallocate a new router for ifa.
+ 				 */
+-				if (sp_ifa->rt->dst.obsolete > 0) {
++				if (!atomic_read(&sp_ifa->rt->rt6i_ref)) {
+ 					ip6_rt_put(sp_ifa->rt);
+ 					sp_ifa->rt = NULL;
+ 				} else {
+diff --git a/net/ipv6/ip6_offload.c b/net/ipv6/ip6_offload.c
+index 22e90e5..a09418b 100644
+--- a/net/ipv6/ip6_offload.c
++++ b/net/ipv6/ip6_offload.c
+@@ -243,7 +243,7 @@ static struct sk_buff **ipv6_gro_receive(struct sk_buff **head,
+ 
+ 	skb_gro_postpull_rcsum(skb, iph, nlen);
+ 
+-	pp = ops->callbacks.gro_receive(head, skb);
++	pp = call_gro_receive(ops->callbacks.gro_receive, head, skb);
+ 
+ out_unlock:
+ 	rcu_read_unlock();
+diff --git a/net/ipv6/ip6_tunnel.c b/net/ipv6/ip6_tunnel.c
+index 888543d..41489f3 100644
+--- a/net/ipv6/ip6_tunnel.c
++++ b/net/ipv6/ip6_tunnel.c
+@@ -155,6 +155,7 @@ ip6_tnl_lookup(struct net *net, const struct in6_addr *remote, const struct in6_
+ 	hash = HASH(&any, local);
+ 	for_each_ip6_tunnel_rcu(ip6n->tnls_r_l[hash]) {
+ 		if (ipv6_addr_equal(local, &t->parms.laddr) &&
++		    ipv6_addr_any(&t->parms.raddr) &&
+ 		    (t->dev->flags & IFF_UP))
+ 			return t;
+ 	}
+@@ -162,6 +163,7 @@ ip6_tnl_lookup(struct net *net, const struct in6_addr *remote, const struct in6_
+ 	hash = HASH(remote, &any);
+ 	for_each_ip6_tunnel_rcu(ip6n->tnls_r_l[hash]) {
+ 		if (ipv6_addr_equal(remote, &t->parms.raddr) &&
++		    ipv6_addr_any(&t->parms.laddr) &&
+ 		    (t->dev->flags & IFF_UP))
+ 			return t;
+ 	}
+@@ -1132,6 +1134,7 @@ int ip6_tnl_xmit(struct sk_buff *skb, struct net_device *dev, __u8 dsfield,
+ 	if (err)
+ 		return err;
+ 
++	skb->protocol = htons(ETH_P_IPV6);
+ 	skb_push(skb, sizeof(struct ipv6hdr));
+ 	skb_reset_network_header(skb);
+ 	ipv6h = ipv6_hdr(skb);
+diff --git a/net/ipv6/route.c b/net/ipv6/route.c
+index 269218a..23153ac 100644
+--- a/net/ipv6/route.c
++++ b/net/ipv6/route.c
+@@ -656,7 +656,8 @@ static struct rt6_info *find_match(struct rt6_info *rt, int oif, int strict,
+ 	struct net_device *dev = rt->dst.dev;
+ 
+ 	if (dev && !netif_carrier_ok(dev) &&
+-	    idev->cnf.ignore_routes_with_linkdown)
++	    idev->cnf.ignore_routes_with_linkdown &&
++	    !(strict & RT6_LOOKUP_F_IGNORE_LINKSTATE))
+ 		goto out;
+ 
+ 	if (rt6_check_expired(rt))
+@@ -1050,6 +1051,7 @@ struct rt6_info *ip6_pol_route(struct net *net, struct fib6_table *table,
+ 	int strict = 0;
+ 
+ 	strict |= flags & RT6_LOOKUP_F_IFACE;
++	strict |= flags & RT6_LOOKUP_F_IGNORE_LINKSTATE;
+ 	if (net->ipv6.devconf_all->forwarding == 0)
+ 		strict |= RT6_LOOKUP_F_REACHABLE;
+ 
+@@ -1783,7 +1785,7 @@ static struct rt6_info *ip6_nh_lookup_table(struct net *net,
+ 	};
+ 	struct fib6_table *table;
+ 	struct rt6_info *rt;
+-	int flags = RT6_LOOKUP_F_IFACE;
++	int flags = RT6_LOOKUP_F_IFACE | RT6_LOOKUP_F_IGNORE_LINKSTATE;
+ 
+ 	table = fib6_get_table(net, cfg->fc_table);
+ 	if (!table)
+diff --git a/net/ipv6/tcp_ipv6.c b/net/ipv6/tcp_ipv6.c
+index 94f4f89..fc67822 100644
+--- a/net/ipv6/tcp_ipv6.c
++++ b/net/ipv6/tcp_ipv6.c
+@@ -1193,6 +1193,16 @@ out:
+ 	return NULL;
+ }
+ 
++static void tcp_v6_restore_cb(struct sk_buff *skb)
++{
++	/* We need to move header back to the beginning if xfrm6_policy_check()
++	 * and tcp_v6_fill_cb() are going to be called again.
++	 * ip6_datagram_recv_specific_ctl() also expects IP6CB to be there.
++	 */
++	memmove(IP6CB(skb), &TCP_SKB_CB(skb)->header.h6,
++		sizeof(struct inet6_skb_parm));
++}
++
+ /* The socket must have it's spinlock held when we get
+  * here, unless it is a TCP_LISTEN socket.
+  *
+@@ -1322,6 +1332,7 @@ ipv6_pktoptions:
+ 			np->flow_label = ip6_flowlabel(ipv6_hdr(opt_skb));
+ 		if (ipv6_opt_accepted(sk, opt_skb, &TCP_SKB_CB(opt_skb)->header.h6)) {
+ 			skb_set_owner_r(opt_skb, sk);
++			tcp_v6_restore_cb(opt_skb);
+ 			opt_skb = xchg(&np->pktoptions, opt_skb);
+ 		} else {
+ 			__kfree_skb(opt_skb);
+@@ -1355,15 +1366,6 @@ static void tcp_v6_fill_cb(struct sk_buff *skb, const struct ipv6hdr *hdr,
+ 	TCP_SKB_CB(skb)->sacked = 0;
+ }
+ 
+-static void tcp_v6_restore_cb(struct sk_buff *skb)
+-{
+-	/* We need to move header back to the beginning if xfrm6_policy_check()
+-	 * and tcp_v6_fill_cb() are going to be called again.
+-	 */
+-	memmove(IP6CB(skb), &TCP_SKB_CB(skb)->header.h6,
+-		sizeof(struct inet6_skb_parm));
+-}
+-
+ static int tcp_v6_rcv(struct sk_buff *skb)
+ {
+ 	const struct tcphdr *th;
+diff --git a/net/ipv6/udp.c b/net/ipv6/udp.c
+index 19ac3a1..c2a8656 100644
+--- a/net/ipv6/udp.c
++++ b/net/ipv6/udp.c
+@@ -427,7 +427,8 @@ try_again:
+ 
+ 	if (is_udp4) {
+ 		if (inet->cmsg_flags)
+-			ip_cmsg_recv(msg, skb);
++			ip_cmsg_recv_offset(msg, skb,
++					    sizeof(struct udphdr), off);
+ 	} else {
+ 		if (np->rxopt.all)
+ 			ip6_datagram_recv_specific_ctl(sk, msg, skb);
 diff --git a/net/mac80211/rx.c b/net/mac80211/rx.c
 index 9dce3b1..59a9603 100644
 --- a/net/mac80211/rx.c
@@ -149419,6 +153733,247 @@ index 018eed7..8668a5c 100644
  
  	if (info->flags & XT_NFLOG_F_COPY_LEN)
  		li.u.ulog.flags |= NF_LOG_F_COPY_LEN;
+diff --git a/net/netlink/af_netlink.c b/net/netlink/af_netlink.c
+index 627f898..62bea45 100644
+--- a/net/netlink/af_netlink.c
++++ b/net/netlink/af_netlink.c
+@@ -1832,7 +1832,7 @@ static int netlink_recvmsg(struct socket *sock, struct msghdr *msg, size_t len,
+ 	/* Record the max length of recvmsg() calls for future allocations */
+ 	nlk->max_recvmsg_len = max(nlk->max_recvmsg_len, len);
+ 	nlk->max_recvmsg_len = min_t(size_t, nlk->max_recvmsg_len,
+-				     16384);
++				     SKB_WITH_OVERHEAD(32768));
+ 
+ 	copied = data_skb->len;
+ 	if (len < copied) {
+@@ -2083,8 +2083,9 @@ static int netlink_dump(struct sock *sk)
+ 
+ 	if (alloc_min_size < nlk->max_recvmsg_len) {
+ 		alloc_size = nlk->max_recvmsg_len;
+-		skb = alloc_skb(alloc_size, GFP_KERNEL |
+-					    __GFP_NOWARN | __GFP_NORETRY);
++		skb = alloc_skb(alloc_size,
++				(GFP_KERNEL & ~__GFP_DIRECT_RECLAIM) |
++				__GFP_NOWARN | __GFP_NORETRY);
+ 	}
+ 	if (!skb) {
+ 		alloc_size = alloc_min_size;
+diff --git a/net/packet/af_packet.c b/net/packet/af_packet.c
+index 33a4697..d2238b2 100644
+--- a/net/packet/af_packet.c
++++ b/net/packet/af_packet.c
+@@ -250,7 +250,7 @@ static void __fanout_link(struct sock *sk, struct packet_sock *po);
+ static int packet_direct_xmit(struct sk_buff *skb)
+ {
+ 	struct net_device *dev = skb->dev;
+-	netdev_features_t features;
++	struct sk_buff *orig_skb = skb;
+ 	struct netdev_queue *txq;
+ 	int ret = NETDEV_TX_BUSY;
+ 
+@@ -258,9 +258,8 @@ static int packet_direct_xmit(struct sk_buff *skb)
+ 		     !netif_carrier_ok(dev)))
+ 		goto drop;
+ 
+-	features = netif_skb_features(skb);
+-	if (skb_needs_linearize(skb, features) &&
+-	    __skb_linearize(skb))
++	skb = validate_xmit_skb_list(skb, dev);
++	if (skb != orig_skb)
+ 		goto drop;
+ 
+ 	txq = skb_get_tx_queue(dev, skb);
+@@ -280,7 +279,7 @@ static int packet_direct_xmit(struct sk_buff *skb)
+ 	return ret;
+ drop:
+ 	atomic_long_inc(&dev->tx_dropped);
+-	kfree_skb(skb);
++	kfree_skb_list(skb);
+ 	return NET_XMIT_DROP;
+ }
+ 
+@@ -3952,6 +3951,7 @@ static int packet_notifier(struct notifier_block *this,
+ 				}
+ 				if (msg == NETDEV_UNREGISTER) {
+ 					packet_cached_dev_reset(po);
++					fanout_release(sk);
+ 					po->ifindex = -1;
+ 					if (po->prot_hook.dev)
+ 						dev_put(po->prot_hook.dev);
+diff --git a/net/sched/act_api.c b/net/sched/act_api.c
+index d09d068..027ddf4 100644
+--- a/net/sched/act_api.c
++++ b/net/sched/act_api.c
+@@ -341,22 +341,25 @@ int tcf_register_action(struct tc_action_ops *act,
+ 	if (!act->act || !act->dump || !act->init || !act->walk || !act->lookup)
+ 		return -EINVAL;
+ 
++	/* We have to register pernet ops before making the action ops visible,
++	 * otherwise tcf_action_init_1() could get a partially initialized
++	 * netns.
++	 */
++	ret = register_pernet_subsys(ops);
++	if (ret)
++		return ret;
++
+ 	write_lock(&act_mod_lock);
+ 	list_for_each_entry(a, &act_base, head) {
+ 		if (act->type == a->type || (strcmp(act->kind, a->kind) == 0)) {
+ 			write_unlock(&act_mod_lock);
++			unregister_pernet_subsys(ops);
+ 			return -EEXIST;
+ 		}
+ 	}
+ 	list_add_tail(&act->head, &act_base);
+ 	write_unlock(&act_mod_lock);
+ 
+-	ret = register_pernet_subsys(ops);
+-	if (ret) {
+-		tcf_unregister_action(act, ops);
+-		return ret;
+-	}
+-
+ 	return 0;
+ }
+ EXPORT_SYMBOL(tcf_register_action);
+@@ -367,8 +370,6 @@ int tcf_unregister_action(struct tc_action_ops *act,
+ 	struct tc_action_ops *a;
+ 	int err = -ENOENT;
+ 
+-	unregister_pernet_subsys(ops);
+-
+ 	write_lock(&act_mod_lock);
+ 	list_for_each_entry(a, &act_base, head) {
+ 		if (a == act) {
+@@ -378,6 +379,8 @@ int tcf_unregister_action(struct tc_action_ops *act,
+ 		}
+ 	}
+ 	write_unlock(&act_mod_lock);
++	if (!err)
++		unregister_pernet_subsys(ops);
+ 	return err;
+ }
+ EXPORT_SYMBOL(tcf_unregister_action);
+diff --git a/net/sched/act_vlan.c b/net/sched/act_vlan.c
+index 691409d..4ffc6c1 100644
+--- a/net/sched/act_vlan.c
++++ b/net/sched/act_vlan.c
+@@ -36,6 +36,12 @@ static int tcf_vlan(struct sk_buff *skb, const struct tc_action *a,
+ 	bstats_update(&v->tcf_bstats, skb);
+ 	action = v->tcf_action;
+ 
++	/* Ensure 'data' points at mac_header prior calling vlan manipulating
++	 * functions.
++	 */
++	if (skb_at_tc_ingress(skb))
++		skb_push_rcsum(skb, skb->mac_len);
++
+ 	switch (v->tcfv_action) {
+ 	case TCA_VLAN_ACT_POP:
+ 		err = skb_vlan_pop(skb);
+@@ -57,6 +63,9 @@ drop:
+ 	action = TC_ACT_SHOT;
+ 	v->tcf_qstats.drops++;
+ unlock:
++	if (skb_at_tc_ingress(skb))
++		skb_pull_rcsum(skb, skb->mac_len);
++
+ 	spin_unlock(&v->tcf_lock);
+ 	return action;
+ }
+diff --git a/net/sched/cls_api.c b/net/sched/cls_api.c
+index a7c5645..74bed5e 100644
+--- a/net/sched/cls_api.c
++++ b/net/sched/cls_api.c
+@@ -344,7 +344,8 @@ replay:
+ 			if (err == 0) {
+ 				struct tcf_proto *next = rtnl_dereference(tp->next);
+ 
+-				tfilter_notify(net, skb, n, tp, fh, RTM_DELTFILTER);
++				tfilter_notify(net, skb, n, tp,
++					       t->tcm_handle, RTM_DELTFILTER);
+ 				if (tcf_destroy(tp, false))
+ 					RCU_INIT_POINTER(*back, next);
+ 			}
+diff --git a/net/sctp/output.c b/net/sctp/output.c
+index 31b7bc3..8192990 100644
+--- a/net/sctp/output.c
++++ b/net/sctp/output.c
+@@ -417,6 +417,7 @@ int sctp_packet_transmit(struct sctp_packet *packet, gfp_t gfp)
+ 	__u8 has_data = 0;
+ 	int gso = 0;
+ 	int pktcount = 0;
++	int auth_len = 0;
+ 	struct dst_entry *dst;
+ 	unsigned char *auth = NULL;	/* pointer to auth in skb data */
+ 
+@@ -505,7 +506,12 @@ int sctp_packet_transmit(struct sctp_packet *packet, gfp_t gfp)
+ 			list_for_each_entry(chunk, &packet->chunk_list, list) {
+ 				int padded = WORD_ROUND(chunk->skb->len);
+ 
+-				if (pkt_size + padded > tp->pathmtu)
++				if (chunk == packet->auth)
++					auth_len = padded;
++				else if (auth_len + padded + packet->overhead >
++					 tp->pathmtu)
++					goto nomem;
++				else if (pkt_size + padded > tp->pathmtu)
+ 					break;
+ 				pkt_size += padded;
+ 			}
+diff --git a/net/sctp/sm_statefuns.c b/net/sctp/sm_statefuns.c
+index d88bb2b..920469e 100644
+--- a/net/sctp/sm_statefuns.c
++++ b/net/sctp/sm_statefuns.c
+@@ -3422,6 +3422,12 @@ sctp_disposition_t sctp_sf_ootb(struct net *net,
+ 			return sctp_sf_violation_chunklen(net, ep, asoc, type, arg,
+ 						  commands);
+ 
++		/* Report violation if chunk len overflows */
++		ch_end = ((__u8 *)ch) + WORD_ROUND(ntohs(ch->length));
++		if (ch_end > skb_tail_pointer(skb))
++			return sctp_sf_violation_chunklen(net, ep, asoc, type, arg,
++						  commands);
++
+ 		/* Now that we know we at least have a chunk header,
+ 		 * do things that are type appropriate.
+ 		 */
+@@ -3453,12 +3459,6 @@ sctp_disposition_t sctp_sf_ootb(struct net *net,
+ 			}
+ 		}
+ 
+-		/* Report violation if chunk len overflows */
+-		ch_end = ((__u8 *)ch) + WORD_ROUND(ntohs(ch->length));
+-		if (ch_end > skb_tail_pointer(skb))
+-			return sctp_sf_violation_chunklen(net, ep, asoc, type, arg,
+-						  commands);
+-
+ 		ch = (sctp_chunkhdr_t *) ch_end;
+ 	} while (ch_end < skb_tail_pointer(skb));
+ 
+diff --git a/net/sctp/socket.c b/net/sctp/socket.c
+index 8ed2d99..baccbf3 100644
+--- a/net/sctp/socket.c
++++ b/net/sctp/socket.c
+@@ -4683,7 +4683,7 @@ static int sctp_getsockopt_disable_fragments(struct sock *sk, int len,
+ static int sctp_getsockopt_events(struct sock *sk, int len, char __user *optval,
+ 				  int __user *optlen)
+ {
+-	if (len <= 0)
++	if (len == 0)
+ 		return -EINVAL;
+ 	if (len > sizeof(struct sctp_event_subscribe))
+ 		len = sizeof(struct sctp_event_subscribe);
+@@ -6426,6 +6426,9 @@ static int sctp_getsockopt(struct sock *sk, int level, int optname,
+ 	if (get_user(len, optlen))
+ 		return -EFAULT;
+ 
++	if (len < 0)
++		return -EINVAL;
++
+ 	lock_sock(sk);
+ 
+ 	switch (optname) {
 diff --git a/net/sunrpc/xprtsock.c b/net/sunrpc/xprtsock.c
 index bf16883..e72581d 100644
 --- a/net/sunrpc/xprtsock.c
@@ -149441,6 +153996,40 @@ index bf16883..e72581d 100644
  	return ret;
  }
  
+diff --git a/net/switchdev/switchdev.c b/net/switchdev/switchdev.c
+index a5fc9dd..a56c5e6 100644
+--- a/net/switchdev/switchdev.c
++++ b/net/switchdev/switchdev.c
+@@ -774,6 +774,9 @@ int switchdev_port_bridge_getlink(struct sk_buff *skb, u32 pid, u32 seq,
+ 	u32 mask = BR_LEARNING | BR_LEARNING_SYNC | BR_FLOOD;
+ 	int err;
+ 
++	if (!netif_is_bridge_port(dev))
++		return -EOPNOTSUPP;
++
+ 	err = switchdev_port_attr_get(dev, &attr);
+ 	if (err && err != -EOPNOTSUPP)
+ 		return err;
+@@ -929,6 +932,9 @@ int switchdev_port_bridge_setlink(struct net_device *dev,
+ 	struct nlattr *afspec;
+ 	int err = 0;
+ 
++	if (!netif_is_bridge_port(dev))
++		return -EOPNOTSUPP;
++
+ 	protinfo = nlmsg_find_attr(nlh, sizeof(struct ifinfomsg),
+ 				   IFLA_PROTINFO);
+ 	if (protinfo) {
+@@ -962,6 +968,9 @@ int switchdev_port_bridge_dellink(struct net_device *dev,
+ {
+ 	struct nlattr *afspec;
+ 
++	if (!netif_is_bridge_port(dev))
++		return -EOPNOTSUPP;
++
+ 	afspec = nlmsg_find_attr(nlh, sizeof(struct ifinfomsg),
+ 				 IFLA_AF_SPEC);
+ 	if (afspec)
 diff --git a/scripts/mkcompile_h b/scripts/mkcompile_h
 index 6fdc97e..2bf5dfa 100755
 --- a/scripts/mkcompile_h
