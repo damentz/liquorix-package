@@ -1809,7 +1809,7 @@ index 6bbceb9a3a19..1f5eab4ef88f 100644
    MIPS  | KVM_REG_MIPS_R0               | 64
            ...
 diff --git a/Makefile b/Makefile
-index b1037774e8e8..4ebe2ae836d0 100644
+index b1037774e8e8..d3d7ffe346ca 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -1,8 +1,8 @@
@@ -1818,7 +1818,7 @@ index b1037774e8e8..4ebe2ae836d0 100644
 -SUBLEVEL = 0
 -EXTRAVERSION =
 -NAME = Roaring Lionus
-+SUBLEVEL = 12
++SUBLEVEL = 13
 +EXTRAVERSION = -zen
 +NAME = Life is Root
  
@@ -29652,10 +29652,41 @@ index 8b6e37ce3f66..20bfb373dcd6 100644
  	rtlpriv->max_fw_size = 0x4000;
  	pr_info("Using firmware %s\n", fw_name);
 diff --git a/drivers/net/wireless/realtek/rtlwifi/usb.c b/drivers/net/wireless/realtek/rtlwifi/usb.c
-index 32aa5c1d070a..3837bbdecf05 100644
+index 32aa5c1d070a..ae0c48f3c2bc 100644
 --- a/drivers/net/wireless/realtek/rtlwifi/usb.c
 +++ b/drivers/net/wireless/realtek/rtlwifi/usb.c
-@@ -1067,6 +1067,7 @@ int rtl_usb_probe(struct usb_interface *intf,
+@@ -831,12 +831,30 @@ static void rtl_usb_stop(struct ieee80211_hw *hw)
+ 	struct rtl_priv *rtlpriv = rtl_priv(hw);
+ 	struct rtl_hal *rtlhal = rtl_hal(rtl_priv(hw));
+ 	struct rtl_usb *rtlusb = rtl_usbdev(rtl_usbpriv(hw));
++	struct urb *urb;
+ 
+ 	/* should after adapter start and interrupt enable. */
+ 	set_hal_stop(rtlhal);
+ 	cancel_work_sync(&rtlpriv->works.fill_h2c_cmd);
+ 	/* Enable software */
+ 	SET_USB_STOP(rtlusb);
++
++	/* free pre-allocated URBs from rtl_usb_start() */
++	usb_kill_anchored_urbs(&rtlusb->rx_submitted);
++
++	tasklet_kill(&rtlusb->rx_work_tasklet);
++	cancel_work_sync(&rtlpriv->works.lps_change_work);
++
++	flush_workqueue(rtlpriv->works.rtl_wq);
++
++	skb_queue_purge(&rtlusb->rx_queue);
++
++	while ((urb = usb_get_from_anchor(&rtlusb->rx_cleanup_urbs))) {
++		usb_free_coherent(urb->dev, urb->transfer_buffer_length,
++				urb->transfer_buffer, urb->transfer_dma);
++		usb_free_urb(urb);
++	}
++
+ 	rtlpriv->cfg->ops->hw_disable(hw);
+ }
+ 
+@@ -1067,6 +1085,7 @@ int rtl_usb_probe(struct usb_interface *intf,
  		return -ENOMEM;
  	}
  	rtlpriv = hw->priv;
@@ -39672,36 +39703,6 @@ index 5f17a3b9916d..80260b08398b 100644
  static int cyberjack_port_probe(struct usb_serial_port *port)
  {
  	struct cyberjack_private *priv;
-diff --git a/drivers/usb/serial/digi_acceleport.c b/drivers/usb/serial/digi_acceleport.c
-index 6a1df9e824ca..3b610f1e3f7c 100644
---- a/drivers/usb/serial/digi_acceleport.c
-+++ b/drivers/usb/serial/digi_acceleport.c
-@@ -1482,16 +1482,20 @@ static int digi_read_oob_callback(struct urb *urb)
- 	struct usb_serial *serial = port->serial;
- 	struct tty_struct *tty;
- 	struct digi_port *priv = usb_get_serial_port_data(port);
-+	unsigned char *buf = urb->transfer_buffer;
- 	int opcode, line, status, val;
- 	int i;
- 	unsigned int rts;
- 
-+	if (urb->actual_length < 4)
-+		return -1;
-+
- 	/* handle each oob command */
--	for (i = 0; i < urb->actual_length - 3;) {
--		opcode = ((unsigned char *)urb->transfer_buffer)[i++];
--		line = ((unsigned char *)urb->transfer_buffer)[i++];
--		status = ((unsigned char *)urb->transfer_buffer)[i++];
--		val = ((unsigned char *)urb->transfer_buffer)[i++];
-+	for (i = 0; i < urb->actual_length - 4; i += 4) {
-+		opcode = buf[i];
-+		line = buf[i + 1];
-+		status = buf[i + 2];
-+		val = buf[i + 3];
- 
- 		dev_dbg(&port->dev, "digi_read_oob_callback: opcode=%d, line=%d, status=%d, val=%d\n",
- 			opcode, line, status, val);
 diff --git a/drivers/usb/serial/ftdi_sio.c b/drivers/usb/serial/ftdi_sio.c
 index 6e9fc8bcc285..99a0a5f1b400 100644
 --- a/drivers/usb/serial/ftdi_sio.c
@@ -117050,7 +117051,7 @@ index c245bed3249b..a39197501a7c 100644
  			fa.fsx_nextents = ip->i_d.di_nextents;
  	}
 diff --git a/fs/xfs/xfs_iomap.c b/fs/xfs/xfs_iomap.c
-index 436e109bb01e..cdc6bdd495be 100644
+index 436e109bb01e..e8889614cec3 100644
 --- a/fs/xfs/xfs_iomap.c
 +++ b/fs/xfs/xfs_iomap.c
 @@ -395,11 +395,12 @@ xfs_iomap_prealloc_size(
@@ -117194,6 +117195,33 @@ index 436e109bb01e..cdc6bdd495be 100644
  	int		nres;
  
  	if (whichfork == XFS_COW_FORK)
+@@ -1078,7 +1068,15 @@ xfs_file_iomap_end_delalloc(
+ 	xfs_fileoff_t		end_fsb;
+ 	int			error = 0;
+ 
+-	start_fsb = XFS_B_TO_FSB(mp, offset + written);
++	/*
++	 * start_fsb refers to the first unused block after a short write. If
++	 * nothing was written, round offset down to point at the first block in
++	 * the range.
++	 */
++	if (unlikely(!written))
++		start_fsb = XFS_B_TO_FSBT(mp, offset);
++	else
++		start_fsb = XFS_B_TO_FSB(mp, offset + written);
+ 	end_fsb = XFS_B_TO_FSB(mp, offset + length);
+ 
+ 	/*
+@@ -1090,6 +1088,9 @@ xfs_file_iomap_end_delalloc(
+ 	 * blocks in the range, they are ours.
+ 	 */
+ 	if (start_fsb < end_fsb) {
++		truncate_pagecache_range(VFS_I(ip), XFS_FSB_TO_B(mp, start_fsb),
++					 XFS_FSB_TO_B(mp, end_fsb) - 1);
++
+ 		xfs_ilock(ip, XFS_ILOCK_EXCL);
+ 		error = xfs_bmap_punch_delalloc_range(ip, start_fsb,
+ 					       end_fsb - start_fsb);
 diff --git a/fs/xfs/xfs_iops.c b/fs/xfs/xfs_iops.c
 index 405a65cd9d6b..f5e0f608e245 100644
 --- a/fs/xfs/xfs_iops.c
@@ -117601,6 +117629,112 @@ index 276d3023d60f..de6195e38910 100644
  	else
  		cfg->max_retries = val;
  	return count;
+diff --git a/include/acpi/platform/acenv.h b/include/acpi/platform/acenv.h
+index 34cce729109c..fca15390a42c 100644
+--- a/include/acpi/platform/acenv.h
++++ b/include/acpi/platform/acenv.h
+@@ -177,7 +177,7 @@
+ #include "acmsvc.h"
+ 
+ #elif defined(__INTEL_COMPILER)
+-#include "acintel.h"
++#include <acpi/platform/acintel.h>
+ 
+ #endif
+ 
+diff --git a/include/acpi/platform/acintel.h b/include/acpi/platform/acintel.h
+new file mode 100644
+index 000000000000..17bd3b7b4e5a
+--- /dev/null
++++ b/include/acpi/platform/acintel.h
+@@ -0,0 +1,87 @@
++/******************************************************************************
++ *
++ * Name: acintel.h - VC specific defines, etc.
++ *
++ *****************************************************************************/
++
++/*
++ * Copyright (C) 2000 - 2017, Intel Corp.
++ * All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions, and the following disclaimer,
++ *    without modification.
++ * 2. Redistributions in binary form must reproduce at minimum a disclaimer
++ *    substantially similar to the "NO WARRANTY" disclaimer below
++ *    ("Disclaimer") and any redistribution must be conditioned upon
++ *    including a substantially similar Disclaimer requirement for further
++ *    binary redistribution.
++ * 3. Neither the names of the above-listed copyright holders nor the names
++ *    of any contributors may be used to endorse or promote products derived
++ *    from this software without specific prior written permission.
++ *
++ * Alternatively, this software may be distributed under the terms of the
++ * GNU General Public License ("GPL") version 2 as published by the Free
++ * Software Foundation.
++ *
++ * NO WARRANTY
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTIBILITY AND FITNESS FOR
++ * A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT
++ * HOLDERS OR CONTRIBUTORS BE LIABLE FOR SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
++ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
++ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
++ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
++ * STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING
++ * IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
++ * POSSIBILITY OF SUCH DAMAGES.
++ */
++
++#ifndef __ACINTEL_H__
++#define __ACINTEL_H__
++
++/*
++ * Use compiler specific <stdarg.h> is a good practice for even when
++ * -nostdinc is specified (i.e., ACPI_USE_STANDARD_HEADERS undefined.
++ */
++#include <stdarg.h>
++
++/* Configuration specific to Intel 64-bit C compiler */
++
++#define COMPILER_DEPENDENT_INT64    __int64
++#define COMPILER_DEPENDENT_UINT64   unsigned __int64
++#define ACPI_INLINE                 __inline
++
++/*
++ * Calling conventions:
++ *
++ * ACPI_SYSTEM_XFACE        - Interfaces to host OS (handlers, threads)
++ * ACPI_EXTERNAL_XFACE      - External ACPI interfaces
++ * ACPI_INTERNAL_XFACE      - Internal ACPI interfaces
++ * ACPI_INTERNAL_VAR_XFACE  - Internal variable-parameter list interfaces
++ */
++#define ACPI_SYSTEM_XFACE
++#define ACPI_EXTERNAL_XFACE
++#define ACPI_INTERNAL_XFACE
++#define ACPI_INTERNAL_VAR_XFACE
++
++/* remark 981 - operands evaluated in no particular order */
++#pragma warning(disable:981)
++
++/* warn C4100: unreferenced formal parameter */
++#pragma warning(disable:4100)
++
++/* warn C4127: conditional expression is constant */
++#pragma warning(disable:4127)
++
++/* warn C4706: assignment within conditional expression */
++#pragma warning(disable:4706)
++
++/* warn C4214: bit field types other than int */
++#pragma warning(disable:4214)
++
++#endif				/* __ACINTEL_H__ */
 diff --git a/include/asm-generic/asm-prototypes.h b/include/asm-generic/asm-prototypes.h
 new file mode 100644
 index 000000000000..939869c772b1
@@ -130651,7 +130785,7 @@ index 22e13a0e19d7..ad1d2962d129 100644
  			phys_addr_t map = map_single(hwdev, sg_phys(sg),
  						     sg->length, dir);
 diff --git a/mm/backing-dev.c b/mm/backing-dev.c
-index 8fde443f36d7..3bfed5ab2475 100644
+index 8fde443f36d7..61b34071e3ee 100644
 --- a/mm/backing-dev.c
 +++ b/mm/backing-dev.c
 @@ -310,6 +310,7 @@ static int wb_init(struct bdi_writeback *wb, struct backing_dev_info *bdi,
@@ -130662,6 +130796,29 @@ index 8fde443f36d7..3bfed5ab2475 100644
  
  	wb->congested = wb_congested_get_create(bdi, blkcg_id, gfp);
  	if (!wb->congested)
+@@ -757,15 +758,20 @@ static int cgwb_bdi_init(struct backing_dev_info *bdi)
+ 	if (!bdi->wb_congested)
+ 		return -ENOMEM;
+ 
++	atomic_set(&bdi->wb_congested->refcnt, 1);
++
+ 	err = wb_init(&bdi->wb, bdi, 1, GFP_KERNEL);
+ 	if (err) {
+-		kfree(bdi->wb_congested);
++		wb_congested_put(bdi->wb_congested);
+ 		return err;
+ 	}
+ 	return 0;
+ }
+ 
+-static void cgwb_bdi_destroy(struct backing_dev_info *bdi) { }
++static void cgwb_bdi_destroy(struct backing_dev_info *bdi)
++{
++	wb_congested_put(bdi->wb_congested);
++}
+ 
+ #endif	/* CONFIG_CGROUP_WRITEBACK */
+ 
 diff --git a/mm/compaction.c b/mm/compaction.c
 index 0409a4ad6ea1..70e6bec46dc2 100644
 --- a/mm/compaction.c
@@ -134988,6 +135145,65 @@ index cf52cf30ac4b..bc9aaf58c7cc 100644
  };
  
  static int __init mpls_iptunnel_init(void)
+diff --git a/net/netfilter/nf_conntrack_helper.c b/net/netfilter/nf_conntrack_helper.c
+index 7341adf7059d..6dc44d9b4190 100644
+--- a/net/netfilter/nf_conntrack_helper.c
++++ b/net/netfilter/nf_conntrack_helper.c
+@@ -188,6 +188,26 @@ nf_ct_helper_ext_add(struct nf_conn *ct,
+ }
+ EXPORT_SYMBOL_GPL(nf_ct_helper_ext_add);
+ 
++static struct nf_conntrack_helper *
++nf_ct_lookup_helper(struct nf_conn *ct, struct net *net)
++{
++	if (!net->ct.sysctl_auto_assign_helper) {
++		if (net->ct.auto_assign_helper_warned)
++			return NULL;
++		if (!__nf_ct_helper_find(&ct->tuplehash[IP_CT_DIR_REPLY].tuple))
++			return NULL;
++		pr_info("nf_conntrack: default automatic helper assignment "
++			"has been turned off for security reasons and CT-based "
++			" firewall rule not found. Use the iptables CT target "
++			"to attach helpers instead.\n");
++		net->ct.auto_assign_helper_warned = 1;
++		return NULL;
++	}
++
++	return __nf_ct_helper_find(&ct->tuplehash[IP_CT_DIR_REPLY].tuple);
++}
++
++
+ int __nf_ct_try_assign_helper(struct nf_conn *ct, struct nf_conn *tmpl,
+ 			      gfp_t flags)
+ {
+@@ -213,21 +233,14 @@ int __nf_ct_try_assign_helper(struct nf_conn *ct, struct nf_conn *tmpl,
+ 	}
+ 
+ 	help = nfct_help(ct);
+-	if (net->ct.sysctl_auto_assign_helper && helper == NULL) {
+-		helper = __nf_ct_helper_find(&ct->tuplehash[IP_CT_DIR_REPLY].tuple);
+-		if (unlikely(!net->ct.auto_assign_helper_warned && helper)) {
+-			pr_info("nf_conntrack: automatic helper "
+-				"assignment is deprecated and it will "
+-				"be removed soon. Use the iptables CT target "
+-				"to attach helpers instead.\n");
+-			net->ct.auto_assign_helper_warned = true;
+-		}
+-	}
+ 
+ 	if (helper == NULL) {
+-		if (help)
+-			RCU_INIT_POINTER(help->helper, NULL);
+-		return 0;
++		helper = nf_ct_lookup_helper(ct, net);
++		if (helper == NULL) {
++			if (help)
++				RCU_INIT_POINTER(help->helper, NULL);
++			return 0;
++		}
+ 	}
+ 
+ 	if (help == NULL) {
 diff --git a/net/openvswitch/conntrack.c b/net/openvswitch/conntrack.c
 index fecefa2dc94e..eab210bb1ef0 100644
 --- a/net/openvswitch/conntrack.c
