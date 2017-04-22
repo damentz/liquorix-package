@@ -2,9 +2,24 @@
 
 set -e
 
+function usage() { echo "Usage: $0 [directory] <remote>"; }
+
 if [[ -z "$1" ]] || [[ ! -d "$1" ]]; then
 	echo "[ERROR] '$1' is an invalid directory."
-    echo "Usage: $0 [directory]"
+    usage
+	exit 1
+fi
+
+remote='stable-queue'
+if [[ -z "$2" ]]; then
+	echo "[WARN ] '$2' is an invalid remote, defaulting to '$remote'"
+else
+	echo "[INFO ] Setting remote to '$2'"
+	remote="$2"
+fi
+
+if [[ ! -d ".git" ]]; then
+	echo "[ERROR] Not in a git repository!"
 	exit 1
 fi
 
@@ -21,7 +36,7 @@ fi
 
 if [[ "$version" =~ [0-9]+\.[0-9]+ ]]; then
 	echo "[INFO ] version is valid"
-else 
+else
 	"[ERROR] version, $version, is invalid"
 	exit 1
 fi
@@ -30,7 +45,7 @@ echo "[INFO ] fetching latest changes"
 git fetch linux-stable
 
 echo "[INFO ] resetting repository"
-git reset --hard linux-stable/linux-$version.y
+git reset --hard "linux-stable/linux-$version.y"
 
 echo "[INFO ] cleaning repository"
 git clean -xdf
@@ -38,12 +53,12 @@ git clean -xdf
 echo "[INFO ] checking if, $queue, exists"
 stat "$queue" &> /dev/null
 if [[ "$?" -ne 0 ]]; then
-	echo "[ERROR] folder, $queue, does not exist"	
+	echo "[ERROR] folder, $queue, does not exist"
 	exit 1
 fi
 
 echo "[INFO ] merging from stable queue"
-for file in $(cat $queue/series); do
+for file in $(cat "$queue/series"); do
 	git am -3 "$queue/$file"
 done
 
