@@ -10,7 +10,7 @@ if [[ -z "$1" ]] || [[ ! -d "$1" ]]; then
 	exit 1
 fi
 
-remote='stable-queue'
+remote='linux-stable'
 if [[ -z "$2" ]]; then
 	echo "[WARN ] '$2' is an invalid remote, defaulting to '$remote'"
 else
@@ -42,10 +42,10 @@ else
 fi
 
 echo "[INFO ] fetching latest changes"
-git fetch linux-stable
+git fetch "$remote"
 
 echo "[INFO ] resetting repository"
-git reset --hard "linux-stable/linux-$version.y"
+git reset --hard "$remote/linux-$version.y"
 
 echo "[INFO ] cleaning repository"
 git clean -xdf
