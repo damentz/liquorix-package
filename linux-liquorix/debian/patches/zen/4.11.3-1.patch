@@ -1701,7 +1701,7 @@ index 000000000000..d037301094de
 +thinkpad_ec module and the H8S hardware documentation:
 +http://documentation.renesas.com/eng/products/mpumcu/rej09b0300_2140bhm.pdf
 diff --git a/Makefile b/Makefile
-index 4b074a904106..797a239f5b7a 100644
+index 4b074a904106..1511188a2bb7 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -1,8 +1,8 @@
@@ -1710,7 +1710,7 @@ index 4b074a904106..797a239f5b7a 100644
 -SUBLEVEL = 0
 -EXTRAVERSION =
 -NAME = Fearless Coyote
-+SUBLEVEL = 2
++SUBLEVEL = 3
 +EXTRAVERSION = -zen
 +NAME = Perry Trotter and the Kernel of Truth
  
@@ -109114,10 +109114,10 @@ index 89ab6758667b..a3d723ac656f 100644
  obj-$(CONFIG_CPU_FREQ_GOV_SCHEDUTIL) += cpufreq_schedutil.o
 diff --git a/kernel/sched/MuQSS.c b/kernel/sched/MuQSS.c
 new file mode 100644
-index 000000000000..fd6ccb82d2ba
+index 000000000000..cfd2ba1c92ba
 --- /dev/null
 +++ b/kernel/sched/MuQSS.c
-@@ -0,0 +1,6941 @@
+@@ -0,0 +1,6937 @@
 +/*
 + *  kernel/sched/MuQSS.c, was kernel/sched.c
 + *
@@ -109229,7 +109229,7 @@ index 000000000000..fd6ccb82d2ba
 +
 +void print_scheduler_version(void)
 +{
-+	printk(KERN_INFO "MuQSS CPU scheduler v0.155 by Con Kolivas.\n");
++	printk(KERN_INFO "MuQSS CPU scheduler v0.156 by Con Kolivas.\n");
 +}
 +
 +/*
@@ -109282,28 +109282,8 @@ index 000000000000..fd6ccb82d2ba
 +	return MS_TO_US(rr_interval);
 +}
 +
-+/*
-+ * The global runqueue data that all CPUs work off. Contains either atomic
-+ * variables and a cpu bitmap set atomically.
-+ */
-+struct global_rq {
 +#ifdef CONFIG_SMP
-+	atomic_t nr_running ____cacheline_aligned_in_smp;
-+	atomic_t nr_uninterruptible ____cacheline_aligned_in_smp;
-+	atomic64_t nr_switches ____cacheline_aligned_in_smp;
-+	cpumask_t cpu_idle_map ____cacheline_aligned_in_smp;
-+#else
-+	atomic_t nr_running ____cacheline_aligned;
-+	atomic_t nr_uninterruptible ____cacheline_aligned;
-+	atomic64_t nr_switches ____cacheline_aligned;
-+#endif
-+};
-+
-+/* There can be only one */
-+#ifdef CONFIG_SMP
-+static struct global_rq grq ____cacheline_aligned_in_smp;
-+#else
-+static struct global_rq grq ____cacheline_aligned;
++static cpumask_t cpu_idle_map ____cacheline_aligned_in_smp;
 +#endif
 +
 +/* CPUs with isolated domains */
@@ -109936,6 +109916,8 @@ index 000000000000..fd6ccb82d2ba
 +		raw_spin_unlock(&prev->pi_lock);
 +	}
 +#endif
++	/* Accurately set nr_running here for load average calculations */
++	rq->nr_running = rq->sl->entries + !rq_idle(rq);
 +	rq_unlock(rq);
 +
 +	do_pending_softirq(rq, current);
@@ -109982,16 +109964,16 @@ index 000000000000..fd6ccb82d2ba
 +	return NS_TO_MS(longest_deadline_diff());
 +}
 +
-+static inline int rq_load(struct rq *rq)
-+{
-+	return rq->sl->entries + !rq_idle(rq);
-+}
-+
 +static inline bool rq_local(struct rq *rq);
 +
 +#ifndef SCHED_CAPACITY_SCALE
 +#define SCHED_CAPACITY_SCALE 1024
 +#endif
++
++static inline int rq_load(struct rq *rq)
++{
++	return rq->nr_running;
++}
 +
 +/*
 + * Update the load average for feeding into cpu frequency governors. Use a
@@ -110243,7 +110225,7 @@ index 000000000000..fd6ccb82d2ba
 +static inline void set_cpuidle_map(int cpu)
 +{
 +	if (likely(cpu_online(cpu)))
-+		atomic_set_cpu(cpu, &grq.cpu_idle_map);
++		atomic_set_cpu(cpu, &cpu_idle_map);
 +}
 +
 +static inline void atomic_clear_cpu(int cpu, cpumask_t *cpumask)
@@ -110253,12 +110235,12 @@ index 000000000000..fd6ccb82d2ba
 +
 +static inline void clear_cpuidle_map(int cpu)
 +{
-+	atomic_clear_cpu(cpu, &grq.cpu_idle_map);
++	atomic_clear_cpu(cpu, &cpu_idle_map);
 +}
 +
 +static bool suitable_idle_cpus(struct task_struct *p)
 +{
-+	return (cpumask_intersects(&p->cpus_allowed, &grq.cpu_idle_map));
++	return (cpumask_intersects(&p->cpus_allowed, &cpu_idle_map));
 +}
 +
 +/*
@@ -110389,7 +110371,7 @@ index 000000000000..fd6ccb82d2ba
 +	struct rq *rq;
 +	int best_cpu;
 +
-+	cpumask_and(&tmpmask, &p->cpus_allowed, &grq.cpu_idle_map);
++	cpumask_and(&tmpmask, &p->cpus_allowed, &cpu_idle_map);
 +	best_cpu = best_mask_cpu(cpu, task_rq(p), &tmpmask);
 +	rq = cpu_rq(best_cpu);
 +	if (!smt_schedule(p, rq))
@@ -110502,11 +110484,10 @@ index 000000000000..fd6ccb82d2ba
 +
 +	p->prio = effective_prio(p);
 +	if (task_contributes_to_load(p))
-+		atomic_dec(&grq.nr_uninterruptible);
++		rq->nr_uninterruptible--;
 +
 +	enqueue_task(rq, p, 0);
 +	p->on_rq = TASK_ON_RQ_QUEUED;
-+	atomic_inc(&grq.nr_running);
 +}
 +
 +/*
@@ -110516,10 +110497,9 @@ index 000000000000..fd6ccb82d2ba
 +static inline void deactivate_task(struct task_struct *p, struct rq *rq)
 +{
 +	if (task_contributes_to_load(p))
-+		atomic_inc(&grq.nr_uninterruptible);
++		rq->nr_uninterruptible++;
 +
 +	p->on_rq = 0;
-+	atomic_dec(&grq.nr_running);
 +	sched_info_dequeued(rq, p);
 +}
 +
@@ -110932,7 +110912,7 @@ index 000000000000..fd6ccb82d2ba
 +
 +#ifdef CONFIG_SMP
 +	if (p->sched_contributes_to_load)
-+		atomic_dec(&grq.nr_uninterruptible);
++		rq->nr_uninterruptible--;
 +#endif
 +
 +	ttwu_activate(rq, p);
@@ -111923,12 +111903,22 @@ index 000000000000..fd6ccb82d2ba
 + */
 +unsigned long nr_running(void)
 +{
-+	return atomic_read(&grq.nr_running);
++	unsigned long i, sum = 0;
++
++	for_each_online_cpu(i)
++		sum += cpu_rq(i)->nr_running;
++
++	return sum;
 +}
 +
 +static unsigned long nr_uninterruptible(void)
 +{
-+	return atomic_read(&grq.nr_uninterruptible);
++	unsigned long i, sum = 0;
++
++	for_each_online_cpu(i)
++		sum += cpu_rq(i)->nr_uninterruptible;
++
++	return sum;
 +}
 +
 +/*
@@ -111957,7 +111947,13 @@ index 000000000000..fd6ccb82d2ba
 +
 +unsigned long long nr_context_switches(void)
 +{
-+	return (unsigned long long)atomic64_read(&grq.nr_switches);
++	int i;
++	unsigned long long sum = 0;
++
++	for_each_possible_cpu(i)
++		sum += cpu_rq(i)->nr_switches;
++
++	return sum;
 +}
 +
 +/*
@@ -113008,7 +113004,7 @@ index 000000000000..fd6ccb82d2ba
 +			check_siblings(rq);
 +		else
 +			wake_siblings(rq);
-+		atomic64_inc(&grq.nr_switches);
++		rq->nr_switches++;
 +		rq->curr = next;
 +		++*switch_count;
 +
@@ -115445,7 +115441,7 @@ index 000000000000..fd6ccb82d2ba
 +/* All this CPU's SMT siblings are idle */
 +static bool siblings_cpu_idle(struct rq *rq)
 +{
-+	return cpumask_subset(&rq->thread_mask, &grq.cpu_idle_map);
++	return cpumask_subset(&rq->thread_mask, &cpu_idle_map);
 +}
 +#endif
 +#ifdef CONFIG_SCHED_MC
@@ -115456,7 +115452,7 @@ index 000000000000..fd6ccb82d2ba
 +/* All this CPU's shared cache siblings are idle */
 +static bool cache_cpu_idle(struct rq *rq)
 +{
-+	return cpumask_subset(&rq->core_mask, &grq.cpu_idle_map);
++	return cpumask_subset(&rq->core_mask, &cpu_idle_map);
 +}
 +#endif
 +
@@ -115659,14 +115655,11 @@ index 000000000000..fd6ccb82d2ba
 +	for (i = 1 ; i < NICE_WIDTH ; i++)
 +		prio_ratios[i] = prio_ratios[i - 1] * 11 / 10;
 +
-+	atomic_set(&grq.nr_running, 0);
-+	atomic_set(&grq.nr_uninterruptible, 0);
-+	atomic64_set(&grq.nr_switches, 0);
 +	skiplist_node_init(&init_task.node);
 +
 +#ifdef CONFIG_SMP
 +	init_defrootdomain();
-+	cpumask_clear(&grq.cpu_idle_map);
++	cpumask_clear(&cpu_idle_map);
 +#else
 +	uprq = &per_cpu(runqueues, 0);
 +#endif
@@ -115683,6 +115676,9 @@ index 000000000000..fd6ccb82d2ba
 +		skiplist_init(&rq->node);
 +		rq->sl = new_skiplist(&rq->node);
 +		raw_spin_lock_init(&rq->lock);
++		rq->nr_running = 0;
++		rq->nr_uninterruptible = 0;
++		rq->nr_switches = 0;
 +		rq->clock = rq->old_clock = rq->last_niffy = rq->niffies = 0;
 +		rq->last_jiffy = jiffies;
 +		rq->user_ns = rq->nice_ns = rq->softirq_ns = rq->system_ns =
@@ -116061,10 +116057,10 @@ index 000000000000..fd6ccb82d2ba
 +#endif	/* CONFIG_CGROUP_SCHED */
 diff --git a/kernel/sched/MuQSS.h b/kernel/sched/MuQSS.h
 new file mode 100644
-index 000000000000..65afbd2f3169
+index 000000000000..42225c7841f3
 --- /dev/null
 +++ b/kernel/sched/MuQSS.h
-@@ -0,0 +1,596 @@
+@@ -0,0 +1,610 @@
 +#include <linux/sched.h>
 +#include <linux/cpuidle.h>
 +#include <linux/freezer.h>
@@ -116198,10 +116194,20 @@ index 000000000000..65afbd2f3169
 + * This data should only be modified by the local cpu.
 + */
 +struct rq {
++	raw_spinlock_t lock;
++
 +	struct task_struct *curr, *idle, *stop;
 +	struct mm_struct *prev_mm;
 +
-+	raw_spinlock_t lock;
++	unsigned int nr_running;
++	/*
++	 * This is part of a global counter where only the total sum
++	 * over all CPUs matters. A task can increase this counter on
++	 * one CPU and if it got migrated afterwards it may decrease
++	 * it on another CPU. Always updated under the runqueue lock:
++	 */
++	unsigned long nr_uninterruptible;
++	u64 nr_switches;
 +
 +	/* Stored data about rq->curr to work outside rq lock */
 +	u64 rq_deadline;
@@ -116403,6 +116409,8 @@ index 000000000000..65afbd2f3169
 +	rcu_dereference_check((p), \
 +			      lockdep_is_held(&sched_domains_mutex))
 +
++#ifdef CONFIG_SMP
++
 +/*
 + * The domain tree (rq->sd) is protected by RCU's quiescent state transition.
 + * See detach_destroy_domains: synchronize_sched for details.
@@ -116525,7 +116533,6 @@ index 000000000000..65afbd2f3169
 +}
 +#endif
 +
-+#ifdef CONFIG_SMP
 +extern void sched_ttwu_pending(void);
 +extern void set_cpus_allowed_common(struct task_struct *p, const struct cpumask *new_mask);
 +extern void set_rq_online (struct rq *rq);
@@ -116541,9 +116548,12 @@ index 000000000000..65afbd2f3169
 +}
 +
 +#define sched_feat(x) 0
-+#else
++
++#else /* CONFIG_SMP */
++
 +static inline void sched_ttwu_pending(void) { }
-+#endif
++
++#endif /* CONFIG_SMP */
 +
 +#ifdef CONFIG_CPU_IDLE
 +static inline void idle_set_state(struct rq *rq,
