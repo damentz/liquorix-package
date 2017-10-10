@@ -7322,10 +7322,10 @@ index 5c3bf9861492..4d76dff29773 100644
  			  unsigned long time_ms);
 diff --git a/block/bfq-mq-iosched.c b/block/bfq-mq-iosched.c
 new file mode 100644
-index 000000000000..8c5dce7716cb
+index 000000000000..816bac6cdd3d
 --- /dev/null
 +++ b/block/bfq-mq-iosched.c
-@@ -0,0 +1,5693 @@
+@@ -0,0 +1,5787 @@
 +/*
 + * Budget Fair Queueing (BFQ) I/O scheduler.
 + *
@@ -7417,6 +7417,7 @@ index 000000000000..8c5dce7716cb
 +#include "blk-mq-tag.h"
 +#include "blk-mq-sched.h"
 +#include "bfq-mq.h"
++#include "blk-wbt.h"
 +
 +/* Expiration time of sync (0) and async (1) requests, in ns. */
 +static const u64 bfq_fifo_expire[2] = { NSEC_PER_SEC / 4, NSEC_PER_SEC / 8 };
@@ -8043,6 +8044,15 @@ index 000000000000..8c5dce7716cb
 +	return dur;
 +}
 +
++/* switch back from soft real-time to interactive weight raising */
++static void switch_back_to_interactive_wr(struct bfq_queue *bfqq,
++					  struct bfq_data *bfqd)
++{
++	bfqq->wr_coeff = bfqd->bfq_wr_coeff;
++	bfqq->wr_cur_max_time = bfq_wr_duration(bfqd);
++	bfqq->last_wr_start_finish = bfqq->wr_start_at_switch_to_srt;
++}
++
 +static void
 +bfq_bfqq_resume_state(struct bfq_queue *bfqq, struct bfq_data *bfqd,
 +		      struct bfq_io_cq *bic, bool bfq_already_existing)
@@ -8071,15 +8081,29 @@ index 000000000000..8c5dce7716cb
 +	bfqq->wr_cur_max_time = bic->saved_wr_cur_max_time;
 +	BUG_ON(time_is_after_jiffies(bfqq->last_wr_start_finish));
 +
++	bfq_log_bfqq(bfqq->bfqd, bfqq,
++		     "[%s] bic %p wr_coeff %d start_finish %lu max_time %lu",
++		     __func__,
++		     bic, bfqq->wr_coeff, bfqq->last_wr_start_finish,
++		     bfqq->wr_cur_max_time);
++
 +	if (bfqq->wr_coeff > 1 && (bfq_bfqq_in_large_burst(bfqq) ||
 +				   time_is_before_jiffies(bfqq->last_wr_start_finish +
 +							  bfqq->wr_cur_max_time))) {
-+		bfq_log_bfqq(bfqq->bfqd, bfqq,
++		if (bfqq->wr_cur_max_time == bfqd->bfq_wr_rt_max_time &&
++		    !bfq_bfqq_in_large_burst(bfqq) &&
++		    time_is_after_eq_jiffies(bfqq->wr_start_at_switch_to_srt +
++					     bfq_wr_duration(bfqd))) {
++			switch_back_to_interactive_wr(bfqq, bfqd);
++			bfq_log_bfqq(bfqq->bfqd, bfqq,
++			     "resume state: switching back to interactive");
++		} else {
++			bfqq->wr_coeff = 1;
++			bfq_log_bfqq(bfqq->bfqd, bfqq,
 +			     "resume state: switching off wr (%lu + %lu < %lu)",
 +			     bfqq->last_wr_start_finish, bfqq->wr_cur_max_time,
 +			     jiffies);
-+
-+		bfqq->wr_coeff = 1;
++		}
 +	}
 +
 +	/* make sure weight will be updated, however we got here */
@@ -9530,11 +9554,33 @@ index 000000000000..8c5dce7716cb
 +	bic->saved_IO_bound = bfq_bfqq_IO_bound(bfqq);
 +	bic->saved_in_large_burst = bfq_bfqq_in_large_burst(bfqq);
 +	bic->was_in_burst_list = !hlist_unhashed(&bfqq->burst_list_node);
-+	bic->saved_wr_coeff = bfqq->wr_coeff;
-+	bic->saved_wr_start_at_switch_to_srt = bfqq->wr_start_at_switch_to_srt;
-+	bic->saved_last_wr_start_finish = bfqq->last_wr_start_finish;
-+	bic->saved_wr_cur_max_time = bfqq->wr_cur_max_time;
++	if (unlikely(bfq_bfqq_just_created(bfqq) &&
++		     !bfq_bfqq_in_large_burst(bfqq))) {
++		/*
++		 * bfqq being merged ritgh after being created: bfqq
++		 * would have deserved interactive weight raising, but
++		 * did not make it to be set in a weight-raised state,
++		 * because of this early merge.  Store directly the
++		 * weight-raising state that would have been assigned
++		 * to bfqq, so that to avoid that bfqq unjustly fails
++		 * to enjoy weight raising if split soon.
++		 */
++		bic->saved_wr_coeff = bfqq->bfqd->bfq_wr_coeff;
++		bic->saved_wr_cur_max_time = bfq_wr_duration(bfqq->bfqd);
++		bic->saved_last_wr_start_finish = jiffies;
++	} else {
++		bic->saved_wr_coeff = bfqq->wr_coeff;
++		bic->saved_wr_start_at_switch_to_srt =
++			bfqq->wr_start_at_switch_to_srt;
++		bic->saved_last_wr_start_finish = bfqq->last_wr_start_finish;
++		bic->saved_wr_cur_max_time = bfqq->wr_cur_max_time;
++	}
 +	BUG_ON(time_is_after_jiffies(bfqq->last_wr_start_finish));
++	bfq_log_bfqq(bfqq->bfqd, bfqq,
++		     "[%s] bic %p wr_coeff %d start_finish %lu max_time %lu",
++		     __func__,
++		     bic, bfqq->wr_coeff, bfqq->last_wr_start_finish,
++		     bfqq->wr_cur_max_time);
 +}
 +
 +static void
@@ -11136,11 +11182,7 @@ index 000000000000..8c5dce7716cb
 +					bfq_wr_duration(bfqd)))
 +				bfq_bfqq_end_wr(bfqq);
 +			else {
-+				/* switch back to interactive wr */
-+				bfqq->wr_coeff = bfqd->bfq_wr_coeff;
-+				bfqq->wr_cur_max_time = bfq_wr_duration(bfqd);
-+				bfqq->last_wr_start_finish =
-+					bfqq->wr_start_at_switch_to_srt;
++				switch_back_to_interactive_wr(bfqq, bfqd);
 +				BUG_ON(time_is_after_jiffies(
 +					       bfqq->last_wr_start_finish));
 +				bfqq->entity.prio_changed = 1;
@@ -11397,16 +11439,37 @@ index 000000000000..8c5dce7716cb
 +	BUG_ON(bfqq->entity.tree);
 +	BUG_ON(bfq_bfqq_busy(bfqq));
 +
-+	if (bfq_bfqq_sync(bfqq))
-+		/*
-+		 * The fact that this queue is being destroyed does not
-+		 * invalidate the fact that this queue may have been
-+		 * activated during the current burst. As a consequence,
-+		 * although the queue does not exist anymore, and hence
-+		 * needs to be removed from the burst list if there,
-+		 * the burst size has not to be decremented.
-+		 */
++	if (!hlist_unhashed(&bfqq->burst_list_node)) {
 +		hlist_del_init(&bfqq->burst_list_node);
++		/*
++		 * Decrement also burst size after the removal, if the
++		 * process associated with bfqq is exiting, and thus
++		 * does not contribute to the burst any longer. This
++		 * decrement helps filter out false positives of large
++		 * bursts, when some short-lived process (often due to
++		 * the execution of commands by some service) happens
++		 * to start and exit while a complex application is
++		 * starting, and thus spawning several processes that
++		 * do I/O (and that *must not* be treated as a large
++		 * burst, see comments on bfq_handle_burst).
++		 *
++		 * In particular, the decrement is performed only if:
++		 * 1) bfqq is not a merged queue, because, if it is,
++		 * then this free of bfqq is not triggered by the exit
++		 * of the process bfqq is associated with, but exactly
++		 * by the fact that bfqq has just been merged.
++		 * 2) burst_size is greater than 0, to handle
++		 * unbalanced decrements. Unbalanced decrements may
++		 * happen in te following case: bfqq is inserted into
++		 * the current burst list--without incrementing
++		 * bust_size--because of a split, but the current
++		 * burst list is not the burst list bfqq belonged to
++		 * (see comments on the case of a split in
++		 * bfq_set_request).
++		 */
++		if (bfqq->bic && bfqq->bfqd->burst_size > 0)
++			bfqq->bfqd->burst_size--;
++	}
 +
 +	if (bfqq->bfqd)
 +		bfq_log_bfqq(bfqq->bfqd, bfqq, "put_queue: %p freed", bfqq);
@@ -11863,7 +11926,6 @@ index 000000000000..8c5dce7716cb
 +				     bfqq->allocated);
 +
 +			new_bfqq->ref++;
-+			bfq_clear_bfqq_just_created(bfqq);
 +			/*
 +			 * If the bic associated with the process
 +			 * issuing this request still points to bfqq
@@ -11875,6 +11937,8 @@ index 000000000000..8c5dce7716cb
 +			if (bic_to_bfqq(RQ_BIC(rq), 1) == bfqq)
 +				bfq_merge_bfqqs(bfqd, RQ_BIC(rq),
 +						bfqq, new_bfqq);
++
++			bfq_clear_bfqq_just_created(bfqq);
 +			/*
 +			 * rq is about to be enqueued into new_bfqq,
 +			 * release rq reference on bfqq
@@ -12231,6 +12295,34 @@ index 000000000000..8c5dce7716cb
 +				     "large burst");
 +			bfq_clear_bfqq_in_large_burst(bfqq);
 +			if (bic->was_in_burst_list)
++				/*
++				 * If bfqq was in the current
++				 * burst list before being
++				 * merged, then we have to add
++				 * it back. And we do not need
++				 * to increase burst_size, as
++				 * we did not decrement
++				 * burst_size when we removed
++				 * bfqq from the burst list as
++				 * a consequence of a merge
++				 * (see comments in
++				 * bfq_put_queue). In this
++				 * respect, it would be rather
++				 * costly to know whether the
++				 * current burst list is still
++				 * the same burst list from
++				 * which bfqq was removed on
++				 * the merge. To avoid this
++				 * cost, if bfqq was in a
++				 * burst list, then we add
++				 * bfqq to the current burst
++				 * list without any further
++				 * check. This can cause
++				 * inappropriate insertions,
++				 * but rarely enough to not
++				 * harm the detection of large
++				 * bursts significantly.
++				 */
 +				hlist_add_head(&bfqq->burst_list_node,
 +					       &bfqd->burst_list);
 +		}
@@ -12277,6 +12369,7 @@ index 000000000000..8c5dce7716cb
 +				bic->saved_in_large_burst = true;
 +
 +			bfqq = bfq_split_bfqq(bic, bfqq);
++			split = true;
 +
 +			if (!bfqq)
 +				bfqq = bfq_get_bfqq_handle_split(bfqd, bic, bio,
@@ -12600,6 +12693,7 @@ index 000000000000..8c5dce7716cb
 +	bfq_init_root_group(bfqd->root_group, bfqd);
 +	bfq_init_entity(&bfqd->oom_bfqq.entity, bfqd->root_group);
 +
++	wbt_disable_default(q);
 +	return 0;
 +
 +out_free:
@@ -16077,10 +16171,10 @@ index 000000000000..e4a2553a2d2c
 +}
 diff --git a/block/bfq-sq-iosched.c b/block/bfq-sq-iosched.c
 new file mode 100644
-index 000000000000..5b456e48e0cc
+index 000000000000..4bbd7f4c0154
 --- /dev/null
 +++ b/block/bfq-sq-iosched.c
-@@ -0,0 +1,5405 @@
+@@ -0,0 +1,5498 @@
 +/*
 + * Budget Fair Queueing (BFQ) I/O scheduler.
 + *
@@ -16166,6 +16260,7 @@ index 000000000000..5b456e48e0cc
 +#include <linux/ioprio.h>
 +#include "blk.h"
 +#include "bfq.h"
++#include "blk-wbt.h"
 +
 +/* Expiration time of sync (0) and async (1) requests, in ns. */
 +static const u64 bfq_fifo_expire[2] = { NSEC_PER_SEC / 4, NSEC_PER_SEC / 8 };
@@ -16760,6 +16855,15 @@ index 000000000000..5b456e48e0cc
 +	return dur;
 +}
 +
++/* switch back from soft real-time to interactive weight raising */
++static void switch_back_to_interactive_wr(struct bfq_queue *bfqq,
++					  struct bfq_data *bfqd)
++{
++	bfqq->wr_coeff = bfqd->bfq_wr_coeff;
++	bfqq->wr_cur_max_time = bfq_wr_duration(bfqd);
++	bfqq->last_wr_start_finish = bfqq->wr_start_at_switch_to_srt;
++}
++
 +static void
 +bfq_bfqq_resume_state(struct bfq_queue *bfqq, struct bfq_data *bfqd,
 +		      struct bfq_io_cq *bic, bool bfq_already_existing)
@@ -16787,15 +16891,29 @@ index 000000000000..5b456e48e0cc
 +	bfqq->wr_cur_max_time = bic->saved_wr_cur_max_time;
 +	BUG_ON(time_is_after_jiffies(bfqq->last_wr_start_finish));
 +
++	bfq_log_bfqq(bfqq->bfqd, bfqq,
++		     "[%s] bic %p wr_coeff %d start_finish %lu max_time %lu",
++		     __func__,
++		     bic, bfqq->wr_coeff, bfqq->last_wr_start_finish,
++		     bfqq->wr_cur_max_time);
++
 +	if (bfqq->wr_coeff > 1 && (bfq_bfqq_in_large_burst(bfqq) ||
 +				   time_is_before_jiffies(bfqq->last_wr_start_finish +
 +							  bfqq->wr_cur_max_time))) {
-+		bfq_log_bfqq(bfqq->bfqd, bfqq,
++		if (bfqq->wr_cur_max_time == bfqd->bfq_wr_rt_max_time &&
++		    !bfq_bfqq_in_large_burst(bfqq) &&
++		    time_is_after_eq_jiffies(bfqq->wr_start_at_switch_to_srt +
++					     bfq_wr_duration(bfqd))) {
++			switch_back_to_interactive_wr(bfqq, bfqd);
++			bfq_log_bfqq(bfqq->bfqd, bfqq,
++			     "resume state: switching back to interactive");
++		} else {
++			bfqq->wr_coeff = 1;
++			bfq_log_bfqq(bfqq->bfqd, bfqq,
 +			     "resume state: switching off wr (%lu + %lu < %lu)",
 +			     bfqq->last_wr_start_finish, bfqq->wr_cur_max_time,
 +			     jiffies);
-+
-+		bfqq->wr_coeff = 1;
++		}
 +	}
 +
 +	/* make sure weight will be updated, however we got here */
@@ -18164,10 +18282,27 @@ index 000000000000..5b456e48e0cc
 +	bic->saved_IO_bound = bfq_bfqq_IO_bound(bfqq);
 +	bic->saved_in_large_burst = bfq_bfqq_in_large_burst(bfqq);
 +	bic->was_in_burst_list = !hlist_unhashed(&bfqq->burst_list_node);
-+	bic->saved_wr_coeff = bfqq->wr_coeff;
-+	bic->saved_wr_start_at_switch_to_srt = bfqq->wr_start_at_switch_to_srt;
-+	bic->saved_last_wr_start_finish = bfqq->last_wr_start_finish;
-+	bic->saved_wr_cur_max_time = bfqq->wr_cur_max_time;
++	if (unlikely(bfq_bfqq_just_created(bfqq) &&
++		     !bfq_bfqq_in_large_burst(bfqq))) {
++		/*
++		 * bfqq being merged ritgh after being created: bfqq
++		 * would have deserved interactive weight raising, but
++		 * did not make it to be set in a weight-raised state,
++		 * because of this early merge.	Store directly the
++		 * weight-raising state that would have been assigned
++		 * to bfqq, so that to avoid that bfqq unjustly fails
++		 * to enjoy weight raising if split soon.
++		 */
++		bic->saved_wr_coeff = bfqq->bfqd->bfq_wr_coeff;
++		bic->saved_wr_cur_max_time = bfq_wr_duration(bfqq->bfqd);
++		bic->saved_last_wr_start_finish = jiffies;
++	} else {
++		bic->saved_wr_coeff = bfqq->wr_coeff;
++		bic->saved_wr_start_at_switch_to_srt =
++			bfqq->wr_start_at_switch_to_srt;
++		bic->saved_last_wr_start_finish = bfqq->last_wr_start_finish;
++		bic->saved_wr_cur_max_time = bfqq->wr_cur_max_time;
++	}
 +	BUG_ON(time_is_after_jiffies(bfqq->last_wr_start_finish));
 +}
 +
@@ -19785,11 +19920,7 @@ index 000000000000..5b456e48e0cc
 +					bfq_wr_duration(bfqd)))
 +				bfq_bfqq_end_wr(bfqq);
 +			else {
-+				/* switch back to interactive wr */
-+				bfqq->wr_coeff = bfqd->bfq_wr_coeff;
-+				bfqq->wr_cur_max_time = bfq_wr_duration(bfqd);
-+				bfqq->last_wr_start_finish =
-+					bfqq->wr_start_at_switch_to_srt;
++				switch_back_to_interactive_wr(bfqq, bfqd);
 +				BUG_ON(time_is_after_jiffies(
 +					       bfqq->last_wr_start_finish));
 +				bfqq->entity.prio_changed = 1;
@@ -19991,16 +20122,37 @@ index 000000000000..5b456e48e0cc
 +	BUG_ON(bfqq->entity.tree);
 +	BUG_ON(bfq_bfqq_busy(bfqq));
 +
-+	if (bfq_bfqq_sync(bfqq))
-+		/*
-+		 * The fact that this queue is being destroyed does not
-+		 * invalidate the fact that this queue may have been
-+		 * activated during the current burst. As a consequence,
-+		 * although the queue does not exist anymore, and hence
-+		 * needs to be removed from the burst list if there,
-+		 * the burst size has not to be decremented.
-+		 */
++	if (!hlist_unhashed(&bfqq->burst_list_node)) {
 +		hlist_del_init(&bfqq->burst_list_node);
++		/*
++		 * Decrement also burst size after the removal, if the
++		 * process associated with bfqq is exiting, and thus
++		 * does not contribute to the burst any longer. This
++		 * decrement helps filter out false positives of large
++		 * bursts, when some short-lived process (often due to
++		 * the execution of commands by some service) happens
++		 * to start and exit while a complex application is
++		 * starting, and thus spawning several processes that
++		 * do I/O (and that *must not* be treated as a large
++		 * burst, see comments on bfq_handle_burst).
++		 *
++		 * In particular, the decrement is performed only if:
++		 * 1) bfqq is not a merged queue, because, if it is,
++		 * then this free of bfqq is not triggered by the exit
++		 * of the process bfqq is associated with, but exactly
++		 * by the fact that bfqq has just been merged.
++		 * 2) burst_size is greater than 0, to handle
++		 * unbalanced decrements. Unbalanced decrements may
++		 * happen in te following case: bfqq is inserted into
++		 * the current burst list--without incrementing
++		 * bust_size--because of a split, but the current
++		 * burst list is not the burst list bfqq belonged to
++		 * (see comments on the case of a split in
++		 * bfq_set_request).
++		 */
++		if (bfqq->bic && bfqq->bfqd->burst_size > 0)
++			bfqq->bfqd->burst_size--;
++	}
 +
 +	bfq_log_bfqq(bfqq->bfqd, bfqq, "put_queue: %p freed", bfqq);
 +
@@ -20446,10 +20598,11 @@ index 000000000000..5b456e48e0cc
 +			new_bfqq->allocated[rq_data_dir(rq)]++;
 +			bfqq->allocated[rq_data_dir(rq)]--;
 +			new_bfqq->ref++;
-+			bfq_clear_bfqq_just_created(bfqq);
 +			if (bic_to_bfqq(RQ_BIC(rq), 1) == bfqq)
 +				bfq_merge_bfqqs(bfqd, RQ_BIC(rq),
 +						bfqq, new_bfqq);
++
++			bfq_clear_bfqq_just_created(bfqq);
 +			/*
 +			 * rq is about to be enqueued into new_bfqq,
 +			 * release rq reference on bfqq
@@ -20742,6 +20895,34 @@ index 000000000000..5b456e48e0cc
 +					     "large burst");
 +				bfq_clear_bfqq_in_large_burst(bfqq);
 +				if (bic->was_in_burst_list)
++					/*
++					 * If bfqq was in the current
++					 * burst list before being
++					 * merged, then we have to add
++					 * it back. And we do not need
++					 * to increase burst_size, as
++					 * we did not decrement
++					 * burst_size when we removed
++					 * bfqq from the burst list as
++					 * a consequence of a merge
++					 * (see comments in
++					 * bfq_put_queue). In this
++					 * respect, it would be rather
++					 * costly to know whether the
++					 * current burst list is still
++					 * the same burst list from
++					 * which bfqq was removed on
++					 * the merge. To avoid this
++					 * cost, if bfqq was in a
++					 * burst list, then we add
++					 * bfqq to the current burst
++					 * list without any further
++					 * check. This can cause
++					 * inappropriate insertions,
++					 * but rarely enough to not
++					 * harm the detection of large
++					 * bursts significantly.
++					 */
 +					hlist_add_head(&bfqq->burst_list_node,
 +						       &bfqd->burst_list);
 +			}
@@ -21071,6 +21252,11 @@ index 000000000000..5b456e48e0cc
 +	return -ENOMEM;
 +}
 +
++static void bfq_registered_queue(struct request_queue *q)
++{
++	wbt_disable_default(q);
++}
++
 +static void bfq_slab_kill(void)
 +{
 +	kmem_cache_destroy(bfq_pool);
@@ -21380,6 +21566,7 @@ index 000000000000..5b456e48e0cc
 +		.elevator_may_queue_fn =	bfq_may_queue,
 +		.elevator_init_fn =		bfq_init_queue,
 +		.elevator_exit_fn =		bfq_exit_queue,
++		.elevator_registered_fn =	bfq_registered_queue,
 +	},
 +	.icq_size =		sizeof(struct bfq_io_cq),
 +	.icq_align =		__alignof__(struct bfq_io_cq),
