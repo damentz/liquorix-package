@@ -74,8 +74,6 @@ function build_source_package {
 
     echo "[INFO ] Making source package"
     debuild --no-lintian -S -sa
-
-    echo "[INFO ] Submitting"
 }
 
 prepare_env
