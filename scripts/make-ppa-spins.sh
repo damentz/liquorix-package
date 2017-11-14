@@ -10,6 +10,12 @@ dir_ppa="$dir_base/ppa"
 
 version_package="$( head -n1 "$dir_package"/debian/changelog | grep -Po '\d+\.\d+-\d+' )"
 version_kernel="$(  head -n1 "$dir_package"/debian/changelog | grep -Po '\d+\.\d+' )"
+version_build="1"
+
+if [[ -n "$1" ]]; then
+    echo "[INFO ] Build version overridden to: $1"
+    version_build="$1"
+fi
 
 package_source="${package_name}_${version_kernel}.orig.tar.xz"
 
@@ -80,7 +86,7 @@ function build_source_package {
 prepare_env
 
 for release in "${releases[@]}"; do
-    version_ppa="${version_package}ubuntu1~${release}"
+    version_ppa="${version_package}ubuntu${version_build}~${release}"
 
     echo "[INFO ] Building source package for $release"
     build_source_package "$release" "$version_ppa"
