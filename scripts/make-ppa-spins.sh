@@ -14,7 +14,7 @@ version_kernel="$(  head -n1 "$dir_package"/debian/changelog | grep -Po '\d+\.\d
 package_source="${package_name}_${version_kernel}.orig.tar.xz"
 
 releases=(
-    yakkety
+    zesty
     artful
     bionic
 )
