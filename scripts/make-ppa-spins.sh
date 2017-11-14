@@ -8,8 +8,8 @@ dir_base="${dir_script%/*}"
 dir_package="$dir_base/$package_name"
 dir_ppa="$dir_base/ppa"
 
-version_package="$( head -n1 $dir_package/debian/changelog | grep -Po '\d+\.\d+-\d+' )"
-version_kernel="$(  head -n1 $dir_package/debian/changelog | grep -Po '\d+\.\d+' )"
+version_package="$( head -n1 "$dir_package"/debian/changelog | grep -Po '\d+\.\d+-\d+' )"
+version_kernel="$(  head -n1 "$dir_package"/debian/changelog | grep -Po '\d+\.\d+' )"
 
 package_source="${package_name}_${version_kernel}.orig.tar.xz"
 
