@@ -14,8 +14,8 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 # Check prerequisites first.
-if [[ "$(id -u)" -ne 0 ]]; then
-    echo "[ERROR] Please run this script as root."
+if [[ "$(id -u)" -eq 0 ]]; then
+    echo "[ERROR] Cannot run as root.  Actions that require root will use sudo."
     exit 1
 fi
 
@@ -29,7 +29,7 @@ grep -q 'Debian' /etc/issue ||
 
 # Now that we're sure this system is compatible with the bootstrap script, lets
 # set all the variables needed to proceed.
-build_user='root'
+build_user="$(whoami)"
 build_base=$(grep -E "^${build_user}:" /etc/passwd | cut -f6 -d:)
 build_deps="debhelper devscripts fakeroot gcc pbuilder ubuntu-dev-tools unzip"
 pbuilder_base="${build_base}/pbuilder"
@@ -50,11 +50,11 @@ echo "[DEBUG] pbuilder_bootstraps = (${pbuilder_bootstraps[@]})"
 # it is that we're doing.
 
 echo "[INFO ] Updating apt-get repository lists"
-apt-get update ||
+sudo apt-get update ||
     { echo "[ERROR] apt-get failed to run, 'apt-get update'"; exit 1; }
 
 echo "[INFO ] Installing dependencies"
-apt-get install $build_deps ||
+sudo apt-get install $build_deps ||
     { echo "[ERROR] apt-get failed to install dependencies: [${build_deps}]!"; exit 1; }
 
 echo "[INFO ] Checking if directory exists: $pbuilder_base"
