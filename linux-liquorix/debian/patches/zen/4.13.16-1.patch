@@ -1415,7 +1415,7 @@ index b3526365ea8e..6f9d7b418917 100644
  	(default=kernel config parameter)
  -------------------------------------------------
 diff --git a/Makefile b/Makefile
-index ed65d7278bb3..a3f1167ecd66 100644
+index ed65d7278bb3..5de2e2df6133 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -1,8 +1,8 @@
@@ -1424,7 +1424,7 @@ index ed65d7278bb3..a3f1167ecd66 100644
 -SUBLEVEL = 0
 -EXTRAVERSION =
 -NAME = Fearless Coyote
-+SUBLEVEL = 15
++SUBLEVEL = 16
 +EXTRAVERSION = -zen
 +NAME = Mediated Meditation
  
@@ -5525,6 +5525,56 @@ index 3b9e220621f8..8a08a5fe7427 100644
  	}
  
  	/* Enable workaround for FXSAVE leak */
+diff --git a/arch/x86/kernel/cpu/intel_cacheinfo.c b/arch/x86/kernel/cpu/intel_cacheinfo.c
+index c55fb2cb2acc..24f749324c0f 100644
+--- a/arch/x86/kernel/cpu/intel_cacheinfo.c
++++ b/arch/x86/kernel/cpu/intel_cacheinfo.c
+@@ -811,7 +811,24 @@ static int __cache_amd_cpumap_setup(unsigned int cpu, int index,
+ 	struct cacheinfo *this_leaf;
+ 	int i, sibling;
+ 
+-	if (boot_cpu_has(X86_FEATURE_TOPOEXT)) {
++	/*
++	 * For L3, always use the pre-calculated cpu_llc_shared_mask
++	 * to derive shared_cpu_map.
++	 */
++	if (index == 3) {
++		for_each_cpu(i, cpu_llc_shared_mask(cpu)) {
++			this_cpu_ci = get_cpu_cacheinfo(i);
++			if (!this_cpu_ci->info_list)
++				continue;
++			this_leaf = this_cpu_ci->info_list + index;
++			for_each_cpu(sibling, cpu_llc_shared_mask(cpu)) {
++				if (!cpu_online(sibling))
++					continue;
++				cpumask_set_cpu(sibling,
++						&this_leaf->shared_cpu_map);
++			}
++		}
++	} else if (boot_cpu_has(X86_FEATURE_TOPOEXT)) {
+ 		unsigned int apicid, nshared, first, last;
+ 
+ 		this_leaf = this_cpu_ci->info_list + index;
+@@ -839,19 +856,6 @@ static int __cache_amd_cpumap_setup(unsigned int cpu, int index,
+ 						&this_leaf->shared_cpu_map);
+ 			}
+ 		}
+-	} else if (index == 3) {
+-		for_each_cpu(i, cpu_llc_shared_mask(cpu)) {
+-			this_cpu_ci = get_cpu_cacheinfo(i);
+-			if (!this_cpu_ci->info_list)
+-				continue;
+-			this_leaf = this_cpu_ci->info_list + index;
+-			for_each_cpu(sibling, cpu_llc_shared_mask(cpu)) {
+-				if (!cpu_online(sibling))
+-					continue;
+-				cpumask_set_cpu(sibling,
+-						&this_leaf->shared_cpu_map);
+-			}
+-		}
+ 	} else
+ 		return 0;
+ 
 diff --git a/arch/x86/kernel/cpu/mcheck/dev-mcelog.c b/arch/x86/kernel/cpu/mcheck/dev-mcelog.c
 index 10cec43aac38..7f85b76f43bc 100644
 --- a/arch/x86/kernel/cpu/mcheck/dev-mcelog.c
@@ -25319,6 +25369,41 @@ index c7f396903184..70db4d5638a6 100644
  		}
  	}
  	mvebu_mbus_dram_info.num_cs = cs;
+diff --git a/drivers/char/ipmi/ipmi_msghandler.c b/drivers/char/ipmi/ipmi_msghandler.c
+index 810b138f5897..c82d9fd2f05a 100644
+--- a/drivers/char/ipmi/ipmi_msghandler.c
++++ b/drivers/char/ipmi/ipmi_msghandler.c
+@@ -4030,7 +4030,8 @@ smi_from_recv_msg(ipmi_smi_t intf, struct ipmi_recv_msg *recv_msg,
+ }
+ 
+ static void check_msg_timeout(ipmi_smi_t intf, struct seq_table *ent,
+-			      struct list_head *timeouts, long timeout_period,
++			      struct list_head *timeouts,
++			      unsigned long timeout_period,
+ 			      int slot, unsigned long *flags,
+ 			      unsigned int *waiting_msgs)
+ {
+@@ -4043,8 +4044,8 @@ static void check_msg_timeout(ipmi_smi_t intf, struct seq_table *ent,
+ 	if (!ent->inuse)
+ 		return;
+ 
+-	ent->timeout -= timeout_period;
+-	if (ent->timeout > 0) {
++	if (timeout_period < ent->timeout) {
++		ent->timeout -= timeout_period;
+ 		(*waiting_msgs)++;
+ 		return;
+ 	}
+@@ -4110,7 +4111,8 @@ static void check_msg_timeout(ipmi_smi_t intf, struct seq_table *ent,
+ 	}
+ }
+ 
+-static unsigned int ipmi_timeout_handler(ipmi_smi_t intf, long timeout_period)
++static unsigned int ipmi_timeout_handler(ipmi_smi_t intf,
++					 unsigned long timeout_period)
+ {
+ 	struct list_head     timeouts;
+ 	struct ipmi_recv_msg *msg, *msg2;
 diff --git a/drivers/char/tpm/tpm-dev-common.c b/drivers/char/tpm/tpm-dev-common.c
 index 610638a80383..461bf0b8a094 100644
 --- a/drivers/char/tpm/tpm-dev-common.c
@@ -103625,6 +103710,20 @@ index 67367cf1f8cd..99493946e2f9 100644
  
  int
  smb3_calc_signature(struct smb_rqst *rqst, struct TCP_Server_Info *server)
+diff --git a/fs/coda/upcall.c b/fs/coda/upcall.c
+index e82357c89979..8cf16d8c5261 100644
+--- a/fs/coda/upcall.c
++++ b/fs/coda/upcall.c
+@@ -446,8 +446,7 @@ int venus_fsync(struct super_block *sb, struct CodaFid *fid)
+ 	UPARG(CODA_FSYNC);
+ 
+ 	inp->coda_fsync.VFid = *fid;
+-	error = coda_upcall(coda_vcp(sb), sizeof(union inputArgs),
+-			    &outsize, inp);
++	error = coda_upcall(coda_vcp(sb), insize, &outsize, inp);
+ 
+ 	CODA_FREE(inp, insize);
+ 	return error;
 diff --git a/fs/crypto/keyinfo.c b/fs/crypto/keyinfo.c
 index 018c588c7ac3..8e704d12a1cf 100644
 --- a/fs/crypto/keyinfo.c
@@ -117294,6 +117393,45 @@ index fb15a96df0b6..386aecce881d 100644
  		brelse(gd_bh);
  		gd_bh = NULL;
  		if (cnt < 0) {
+diff --git a/fs/ocfs2/dlm/dlmrecovery.c b/fs/ocfs2/dlm/dlmrecovery.c
+index 74407c6dd592..ec8f75813beb 100644
+--- a/fs/ocfs2/dlm/dlmrecovery.c
++++ b/fs/ocfs2/dlm/dlmrecovery.c
+@@ -2419,6 +2419,7 @@ static void dlm_do_local_recovery_cleanup(struct dlm_ctxt *dlm, u8 dead_node)
+ 					dlm_lockres_put(res);
+ 					continue;
+ 				}
++				dlm_move_lockres_to_recovery_list(dlm, res);
+ 			} else if (res->owner == dlm->node_num) {
+ 				dlm_free_dead_locks(dlm, res, dead_node);
+ 				__dlm_lockres_calc_usage(dlm, res);
+diff --git a/fs/ocfs2/file.c b/fs/ocfs2/file.c
+index bfeb647459d9..2fc8e65c07c5 100644
+--- a/fs/ocfs2/file.c
++++ b/fs/ocfs2/file.c
+@@ -1168,6 +1168,13 @@ int ocfs2_setattr(struct dentry *dentry, struct iattr *attr)
+ 	}
+ 	size_change = S_ISREG(inode->i_mode) && attr->ia_valid & ATTR_SIZE;
+ 	if (size_change) {
++		/*
++		 * Here we should wait dio to finish before inode lock
++		 * to avoid a deadlock between ocfs2_setattr() and
++		 * ocfs2_dio_end_io_write()
++		 */
++		inode_dio_wait(inode);
++
+ 		status = ocfs2_rw_lock(inode, 1);
+ 		if (status < 0) {
+ 			mlog_errno(status);
+@@ -1207,8 +1214,6 @@ int ocfs2_setattr(struct dentry *dentry, struct iattr *attr)
+ 		if (status)
+ 			goto bail_unlock;
+ 
+-		inode_dio_wait(inode);
+-
+ 		if (i_size_read(inode) >= attr->ia_size) {
+ 			if (ocfs2_should_order_data(inode)) {
+ 				status = ocfs2_begin_ordered_truncate(inode,
 diff --git a/fs/open.c b/fs/open.c
 index 35bb784763a4..d8dc52ad435c 100644
 --- a/fs/open.c
@@ -121060,6 +121198,20 @@ index 7b2e31b1745a..6866e8126982 100644
  static inline void mmu_notifier_release(struct mm_struct *mm)
  {
  }
+diff --git a/include/linux/mmzone.h b/include/linux/mmzone.h
+index fc14b8b3f6ce..1d86e09f17c1 100644
+--- a/include/linux/mmzone.h
++++ b/include/linux/mmzone.h
+@@ -691,7 +691,8 @@ typedef struct pglist_data {
+ 	 * is the first PFN that needs to be initialised.
+ 	 */
+ 	unsigned long first_deferred_pfn;
+-	unsigned long static_init_size;
++	/* Number of non-deferred pages */
++	unsigned long static_init_pgcnt;
+ #endif /* CONFIG_DEFERRED_STRUCT_PAGE_INIT */
+ 
+ #ifdef CONFIG_TRANSPARENT_HUGEPAGE
 diff --git a/include/linux/netdevice.h b/include/linux/netdevice.h
 index c99ba7914c0a..a6d3c8b6cb93 100644
 --- a/include/linux/netdevice.h
@@ -123110,6 +123262,19 @@ index 51d4c3acf32d..63bee8e1b193 100644
  	oldval = rdtp->dynticks_nesting;
  	rdtp->dynticks_nesting++;
  	WARN_ON_ONCE(IS_ENABLED(CONFIG_RCU_EQS_DEBUG) &&
+diff --git a/kernel/rcu/tree_plugin.h b/kernel/rcu/tree_plugin.h
+index 908b309d60d7..b8f51dffeae9 100644
+--- a/kernel/rcu/tree_plugin.h
++++ b/kernel/rcu/tree_plugin.h
+@@ -1493,7 +1493,7 @@ static void rcu_prepare_for_idle(void)
+ 	rdtp->last_accelerate = jiffies;
+ 	for_each_rcu_flavor(rsp) {
+ 		rdp = this_cpu_ptr(rsp->rda);
+-		if (rcu_segcblist_pend_cbs(&rdp->cblist))
++		if (!rcu_segcblist_pend_cbs(&rdp->cblist))
+ 			continue;
+ 		rnp = rdp->mynode;
+ 		raw_spin_lock_rcu_node(rnp); /* irqs already disabled. */
 diff --git a/kernel/sched/Makefile b/kernel/sched/Makefile
 index 53f0164ed362..bc5cbe48af25 100644
 --- a/kernel/sched/Makefile
@@ -132130,6 +132295,101 @@ index bf050ab025b7..fa54c2ad6bbb 100644
  
  /*
   * vm_dirty_bytes starts at 0 (disabled) so that it is a function of
+diff --git a/mm/page_alloc.c b/mm/page_alloc.c
+index 1423da8dd16f..3bd0999c266f 100644
+--- a/mm/page_alloc.c
++++ b/mm/page_alloc.c
+@@ -289,28 +289,37 @@ EXPORT_SYMBOL(nr_online_nodes);
+ int page_group_by_mobility_disabled __read_mostly;
+ 
+ #ifdef CONFIG_DEFERRED_STRUCT_PAGE_INIT
++
++/*
++ * Determine how many pages need to be initialized durig early boot
++ * (non-deferred initialization).
++ * The value of first_deferred_pfn will be set later, once non-deferred pages
++ * are initialized, but for now set it ULONG_MAX.
++ */
+ static inline void reset_deferred_meminit(pg_data_t *pgdat)
+ {
+-	unsigned long max_initialise;
+-	unsigned long reserved_lowmem;
++	phys_addr_t start_addr, end_addr;
++	unsigned long max_pgcnt;
++	unsigned long reserved;
+ 
+ 	/*
+ 	 * Initialise at least 2G of a node but also take into account that
+ 	 * two large system hashes that can take up 1GB for 0.25TB/node.
+ 	 */
+-	max_initialise = max(2UL << (30 - PAGE_SHIFT),
+-		(pgdat->node_spanned_pages >> 8));
++	max_pgcnt = max(2UL << (30 - PAGE_SHIFT),
++			(pgdat->node_spanned_pages >> 8));
+ 
+ 	/*
+ 	 * Compensate the all the memblock reservations (e.g. crash kernel)
+ 	 * from the initial estimation to make sure we will initialize enough
+ 	 * memory to boot.
+ 	 */
+-	reserved_lowmem = memblock_reserved_memory_within(pgdat->node_start_pfn,
+-			pgdat->node_start_pfn + max_initialise);
+-	max_initialise += reserved_lowmem;
++	start_addr = PFN_PHYS(pgdat->node_start_pfn);
++	end_addr = PFN_PHYS(pgdat->node_start_pfn + max_pgcnt);
++	reserved = memblock_reserved_memory_within(start_addr, end_addr);
++	max_pgcnt += PHYS_PFN(reserved);
+ 
+-	pgdat->static_init_size = min(max_initialise, pgdat->node_spanned_pages);
++	pgdat->static_init_pgcnt = min(max_pgcnt, pgdat->node_spanned_pages);
+ 	pgdat->first_deferred_pfn = ULONG_MAX;
+ }
+ 
+@@ -337,7 +346,7 @@ static inline bool update_defer_init(pg_data_t *pgdat,
+ 	if (zone_end < pgdat_end_pfn(pgdat))
+ 		return true;
+ 	(*nr_initialised)++;
+-	if ((*nr_initialised > pgdat->static_init_size) &&
++	if ((*nr_initialised > pgdat->static_init_pgcnt) &&
+ 	    (pfn & (PAGES_PER_SECTION - 1)) == 0) {
+ 		pgdat->first_deferred_pfn = pfn;
+ 		return false;
+diff --git a/mm/page_ext.c b/mm/page_ext.c
+index 88ccc044b09a..9dbabbfc4557 100644
+--- a/mm/page_ext.c
++++ b/mm/page_ext.c
+@@ -124,7 +124,6 @@ struct page_ext *lookup_page_ext(struct page *page)
+ 	struct page_ext *base;
+ 
+ 	base = NODE_DATA(page_to_nid(page))->node_page_ext;
+-#if defined(CONFIG_DEBUG_VM)
+ 	/*
+ 	 * The sanity checks the page allocator does upon freeing a
+ 	 * page can reach here before the page_ext arrays are
+@@ -133,7 +132,6 @@ struct page_ext *lookup_page_ext(struct page *page)
+ 	 */
+ 	if (unlikely(!base))
+ 		return NULL;
+-#endif
+ 	index = pfn - round_down(node_start_pfn(page_to_nid(page)),
+ 					MAX_ORDER_NR_PAGES);
+ 	return get_entry(base, index);
+@@ -198,7 +196,6 @@ struct page_ext *lookup_page_ext(struct page *page)
+ {
+ 	unsigned long pfn = page_to_pfn(page);
+ 	struct mem_section *section = __pfn_to_section(pfn);
+-#if defined(CONFIG_DEBUG_VM)
+ 	/*
+ 	 * The sanity checks the page allocator does upon freeing a
+ 	 * page can reach here before the page_ext arrays are
+@@ -207,7 +204,6 @@ struct page_ext *lookup_page_ext(struct page *page)
+ 	 */
+ 	if (!section->page_ext)
+ 		return NULL;
+-#endif
+ 	return get_entry(section->page_ext, pfn);
+ }
+ 
 diff --git a/mm/page_vma_mapped.c b/mm/page_vma_mapped.c
 index 8ec6ba230bb9..6b9311631aa1 100644
 --- a/mm/page_vma_mapped.c
@@ -132187,6 +132447,24 @@ index 8ec6ba230bb9..6b9311631aa1 100644
  	}
  	if (!map_pte(pvmw))
  		goto next_pte;
+diff --git a/mm/pagewalk.c b/mm/pagewalk.c
+index 1a4197965415..7d973f63088c 100644
+--- a/mm/pagewalk.c
++++ b/mm/pagewalk.c
+@@ -187,8 +187,12 @@ static int walk_hugetlb_range(unsigned long addr, unsigned long end,
+ 	do {
+ 		next = hugetlb_entry_end(h, addr, end);
+ 		pte = huge_pte_offset(walk->mm, addr & hmask, sz);
+-		if (pte && walk->hugetlb_entry)
++
++		if (pte)
+ 			err = walk->hugetlb_entry(pte, hmask, addr, next, walk);
++		else if (walk->pte_hole)
++			err = walk->pte_hole(addr, next, walk);
++
+ 		if (err)
+ 			break;
+ 	} while (addr = next, addr != end);
 diff --git a/mm/rodata_test.c b/mm/rodata_test.c
 index 6bb4deb12e78..d908c8769b48 100644
 --- a/mm/rodata_test.c
