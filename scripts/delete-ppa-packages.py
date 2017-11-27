@@ -6,9 +6,6 @@ from launchpadlib.launchpad import Launchpad
 from launchpadlib.credentials import Credentials
 
 if __name__ == "__main__":
-    credentials = Credentials("Liquorix")
-    request_token_info = credentials.get_request_token(web_root="production")
-
     cachedir = os.path.expanduser('~/.launchpadlib/cache')
     launchpad = Launchpad.login_with(
         'Liquorix', 'production', cachedir, version='devel')
