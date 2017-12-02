@@ -1,9 +1,7 @@
 #!/usr/bin/env python2
 
 import os
-import datetime
 from launchpadlib.launchpad import Launchpad
-from launchpadlib.credentials import Credentials
 
 
 def main():
