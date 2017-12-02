@@ -5,7 +5,8 @@ import datetime
 from launchpadlib.launchpad import Launchpad
 from launchpadlib.credentials import Credentials
 
-if __name__ == "__main__":
+
+def main():
     cachedir = os.path.expanduser('~/.launchpadlib/cache')
     launchpad = Launchpad.login_with(
         'Liquorix', 'production', cachedir, version='devel')
@@ -33,3 +34,7 @@ if __name__ == "__main__":
                 removal_comment='Automated removal of superseded package.')
 
     print("[INFO ] Script complete!")
+
+
+if __name__ == "__main__":
+    main()
