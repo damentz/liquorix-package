@@ -5,6 +5,7 @@ from launchpadlib.launchpad import Launchpad
 
 
 def main():
+    """Find and delete superseded packages in Liquorix PPA"""
     cachedir = os.path.expanduser('~/.launchpadlib/cache')
     launchpad = Launchpad.login_with(
         'Liquorix', 'production', cachedir, version='devel')
