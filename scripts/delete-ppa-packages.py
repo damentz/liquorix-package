@@ -9,9 +9,6 @@ def delete_source(launchpad, entry):
     Delete source package if no non-superseded published binaries are found.
     """
 
-    if entry['date_removed']:
-        return
-
     obj = launchpad.load(entry['self_link'])
     binaries = obj.getPublishedBinaries()
 
@@ -37,10 +34,11 @@ def delete_binary(launchpad, entry):
 
     This method returns True if package is deleted successfully or already deleted.
     """
-    if entry['date_removed']:
+    if entry['status'] == 'Deleted':
         return True
 
     if entry['status'] != 'Superseded':
+        print("[WARN ] Found non-superseded binary, source will be ignored: " + entry['display_name'])
         return False
 
     print("[INFO ] Deleting superseded binary: " + entry["display_name"])
