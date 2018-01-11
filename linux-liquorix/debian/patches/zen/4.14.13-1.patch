@@ -1394,7 +1394,7 @@ index b0798e281aa6..ea91cb61a602 100644
 +range must not overlap with anything except the KASAN shadow area, which is
 +correct as KASAN disables KASLR.
 diff --git a/Makefile b/Makefile
-index ccd981892ef2..05457711a5b5 100644
+index ccd981892ef2..0f32c6d8c755 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -1,9 +1,9 @@
@@ -1404,7 +1404,7 @@ index ccd981892ef2..05457711a5b5 100644
 -SUBLEVEL = 0
 -EXTRAVERSION =
 -NAME = Fearless Coyote
-+SUBLEVEL = 12
++SUBLEVEL = 13
 +EXTRAVERSION = -zen
 +NAME = My Bodhi is Ready
  
@@ -1519,6 +1519,29 @@ index 057370a0ac4e..400b9e1b2f27 100644
  
  config KPROBES_ON_FTRACE
  	def_bool y
+diff --git a/arch/arc/include/asm/uaccess.h b/arch/arc/include/asm/uaccess.h
+index f35974ee7264..c9173c02081c 100644
+--- a/arch/arc/include/asm/uaccess.h
++++ b/arch/arc/include/asm/uaccess.h
+@@ -668,6 +668,7 @@ __arc_strncpy_from_user(char *dst, const char __user *src, long count)
+ 		return 0;
+ 
+ 	__asm__ __volatile__(
++	"	mov	lp_count, %5		\n"
+ 	"	lp	3f			\n"
+ 	"1:	ldb.ab  %3, [%2, 1]		\n"
+ 	"	breq.d	%3, 0, 3f               \n"
+@@ -684,8 +685,8 @@ __arc_strncpy_from_user(char *dst, const char __user *src, long count)
+ 	"	.word   1b, 4b			\n"
+ 	"	.previous			\n"
+ 	: "+r"(res), "+r"(dst), "+r"(src), "=r"(val)
+-	: "g"(-EFAULT), "l"(count)
+-	: "memory");
++	: "g"(-EFAULT), "r"(count)
++	: "lp_count", "lp_start", "lp_end", "memory");
+ 
+ 	return res;
+ }
 diff --git a/arch/arm/boot/dts/imx53.dtsi b/arch/arm/boot/dts/imx53.dtsi
 index 8bf0d89cdd35..2e516f4985e4 100644
 --- a/arch/arm/boot/dts/imx53.dtsi
@@ -2489,11 +2512,220 @@ index 000000000000..1d830c6666c2
 +#endif
 +
 +#endif /* __ASM__SERIAL_H */
+diff --git a/arch/mips/kernel/process.c b/arch/mips/kernel/process.c
+index c5ff6bfe2825..2f2d176396aa 100644
+--- a/arch/mips/kernel/process.c
++++ b/arch/mips/kernel/process.c
+@@ -705,6 +705,18 @@ int mips_set_process_fp_mode(struct task_struct *task, unsigned int value)
+ 	struct task_struct *t;
+ 	int max_users;
+ 
++	/* If nothing to change, return right away, successfully.  */
++	if (value == mips_get_process_fp_mode(task))
++		return 0;
++
++	/* Only accept a mode change if 64-bit FP enabled for o32.  */
++	if (!IS_ENABLED(CONFIG_MIPS_O32_FP64_SUPPORT))
++		return -EOPNOTSUPP;
++
++	/* And only for o32 tasks.  */
++	if (IS_ENABLED(CONFIG_64BIT) && !test_thread_flag(TIF_32BIT_REGS))
++		return -EOPNOTSUPP;
++
+ 	/* Check the value is valid */
+ 	if (value & ~known_bits)
+ 		return -EOPNOTSUPP;
 diff --git a/arch/mips/kernel/ptrace.c b/arch/mips/kernel/ptrace.c
-index 1395654cfc8d..5a09c2901a76 100644
+index 1395654cfc8d..c552c20237d4 100644
 --- a/arch/mips/kernel/ptrace.c
 +++ b/arch/mips/kernel/ptrace.c
-@@ -618,6 +618,19 @@ static const struct user_regset_view user_mips64_view = {
+@@ -410,63 +410,160 @@ static int gpr64_set(struct task_struct *target,
+ 
+ #endif /* CONFIG_64BIT */
+ 
++/*
++ * Copy the floating-point context to the supplied NT_PRFPREG buffer,
++ * !CONFIG_CPU_HAS_MSA variant.  FP context's general register slots
++ * correspond 1:1 to buffer slots.  Only general registers are copied.
++ */
++static int fpr_get_fpa(struct task_struct *target,
++		       unsigned int *pos, unsigned int *count,
++		       void **kbuf, void __user **ubuf)
++{
++	return user_regset_copyout(pos, count, kbuf, ubuf,
++				   &target->thread.fpu,
++				   0, NUM_FPU_REGS * sizeof(elf_fpreg_t));
++}
++
++/*
++ * Copy the floating-point context to the supplied NT_PRFPREG buffer,
++ * CONFIG_CPU_HAS_MSA variant.  Only lower 64 bits of FP context's
++ * general register slots are copied to buffer slots.  Only general
++ * registers are copied.
++ */
++static int fpr_get_msa(struct task_struct *target,
++		       unsigned int *pos, unsigned int *count,
++		       void **kbuf, void __user **ubuf)
++{
++	unsigned int i;
++	u64 fpr_val;
++	int err;
++
++	BUILD_BUG_ON(sizeof(fpr_val) != sizeof(elf_fpreg_t));
++	for (i = 0; i < NUM_FPU_REGS; i++) {
++		fpr_val = get_fpr64(&target->thread.fpu.fpr[i], 0);
++		err = user_regset_copyout(pos, count, kbuf, ubuf,
++					  &fpr_val, i * sizeof(elf_fpreg_t),
++					  (i + 1) * sizeof(elf_fpreg_t));
++		if (err)
++			return err;
++	}
++
++	return 0;
++}
++
++/*
++ * Copy the floating-point context to the supplied NT_PRFPREG buffer.
++ * Choose the appropriate helper for general registers, and then copy
++ * the FCSR register separately.
++ */
+ static int fpr_get(struct task_struct *target,
+ 		   const struct user_regset *regset,
+ 		   unsigned int pos, unsigned int count,
+ 		   void *kbuf, void __user *ubuf)
+ {
+-	unsigned i;
++	const int fcr31_pos = NUM_FPU_REGS * sizeof(elf_fpreg_t);
+ 	int err;
+-	u64 fpr_val;
+ 
+-	/* XXX fcr31  */
++	if (sizeof(target->thread.fpu.fpr[0]) == sizeof(elf_fpreg_t))
++		err = fpr_get_fpa(target, &pos, &count, &kbuf, &ubuf);
++	else
++		err = fpr_get_msa(target, &pos, &count, &kbuf, &ubuf);
++	if (err)
++		return err;
+ 
+-	if (sizeof(target->thread.fpu.fpr[i]) == sizeof(elf_fpreg_t))
+-		return user_regset_copyout(&pos, &count, &kbuf, &ubuf,
+-					   &target->thread.fpu,
+-					   0, sizeof(elf_fpregset_t));
++	err = user_regset_copyout(&pos, &count, &kbuf, &ubuf,
++				  &target->thread.fpu.fcr31,
++				  fcr31_pos, fcr31_pos + sizeof(u32));
+ 
+-	for (i = 0; i < NUM_FPU_REGS; i++) {
+-		fpr_val = get_fpr64(&target->thread.fpu.fpr[i], 0);
+-		err = user_regset_copyout(&pos, &count, &kbuf, &ubuf,
+-					  &fpr_val, i * sizeof(elf_fpreg_t),
+-					  (i + 1) * sizeof(elf_fpreg_t));
++	return err;
++}
++
++/*
++ * Copy the supplied NT_PRFPREG buffer to the floating-point context,
++ * !CONFIG_CPU_HAS_MSA variant.   Buffer slots correspond 1:1 to FP
++ * context's general register slots.  Only general registers are copied.
++ */
++static int fpr_set_fpa(struct task_struct *target,
++		       unsigned int *pos, unsigned int *count,
++		       const void **kbuf, const void __user **ubuf)
++{
++	return user_regset_copyin(pos, count, kbuf, ubuf,
++				  &target->thread.fpu,
++				  0, NUM_FPU_REGS * sizeof(elf_fpreg_t));
++}
++
++/*
++ * Copy the supplied NT_PRFPREG buffer to the floating-point context,
++ * CONFIG_CPU_HAS_MSA variant.  Buffer slots are copied to lower 64
++ * bits only of FP context's general register slots.  Only general
++ * registers are copied.
++ */
++static int fpr_set_msa(struct task_struct *target,
++		       unsigned int *pos, unsigned int *count,
++		       const void **kbuf, const void __user **ubuf)
++{
++	unsigned int i;
++	u64 fpr_val;
++	int err;
++
++	BUILD_BUG_ON(sizeof(fpr_val) != sizeof(elf_fpreg_t));
++	for (i = 0; i < NUM_FPU_REGS && *count > 0; i++) {
++		err = user_regset_copyin(pos, count, kbuf, ubuf,
++					 &fpr_val, i * sizeof(elf_fpreg_t),
++					 (i + 1) * sizeof(elf_fpreg_t));
+ 		if (err)
+ 			return err;
++		set_fpr64(&target->thread.fpu.fpr[i], 0, fpr_val);
+ 	}
+ 
+ 	return 0;
+ }
+ 
++/*
++ * Copy the supplied NT_PRFPREG buffer to the floating-point context.
++ * Choose the appropriate helper for general registers, and then copy
++ * the FCSR register separately.
++ *
++ * We optimize for the case where `count % sizeof(elf_fpreg_t) == 0',
++ * which is supposed to have been guaranteed by the kernel before
++ * calling us, e.g. in `ptrace_regset'.  We enforce that requirement,
++ * so that we can safely avoid preinitializing temporaries for
++ * partial register writes.
++ */
+ static int fpr_set(struct task_struct *target,
+ 		   const struct user_regset *regset,
+ 		   unsigned int pos, unsigned int count,
+ 		   const void *kbuf, const void __user *ubuf)
+ {
+-	unsigned i;
++	const int fcr31_pos = NUM_FPU_REGS * sizeof(elf_fpreg_t);
++	u32 fcr31;
+ 	int err;
+-	u64 fpr_val;
+ 
+-	/* XXX fcr31  */
++	BUG_ON(count % sizeof(elf_fpreg_t));
++
++	if (pos + count > sizeof(elf_fpregset_t))
++		return -EIO;
+ 
+ 	init_fp_ctx(target);
+ 
+-	if (sizeof(target->thread.fpu.fpr[i]) == sizeof(elf_fpreg_t))
+-		return user_regset_copyin(&pos, &count, &kbuf, &ubuf,
+-					  &target->thread.fpu,
+-					  0, sizeof(elf_fpregset_t));
++	if (sizeof(target->thread.fpu.fpr[0]) == sizeof(elf_fpreg_t))
++		err = fpr_set_fpa(target, &pos, &count, &kbuf, &ubuf);
++	else
++		err = fpr_set_msa(target, &pos, &count, &kbuf, &ubuf);
++	if (err)
++		return err;
+ 
+-	BUILD_BUG_ON(sizeof(fpr_val) != sizeof(elf_fpreg_t));
+-	for (i = 0; i < NUM_FPU_REGS && count >= sizeof(elf_fpreg_t); i++) {
++	if (count > 0) {
+ 		err = user_regset_copyin(&pos, &count, &kbuf, &ubuf,
+-					 &fpr_val, i * sizeof(elf_fpreg_t),
+-					 (i + 1) * sizeof(elf_fpreg_t));
++					 &fcr31,
++					 fcr31_pos, fcr31_pos + sizeof(u32));
+ 		if (err)
+ 			return err;
+-		set_fpr64(&target->thread.fpu.fpr[i], 0, fpr_val);
++
++		ptrace_setfcr31(target, fcr31);
+ 	}
+ 
+-	return 0;
++	return err;
+ }
+ 
+ enum mips_regset {
+@@ -618,6 +715,19 @@ static const struct user_regset_view user_mips64_view = {
  	.n		= ARRAY_SIZE(mips64_regsets),
  };
  
@@ -2513,7 +2745,7 @@ index 1395654cfc8d..5a09c2901a76 100644
  #endif /* CONFIG_64BIT */
  
  const struct user_regset_view *task_user_regset_view(struct task_struct *task)
-@@ -628,6 +641,10 @@ const struct user_regset_view *task_user_regset_view(struct task_struct *task)
+@@ -628,6 +738,10 @@ const struct user_regset_view *task_user_regset_view(struct task_struct *task)
  #ifdef CONFIG_MIPS32_O32
  	if (test_tsk_thread_flag(task, TIF_32BIT_REGS))
  		return &user_mips_view;
@@ -2765,11 +2997,72 @@ index 07f48827afda..acf8aa07cbe0 100644
  
  struct compat_ipc64_perm {
  	compat_key_t key;
+diff --git a/arch/parisc/include/asm/ldcw.h b/arch/parisc/include/asm/ldcw.h
+index dd5a08aaa4da..3eb4bfc1fb36 100644
+--- a/arch/parisc/include/asm/ldcw.h
++++ b/arch/parisc/include/asm/ldcw.h
+@@ -12,6 +12,7 @@
+    for the semaphore.  */
+ 
+ #define __PA_LDCW_ALIGNMENT	16
++#define __PA_LDCW_ALIGN_ORDER	4
+ #define __ldcw_align(a) ({					\
+ 	unsigned long __ret = (unsigned long) &(a)->lock[0];	\
+ 	__ret = (__ret + __PA_LDCW_ALIGNMENT - 1)		\
+@@ -29,6 +30,7 @@
+    ldcd). */
+ 
+ #define __PA_LDCW_ALIGNMENT	4
++#define __PA_LDCW_ALIGN_ORDER	2
+ #define __ldcw_align(a) (&(a)->slock)
+ #define __LDCW	"ldcw,co"
+ 
 diff --git a/arch/parisc/kernel/entry.S b/arch/parisc/kernel/entry.S
-index a4fd296c958e..f3cecf5117cf 100644
+index a4fd296c958e..e95207c0565e 100644
 --- a/arch/parisc/kernel/entry.S
 +++ b/arch/parisc/kernel/entry.S
-@@ -878,9 +878,6 @@ ENTRY_CFI(syscall_exit_rfi)
+@@ -35,6 +35,7 @@
+ #include <asm/pgtable.h>
+ #include <asm/signal.h>
+ #include <asm/unistd.h>
++#include <asm/ldcw.h>
+ #include <asm/thread_info.h>
+ 
+ #include <linux/linkage.h>
+@@ -46,6 +47,14 @@
+ #endif
+ 
+ 	.import		pa_tlb_lock,data
++	.macro  load_pa_tlb_lock reg
++#if __PA_LDCW_ALIGNMENT > 4
++	load32	PA(pa_tlb_lock) + __PA_LDCW_ALIGNMENT-1, \reg
++	depi	0,31,__PA_LDCW_ALIGN_ORDER, \reg
++#else
++	load32	PA(pa_tlb_lock), \reg
++#endif
++	.endm
+ 
+ 	/* space_to_prot macro creates a prot id from a space id */
+ 
+@@ -457,7 +466,7 @@
+ 	.macro		tlb_lock	spc,ptp,pte,tmp,tmp1,fault
+ #ifdef CONFIG_SMP
+ 	cmpib,COND(=),n	0,\spc,2f
+-	load32		PA(pa_tlb_lock),\tmp
++	load_pa_tlb_lock \tmp
+ 1:	LDCW		0(\tmp),\tmp1
+ 	cmpib,COND(=)	0,\tmp1,1b
+ 	nop
+@@ -480,7 +489,7 @@
+ 	/* Release pa_tlb_lock lock. */
+ 	.macro		tlb_unlock1	spc,tmp
+ #ifdef CONFIG_SMP
+-	load32		PA(pa_tlb_lock),\tmp
++	load_pa_tlb_lock \tmp
+ 	tlb_unlock0	\spc,\tmp
+ #endif
+ 	.endm
+@@ -878,9 +887,6 @@ ENTRY_CFI(syscall_exit_rfi)
  	STREG   %r19,PT_SR7(%r16)
  
  intr_return:
@@ -2779,7 +3072,7 @@ index a4fd296c958e..f3cecf5117cf 100644
  	/* check for reschedule */
  	mfctl   %cr30,%r1
  	LDREG   TI_FLAGS(%r1),%r19	/* sched.h: TIF_NEED_RESCHED */
-@@ -907,6 +904,11 @@ intr_check_sig:
+@@ -907,6 +913,11 @@ intr_check_sig:
  	LDREG	PT_IASQ1(%r16), %r20
  	cmpib,COND(=),n 0,%r20,intr_restore /* backward */
  
@@ -2791,7 +3084,7 @@ index a4fd296c958e..f3cecf5117cf 100644
  	copy	%r0, %r25			/* long in_syscall = 0 */
  #ifdef CONFIG_64BIT
  	ldo	-16(%r30),%r29			/* Reference param save area */
-@@ -958,6 +960,10 @@ intr_do_resched:
+@@ -958,6 +969,10 @@ intr_do_resched:
  	cmpib,COND(=)	0, %r20, intr_do_preempt
  	nop
  
@@ -2814,6 +3107,90 @@ index e3a8e5e4d5de..8d072c44f300 100644
  	.export os_hpmc_size
  os_hpmc_size:
  	.word .os_hpmc_end-.os_hpmc
+diff --git a/arch/parisc/kernel/pacache.S b/arch/parisc/kernel/pacache.S
+index adf7187f8951..2d40c4ff3f69 100644
+--- a/arch/parisc/kernel/pacache.S
++++ b/arch/parisc/kernel/pacache.S
+@@ -36,6 +36,7 @@
+ #include <asm/assembly.h>
+ #include <asm/pgtable.h>
+ #include <asm/cache.h>
++#include <asm/ldcw.h>
+ #include <linux/linkage.h>
+ 
+ 	.text
+@@ -333,8 +334,12 @@ ENDPROC_CFI(flush_data_cache_local)
+ 
+ 	.macro	tlb_lock	la,flags,tmp
+ #ifdef CONFIG_SMP
+-	ldil		L%pa_tlb_lock,%r1
+-	ldo		R%pa_tlb_lock(%r1),\la
++#if __PA_LDCW_ALIGNMENT > 4
++	load32		pa_tlb_lock + __PA_LDCW_ALIGNMENT-1, \la
++	depi		0,31,__PA_LDCW_ALIGN_ORDER, \la
++#else
++	load32		pa_tlb_lock, \la
++#endif
+ 	rsm		PSW_SM_I,\flags
+ 1:	LDCW		0(\la),\tmp
+ 	cmpib,<>,n	0,\tmp,3f
+diff --git a/arch/parisc/kernel/process.c b/arch/parisc/kernel/process.c
+index 30f92391a93e..cad3e8661cd6 100644
+--- a/arch/parisc/kernel/process.c
++++ b/arch/parisc/kernel/process.c
+@@ -39,6 +39,7 @@
+ #include <linux/kernel.h>
+ #include <linux/mm.h>
+ #include <linux/fs.h>
++#include <linux/cpu.h>
+ #include <linux/module.h>
+ #include <linux/personality.h>
+ #include <linux/ptrace.h>
+@@ -183,6 +184,44 @@ int dump_task_fpu (struct task_struct *tsk, elf_fpregset_t *r)
+ 	return 1;
+ }
+ 
++/*
++ * Idle thread support
++ *
++ * Detect when running on QEMU with SeaBIOS PDC Firmware and let
++ * QEMU idle the host too.
++ */
++
++int running_on_qemu __read_mostly;
++
++void __cpuidle arch_cpu_idle_dead(void)
++{
++	/* nop on real hardware, qemu will offline CPU. */
++	asm volatile("or %%r31,%%r31,%%r31\n":::);
++}
++
++void __cpuidle arch_cpu_idle(void)
++{
++	local_irq_enable();
++
++	/* nop on real hardware, qemu will idle sleep. */
++	asm volatile("or %%r10,%%r10,%%r10\n":::);
++}
++
++static int __init parisc_idle_init(void)
++{
++	const char *marker;
++
++	/* check QEMU/SeaBIOS marker in PAGE0 */
++	marker = (char *) &PAGE0->pad0;
++	running_on_qemu = (memcmp(marker, "SeaBIOS", 8) == 0);
++
++	if (!running_on_qemu)
++		cpu_idle_poll_ctrl(1);
++
++	return 0;
++}
++arch_initcall(parisc_idle_init);
++
+ /*
+  * Copy architecture-specific thread state
+  */
 diff --git a/arch/parisc/kernel/syscall.S b/arch/parisc/kernel/syscall.S
 index 41e60a9c7db2..e775f80ae28c 100644
 --- a/arch/parisc/kernel/syscall.S
@@ -3240,6 +3617,31 @@ index c9de03e0c1f1..d469224c4ada 100644
  		return __patch_instruction(addr, instr);
  
  	local_irq_save(flags);
+diff --git a/arch/powerpc/mm/fault.c b/arch/powerpc/mm/fault.c
+index 4797d08581ce..6e1e39035380 100644
+--- a/arch/powerpc/mm/fault.c
++++ b/arch/powerpc/mm/fault.c
+@@ -145,6 +145,11 @@ static noinline int bad_area(struct pt_regs *regs, unsigned long address)
+ 	return __bad_area(regs, address, SEGV_MAPERR);
+ }
+ 
++static noinline int bad_access(struct pt_regs *regs, unsigned long address)
++{
++	return __bad_area(regs, address, SEGV_ACCERR);
++}
++
+ static int do_sigbus(struct pt_regs *regs, unsigned long address,
+ 		     unsigned int fault)
+ {
+@@ -490,7 +495,7 @@ static int __do_page_fault(struct pt_regs *regs, unsigned long address,
+ 
+ good_area:
+ 	if (unlikely(access_error(is_write, is_exec, vma)))
+-		return bad_area(regs, address);
++		return bad_access(regs, address);
+ 
+ 	/*
+ 	 * If for any reason at all we couldn't handle the fault,
 diff --git a/arch/powerpc/mm/hash_native_64.c b/arch/powerpc/mm/hash_native_64.c
 index 3848af167df9..640cf566e986 100644
 --- a/arch/powerpc/mm/hash_native_64.c
@@ -4288,8 +4690,29 @@ index d39f121e67a9..bc905ae1d5c8 100644
  SYSCALL(sys_getsockopt,compat_sys_getsockopt)		/* 365 */
  SYSCALL(sys_setsockopt,compat_sys_setsockopt)
  SYSCALL(sys_getsockname,compat_sys_getsockname)
+diff --git a/arch/s390/kvm/kvm-s390.c b/arch/s390/kvm/kvm-s390.c
+index 40d0a1a97889..b87a930c2201 100644
+--- a/arch/s390/kvm/kvm-s390.c
++++ b/arch/s390/kvm/kvm-s390.c
+@@ -794,11 +794,12 @@ static int kvm_s390_vm_start_migration(struct kvm *kvm)
+ 
+ 	if (kvm->arch.use_cmma) {
+ 		/*
+-		 * Get the last slot. They should be sorted by base_gfn, so the
+-		 * last slot is also the one at the end of the address space.
+-		 * We have verified above that at least one slot is present.
++		 * Get the first slot. They are reverse sorted by base_gfn, so
++		 * the first slot is also the one at the end of the address
++		 * space. We have verified above that at least one slot is
++		 * present.
+ 		 */
+-		ms = slots->memslots + slots->used_slots - 1;
++		ms = slots->memslots;
+ 		/* round up so we only use full longs */
+ 		ram_pages = roundup(ms->base_gfn + ms->npages, BITS_PER_LONG);
+ 		/* allocate enough bytes to store all the bits */
 diff --git a/arch/s390/kvm/priv.c b/arch/s390/kvm/priv.c
-index c954ac49eee4..5b25287f449b 100644
+index c954ac49eee4..7bd3a59232f0 100644
 --- a/arch/s390/kvm/priv.c
 +++ b/arch/s390/kvm/priv.c
 @@ -235,8 +235,6 @@ static int try_handle_skey(struct kvm_vcpu *vcpu)
@@ -4331,6 +4754,15 @@ index c954ac49eee4..5b25287f449b 100644
  	rc = try_handle_skey(vcpu);
  	if (rc)
  		return rc != -EAGAIN ? rc : 0;
+@@ -1002,7 +1009,7 @@ static inline int do_essa(struct kvm_vcpu *vcpu, const int orc)
+ 		cbrlo[entries] = gfn << PAGE_SHIFT;
+ 	}
+ 
+-	if (orc) {
++	if (orc && gfn < ms->bitmap_size) {
+ 		/* increment only if we are really flipping the bit to 1 */
+ 		if (!test_and_set_bit(gfn, ms->pgste_bitmap))
+ 			atomic64_inc(&ms->dirty_pages);
 diff --git a/arch/s390/mm/pgalloc.c b/arch/s390/mm/pgalloc.c
 index cc2faffa7d6e..334b6d103cbd 100644
 --- a/arch/s390/mm/pgalloc.c
@@ -9961,6 +10393,58 @@ index 5f70044340ff..295abaa58add 100644
  
  ###
  # 64 bit specific files
+diff --git a/arch/x86/kernel/acpi/boot.c b/arch/x86/kernel/acpi/boot.c
+index 079535e53e2a..d75a7466bc84 100644
+--- a/arch/x86/kernel/acpi/boot.c
++++ b/arch/x86/kernel/acpi/boot.c
+@@ -429,6 +429,34 @@ static int mp_config_acpi_gsi(struct device *dev, u32 gsi, int trigger,
+ 	return 0;
+ }
+ 
++static int __init mp_register_ioapic_irq(u8 bus_irq, u8 polarity,
++						u8 trigger, u32 gsi)
++{
++	struct mpc_intsrc mp_irq;
++	int ioapic, pin;
++
++	/* Convert 'gsi' to 'ioapic.pin'(INTIN#) */
++	ioapic = mp_find_ioapic(gsi);
++	if (ioapic < 0) {
++		pr_warn("Failed to find ioapic for gsi : %u\n", gsi);
++		return ioapic;
++	}
++
++	pin = mp_find_ioapic_pin(ioapic, gsi);
++
++	mp_irq.type = MP_INTSRC;
++	mp_irq.irqtype = mp_INT;
++	mp_irq.irqflag = (trigger << 2) | polarity;
++	mp_irq.srcbus = MP_ISA_BUS;
++	mp_irq.srcbusirq = bus_irq;
++	mp_irq.dstapic = mpc_ioapic_id(ioapic);
++	mp_irq.dstirq = pin;
++
++	mp_save_irq(&mp_irq);
++
++	return 0;
++}
++
+ static int __init
+ acpi_parse_ioapic(struct acpi_subtable_header * header, const unsigned long end)
+ {
+@@ -473,7 +501,11 @@ static void __init acpi_sci_ioapic_setup(u8 bus_irq, u16 polarity, u16 trigger,
+ 	if (acpi_sci_flags & ACPI_MADT_POLARITY_MASK)
+ 		polarity = acpi_sci_flags & ACPI_MADT_POLARITY_MASK;
+ 
+-	mp_override_legacy_irq(bus_irq, polarity, trigger, gsi);
++	if (bus_irq < NR_IRQS_LEGACY)
++		mp_override_legacy_irq(bus_irq, polarity, trigger, gsi);
++	else
++		mp_register_ioapic_irq(bus_irq, polarity, trigger, gsi);
++
+ 	acpi_penalize_sci_irq(bus_irq, trigger, polarity);
+ 
+ 	/*
 diff --git a/arch/x86/kernel/apic/apic.c b/arch/x86/kernel/apic/apic.c
 index ff891772c9f8..89c7c8569e5e 100644
 --- a/arch/x86/kernel/apic/apic.c
@@ -10067,13 +10551,15 @@ index 630212fa9b9d..bf51e51d808d 100644
  
  #ifdef CONFIG_CC_STACKPROTECTOR
 diff --git a/arch/x86/kernel/cpu/Makefile b/arch/x86/kernel/cpu/Makefile
-index c60922a66385..90cb82dbba57 100644
+index c60922a66385..570e8bb1f386 100644
 --- a/arch/x86/kernel/cpu/Makefile
 +++ b/arch/x86/kernel/cpu/Makefile
-@@ -23,6 +23,7 @@ obj-y			+= rdrand.o
+@@ -22,7 +22,8 @@ obj-y			+= common.o
+ obj-y			+= rdrand.o
  obj-y			+= match.o
  obj-y			+= bugs.o
- obj-$(CONFIG_CPU_FREQ)	+= aperfmperf.o
+-obj-$(CONFIG_CPU_FREQ)	+= aperfmperf.o
++obj-y			+= aperfmperf.o
 +obj-y			+= cpuid-deps.o
  
  obj-$(CONFIG_PROC_FS)	+= proc.o
@@ -10096,6 +10582,124 @@ index d58184b7cd44..bcb75dc97d44 100644
  		set_cpu_bug(c, X86_BUG_FXSAVE_LEAK);
  
  	cpu_detect_cache_sizes(c);
+diff --git a/arch/x86/kernel/cpu/aperfmperf.c b/arch/x86/kernel/cpu/aperfmperf.c
+index 0ee83321a313..7eba34df54c3 100644
+--- a/arch/x86/kernel/cpu/aperfmperf.c
++++ b/arch/x86/kernel/cpu/aperfmperf.c
+@@ -14,6 +14,8 @@
+ #include <linux/percpu.h>
+ #include <linux/smp.h>
+ 
++#include "cpu.h"
++
+ struct aperfmperf_sample {
+ 	unsigned int	khz;
+ 	ktime_t	time;
+@@ -24,7 +26,7 @@ struct aperfmperf_sample {
+ static DEFINE_PER_CPU(struct aperfmperf_sample, samples);
+ 
+ #define APERFMPERF_CACHE_THRESHOLD_MS	10
+-#define APERFMPERF_REFRESH_DELAY_MS	20
++#define APERFMPERF_REFRESH_DELAY_MS	10
+ #define APERFMPERF_STALE_THRESHOLD_MS	1000
+ 
+ /*
+@@ -38,14 +40,8 @@ static void aperfmperf_snapshot_khz(void *dummy)
+ 	u64 aperf, aperf_delta;
+ 	u64 mperf, mperf_delta;
+ 	struct aperfmperf_sample *s = this_cpu_ptr(&samples);
+-	ktime_t now = ktime_get();
+-	s64 time_delta = ktime_ms_delta(now, s->time);
+ 	unsigned long flags;
+ 
+-	/* Don't bother re-computing within the cache threshold time. */
+-	if (time_delta < APERFMPERF_CACHE_THRESHOLD_MS)
+-		return;
+-
+ 	local_irq_save(flags);
+ 	rdmsrl(MSR_IA32_APERF, aperf);
+ 	rdmsrl(MSR_IA32_MPERF, mperf);
+@@ -61,31 +57,68 @@ static void aperfmperf_snapshot_khz(void *dummy)
+ 	if (mperf_delta == 0)
+ 		return;
+ 
+-	s->time = now;
++	s->time = ktime_get();
+ 	s->aperf = aperf;
+ 	s->mperf = mperf;
++	s->khz = div64_u64((cpu_khz * aperf_delta), mperf_delta);
++}
+ 
+-	/* If the previous iteration was too long ago, discard it. */
+-	if (time_delta > APERFMPERF_STALE_THRESHOLD_MS)
+-		s->khz = 0;
+-	else
+-		s->khz = div64_u64((cpu_khz * aperf_delta), mperf_delta);
++static bool aperfmperf_snapshot_cpu(int cpu, ktime_t now, bool wait)
++{
++	s64 time_delta = ktime_ms_delta(now, per_cpu(samples.time, cpu));
++
++	/* Don't bother re-computing within the cache threshold time. */
++	if (time_delta < APERFMPERF_CACHE_THRESHOLD_MS)
++		return true;
++
++	smp_call_function_single(cpu, aperfmperf_snapshot_khz, NULL, wait);
++
++	/* Return false if the previous iteration was too long ago. */
++	return time_delta <= APERFMPERF_STALE_THRESHOLD_MS;
+ }
+ 
+-unsigned int arch_freq_get_on_cpu(int cpu)
++unsigned int aperfmperf_get_khz(int cpu)
+ {
+-	unsigned int khz;
++	if (!cpu_khz)
++		return 0;
++
++	if (!static_cpu_has(X86_FEATURE_APERFMPERF))
++		return 0;
+ 
++	aperfmperf_snapshot_cpu(cpu, ktime_get(), true);
++	return per_cpu(samples.khz, cpu);
++}
++
++void arch_freq_prepare_all(void)
++{
++	ktime_t now = ktime_get();
++	bool wait = false;
++	int cpu;
++
++	if (!cpu_khz)
++		return;
++
++	if (!static_cpu_has(X86_FEATURE_APERFMPERF))
++		return;
++
++	for_each_online_cpu(cpu)
++		if (!aperfmperf_snapshot_cpu(cpu, now, false))
++			wait = true;
++
++	if (wait)
++		msleep(APERFMPERF_REFRESH_DELAY_MS);
++}
++
++unsigned int arch_freq_get_on_cpu(int cpu)
++{
+ 	if (!cpu_khz)
+ 		return 0;
+ 
+ 	if (!static_cpu_has(X86_FEATURE_APERFMPERF))
+ 		return 0;
+ 
+-	smp_call_function_single(cpu, aperfmperf_snapshot_khz, NULL, 1);
+-	khz = per_cpu(samples.khz, cpu);
+-	if (khz)
+-		return khz;
++	if (aperfmperf_snapshot_cpu(cpu, ktime_get(), true))
++		return per_cpu(samples.khz, cpu);
+ 
+ 	msleep(APERFMPERF_REFRESH_DELAY_MS);
+ 	smp_call_function_single(cpu, aperfmperf_snapshot_khz, NULL, 1);
 diff --git a/arch/x86/kernel/cpu/common.c b/arch/x86/kernel/cpu/common.c
 index c9176bae7fd8..2d3bd2215e5b 100644
 --- a/arch/x86/kernel/cpu/common.c
@@ -10360,6 +10964,18 @@ index c9176bae7fd8..2d3bd2215e5b 100644
  	load_fixmap_gdt(cpu);
  }
  #endif
+diff --git a/arch/x86/kernel/cpu/cpu.h b/arch/x86/kernel/cpu/cpu.h
+index f52a370b6c00..e806b11a99af 100644
+--- a/arch/x86/kernel/cpu/cpu.h
++++ b/arch/x86/kernel/cpu/cpu.h
+@@ -47,4 +47,7 @@ extern const struct cpu_dev *const __x86_cpu_dev_start[],
+ 
+ extern void get_cpu_cap(struct cpuinfo_x86 *c);
+ extern void cpu_detect_cache_sizes(struct cpuinfo_x86 *c);
++
++unsigned int aperfmperf_get_khz(int cpu);
++
+ #endif /* ARCH_X86_CPU_H */
 diff --git a/arch/x86/kernel/cpu/cpuid-deps.c b/arch/x86/kernel/cpu/cpuid-deps.c
 new file mode 100644
 index 000000000000..904b0a3c4e53
@@ -10694,6 +11310,28 @@ index 87cc9ab7a13c..4b8187639c2d 100644
  			/* kill current process */
  			return MCE_AR_SEVERITY;
  		} else {
+diff --git a/arch/x86/kernel/cpu/microcode/amd.c b/arch/x86/kernel/cpu/microcode/amd.c
+index c6daec4bdba5..330b8462d426 100644
+--- a/arch/x86/kernel/cpu/microcode/amd.c
++++ b/arch/x86/kernel/cpu/microcode/amd.c
+@@ -470,6 +470,7 @@ static unsigned int verify_patch_size(u8 family, u32 patch_size,
+ #define F14H_MPB_MAX_SIZE 1824
+ #define F15H_MPB_MAX_SIZE 4096
+ #define F16H_MPB_MAX_SIZE 3458
++#define F17H_MPB_MAX_SIZE 3200
+ 
+ 	switch (family) {
+ 	case 0x14:
+@@ -481,6 +482,9 @@ static unsigned int verify_patch_size(u8 family, u32 patch_size,
+ 	case 0x16:
+ 		max_size = F16H_MPB_MAX_SIZE;
+ 		break;
++	case 0x17:
++		max_size = F17H_MPB_MAX_SIZE;
++		break;
+ 	default:
+ 		max_size = F1XH_MPB_MAX_SIZE;
+ 		break;
 diff --git a/arch/x86/kernel/cpu/microcode/intel.c b/arch/x86/kernel/cpu/microcode/intel.c
 index 7dbcb7adf797..8ccdca6d3f9e 100644
 --- a/arch/x86/kernel/cpu/microcode/intel.c
@@ -10742,6 +11380,31 @@ index 236324e83a3a..85eb5fc180c8 100644
 +	.init.init_platform	= ms_hyperv_init_platform,
  };
 -EXPORT_SYMBOL(x86_hyper_ms_hyperv);
+diff --git a/arch/x86/kernel/cpu/proc.c b/arch/x86/kernel/cpu/proc.c
+index 6b7e17bf0b71..e7ecedafa1c8 100644
+--- a/arch/x86/kernel/cpu/proc.c
++++ b/arch/x86/kernel/cpu/proc.c
+@@ -5,6 +5,8 @@
+ #include <linux/seq_file.h>
+ #include <linux/cpufreq.h>
+ 
++#include "cpu.h"
++
+ /*
+  *	Get CPU information for use by the procfs.
+  */
+@@ -78,8 +80,10 @@ static int show_cpuinfo(struct seq_file *m, void *v)
+ 		seq_printf(m, "microcode\t: 0x%x\n", c->microcode);
+ 
+ 	if (cpu_has(c, X86_FEATURE_TSC)) {
+-		unsigned int freq = cpufreq_quick_get(cpu);
++		unsigned int freq = aperfmperf_get_khz(cpu);
+ 
++		if (!freq)
++			freq = cpufreq_quick_get(cpu);
+ 		if (!freq)
+ 			freq = cpu_khz;
+ 		seq_printf(m, "cpu MHz\t\t: %u.%03u\n",
 diff --git a/arch/x86/kernel/cpu/vmware.c b/arch/x86/kernel/cpu/vmware.c
 index 40ed26852ebd..8e005329648b 100644
 --- a/arch/x86/kernel/cpu/vmware.c
@@ -12848,7 +13511,7 @@ index 7a69cf053711..0fce8d73403c 100644
  		goto nomem;
  
 diff --git a/arch/x86/kvm/svm.c b/arch/x86/kvm/svm.c
-index 0e68f0b3cbf7..17fb6c6d939a 100644
+index 0e68f0b3cbf7..714e4804cbe2 100644
 --- a/arch/x86/kvm/svm.c
 +++ b/arch/x86/kvm/svm.c
 @@ -2189,6 +2189,8 @@ static int ud_interception(struct vcpu_svm *svm)
@@ -12874,8 +13537,34 @@ index 0e68f0b3cbf7..17fb6c6d939a 100644
  	case MSR_IA32_TSC:
  		kvm_write_tsc(vcpu, msr);
  		break;
+@@ -4955,6 +4964,25 @@ static void svm_vcpu_run(struct kvm_vcpu *vcpu)
+ 		"mov %%r13, %c[r13](%[svm]) \n\t"
+ 		"mov %%r14, %c[r14](%[svm]) \n\t"
+ 		"mov %%r15, %c[r15](%[svm]) \n\t"
++#endif
++		/*
++		* Clear host registers marked as clobbered to prevent
++		* speculative use.
++		*/
++		"xor %%" _ASM_BX ", %%" _ASM_BX " \n\t"
++		"xor %%" _ASM_CX ", %%" _ASM_CX " \n\t"
++		"xor %%" _ASM_DX ", %%" _ASM_DX " \n\t"
++		"xor %%" _ASM_SI ", %%" _ASM_SI " \n\t"
++		"xor %%" _ASM_DI ", %%" _ASM_DI " \n\t"
++#ifdef CONFIG_X86_64
++		"xor %%r8, %%r8 \n\t"
++		"xor %%r9, %%r9 \n\t"
++		"xor %%r10, %%r10 \n\t"
++		"xor %%r11, %%r11 \n\t"
++		"xor %%r12, %%r12 \n\t"
++		"xor %%r13, %%r13 \n\t"
++		"xor %%r14, %%r14 \n\t"
++		"xor %%r15, %%r15 \n\t"
+ #endif
+ 		"pop %%" _ASM_BP
+ 		:
 diff --git a/arch/x86/kvm/vmx.c b/arch/x86/kvm/vmx.c
-index a6f4f095f8f4..47d9432756f3 100644
+index a6f4f095f8f4..93de00832a82 100644
 --- a/arch/x86/kvm/vmx.c
 +++ b/arch/x86/kvm/vmx.c
 @@ -202,6 +202,10 @@ struct loaded_vmcs {
@@ -13176,7 +13865,40 @@ index a6f4f095f8f4..47d9432756f3 100644
  	/* Don't enter VMX if guest state is invalid, let the exit handler
  	   start emulation until we arrive back to a valid state */
  	if (vmx->emulation_required)
-@@ -11325,6 +11385,8 @@ static void load_vmcs12_host_state(struct kvm_vcpu *vcpu,
+@@ -9345,6 +9405,7 @@ static void __noclone vmx_vcpu_run(struct kvm_vcpu *vcpu)
+ 		/* Save guest registers, load host registers, keep flags */
+ 		"mov %0, %c[wordsize](%%" _ASM_SP ") \n\t"
+ 		"pop %0 \n\t"
++		"setbe %c[fail](%0)\n\t"
+ 		"mov %%" _ASM_AX ", %c[rax](%0) \n\t"
+ 		"mov %%" _ASM_BX ", %c[rbx](%0) \n\t"
+ 		__ASM_SIZE(pop) " %c[rcx](%0) \n\t"
+@@ -9361,12 +9422,23 @@ static void __noclone vmx_vcpu_run(struct kvm_vcpu *vcpu)
+ 		"mov %%r13, %c[r13](%0) \n\t"
+ 		"mov %%r14, %c[r14](%0) \n\t"
+ 		"mov %%r15, %c[r15](%0) \n\t"
++		"xor %%r8d,  %%r8d \n\t"
++		"xor %%r9d,  %%r9d \n\t"
++		"xor %%r10d, %%r10d \n\t"
++		"xor %%r11d, %%r11d \n\t"
++		"xor %%r12d, %%r12d \n\t"
++		"xor %%r13d, %%r13d \n\t"
++		"xor %%r14d, %%r14d \n\t"
++		"xor %%r15d, %%r15d \n\t"
+ #endif
+ 		"mov %%cr2, %%" _ASM_AX "   \n\t"
+ 		"mov %%" _ASM_AX ", %c[cr2](%0) \n\t"
+ 
++		"xor %%eax, %%eax \n\t"
++		"xor %%ebx, %%ebx \n\t"
++		"xor %%esi, %%esi \n\t"
++		"xor %%edi, %%edi \n\t"
+ 		"pop  %%" _ASM_BP "; pop  %%" _ASM_DX " \n\t"
+-		"setbe %c[fail](%0) \n\t"
+ 		".pushsection .rodata \n\t"
+ 		".global vmx_return \n\t"
+ 		"vmx_return: " _ASM_PTR " 2b \n\t"
+@@ -11325,6 +11397,8 @@ static void load_vmcs12_host_state(struct kvm_vcpu *vcpu,
  	vmcs_writel(GUEST_SYSENTER_EIP, vmcs12->host_ia32_sysenter_eip);
  	vmcs_writel(GUEST_IDTR_BASE, vmcs12->host_idtr_base);
  	vmcs_writel(GUEST_GDTR_BASE, vmcs12->host_gdtr_base);
@@ -13186,7 +13908,7 @@ index a6f4f095f8f4..47d9432756f3 100644
  	/* If not VM_EXIT_CLEAR_BNDCFGS, the L2 value propagates to L1.  */
  	if (vmcs12->vm_exit_controls & VM_EXIT_CLEAR_BNDCFGS)
 diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
-index 03869eb7fcd6..075619a92ce7 100644
+index 03869eb7fcd6..575c8953cc9a 100644
 --- a/arch/x86/kvm/x86.c
 +++ b/arch/x86/kvm/x86.c
 @@ -1830,6 +1830,9 @@ static void kvm_setup_pvclock_page(struct kvm_vcpu *v)
@@ -13199,6 +13921,41 @@ index 03869eb7fcd6..075619a92ce7 100644
  	vcpu->hv_clock.version = guest_hv_clock.version + 1;
  	kvm_write_guest_cached(v->kvm, &vcpu->pv_time,
  				&vcpu->hv_clock,
+@@ -4359,7 +4362,7 @@ static int vcpu_mmio_read(struct kvm_vcpu *vcpu, gpa_t addr, int len, void *v)
+ 					 addr, n, v))
+ 		    && kvm_io_bus_read(vcpu, KVM_MMIO_BUS, addr, n, v))
+ 			break;
+-		trace_kvm_mmio(KVM_TRACE_MMIO_READ, n, addr, *(u64 *)v);
++		trace_kvm_mmio(KVM_TRACE_MMIO_READ, n, addr, v);
+ 		handled += n;
+ 		addr += n;
+ 		len -= n;
+@@ -4618,7 +4621,7 @@ static int read_prepare(struct kvm_vcpu *vcpu, void *val, int bytes)
+ {
+ 	if (vcpu->mmio_read_completed) {
+ 		trace_kvm_mmio(KVM_TRACE_MMIO_READ, bytes,
+-			       vcpu->mmio_fragments[0].gpa, *(u64 *)val);
++			       vcpu->mmio_fragments[0].gpa, val);
+ 		vcpu->mmio_read_completed = 0;
+ 		return 1;
+ 	}
+@@ -4640,14 +4643,14 @@ static int write_emulate(struct kvm_vcpu *vcpu, gpa_t gpa,
+ 
+ static int write_mmio(struct kvm_vcpu *vcpu, gpa_t gpa, int bytes, void *val)
+ {
+-	trace_kvm_mmio(KVM_TRACE_MMIO_WRITE, bytes, gpa, *(u64 *)val);
++	trace_kvm_mmio(KVM_TRACE_MMIO_WRITE, bytes, gpa, val);
+ 	return vcpu_mmio_write(vcpu, gpa, bytes, val);
+ }
+ 
+ static int read_exit_mmio(struct kvm_vcpu *vcpu, gpa_t gpa,
+ 			  void *val, int bytes)
+ {
+-	trace_kvm_mmio(KVM_TRACE_MMIO_READ_UNSATISFIED, bytes, gpa, 0);
++	trace_kvm_mmio(KVM_TRACE_MMIO_READ_UNSATISFIED, bytes, gpa, NULL);
+ 	return X86EMUL_IO_NEEDED;
+ }
+ 
 @@ -5705,6 +5708,8 @@ int x86_emulate_instruction(struct kvm_vcpu *vcpu,
  			if (reexecute_instruction(vcpu, cr2, write_fault_to_spt,
  						emulation_type))
@@ -16014,10 +16771,10 @@ index 43c71166e1e2..91f7bcf979d3 100644
  		/* round the start down, and the end up */
 diff --git a/block/bfq-cgroup-included.c b/block/bfq-cgroup-included.c
 new file mode 100644
-index 000000000000..562b0ce581a7
+index 000000000000..f94743fb2e7d
 --- /dev/null
 +++ b/block/bfq-cgroup-included.c
-@@ -0,0 +1,1346 @@
+@@ -0,0 +1,1363 @@
 +/*
 + * BFQ: CGROUPS support.
 + *
@@ -16287,6 +17044,8 @@ index 000000000000..562b0ce581a7
 +
 +static void bfqg_get(struct bfq_group *bfqg)
 +{
++	trace_printk("bfqg %p\n", bfqg);
++
 +#ifdef BFQ_MQ
 +	bfqg->ref++;
 +#else
@@ -16300,6 +17059,9 @@ index 000000000000..562b0ce581a7
 +	bfqg->ref--;
 +
 +	BUG_ON(bfqg->ref < 0);
++	trace_printk("putting bfqg %p %s\n", bfqg,
++		     bfqg->ref == 0 ? "and freeing it" : "");
++
 +	if (bfqg->ref == 0)
 +		kfree(bfqg);
 +#else
@@ -16313,6 +17075,7 @@ index 000000000000..562b0ce581a7
 +	/* see comments in bfq_bic_update_cgroup for why refcounting bfqg */
 +	bfqg_get(bfqg);
 +
++	trace_printk("getting blkg for bfqg %p\n", bfqg);
 +	blkg_get(bfqg_to_blkg(bfqg));
 +}
 +
@@ -16320,6 +17083,7 @@ index 000000000000..562b0ce581a7
 +{
 +	bfqg_put(bfqg);
 +
++	trace_printk("putting blkg for bfqg %p\n", bfqg);
 +	blkg_put(bfqg_to_blkg(bfqg));
 +}
 +#endif
@@ -16402,6 +17166,8 @@ index 000000000000..562b0ce581a7
 +		 * Make sure that bfqg and its associated blkg do not
 +		 * disappear before entity.
 +		 */
++		bfq_log_bfqq(bfqq->bfqd, bfqq, "[%s] getting bfqg %p and blkg\n", __func__, bfqg);
++
 +		bfqg_and_blkg_get(bfqg);
 +#else
 +		bfqg_get(bfqg);
@@ -16495,6 +17261,7 @@ index 000000000000..562b0ce581a7
 +		kfree(bfqg);
 +		return NULL;
 +	}
++	trace_printk("bfqg %p\n", bfqg);
 +
 +#ifdef BFQ_MQ
 +	/* see comments in bfq_bic_update_cgroup for why refcounting */
@@ -16533,6 +17300,7 @@ index 000000000000..562b0ce581a7
 +static void bfq_pd_free(struct blkg_policy_data *pd)
 +{
 +	struct bfq_group *bfqg = pd_to_bfqg(pd);
++	trace_printk("bfqg %p\n", bfqg);
 +
 +	bfqg_stats_exit(&bfqg->stats);
 +#ifdef BFQ_MQ
@@ -16670,6 +17438,8 @@ index 000000000000..562b0ce581a7
 +		bfq_put_idle_entity(bfq_entity_service_tree(entity), entity);
 +	}
 +#ifdef BFQ_MQ
++	bfq_log_bfqq(bfqq->bfqd, bfqq, "[%s] putting blkg and bfqg %p\n", __func__, bfqg);
++
 +	bfqg_and_blkg_put(bfqq_group(bfqq));
 +#else
 +	bfqg_put(bfqq_group(bfqq));
@@ -16678,6 +17448,8 @@ index 000000000000..562b0ce581a7
 +	entity->parent = bfqg->my_entity;
 +	entity->sched_data = &bfqg->sched_data;
 +#ifdef BFQ_MQ
++	bfq_log_bfqq(bfqq->bfqd, bfqq, "[%s] getting blkg and bfqg %p\n", __func__, bfqg);
++
 +	/* pin down bfqg and its associated blkg  */
 +	bfqg_and_blkg_get(bfqg);
 +#else
@@ -16905,12 +17677,12 @@ index 000000000000..562b0ce581a7
 +
 +	entity = bfqg->my_entity;
 +
-+	if (!entity) /* root group */
-+		return;
-+
 +#ifdef BFQ_MQ
 +	spin_lock_irqsave(&bfqd->lock, flags);
 +#endif
++
++	if (!entity) /* root group */
++		goto put_async_queues;
 +
 +	/*
 +	 * Empty all service_trees belonging to this group before
@@ -16946,6 +17718,8 @@ index 000000000000..562b0ce581a7
 +	BUG_ON(bfqg->sched_data.in_service_entity);
 +
 +	__bfq_deactivate_entity(entity, false);
++
++put_async_queues:
 +	bfq_put_async_queues(bfqd, bfqg);
 +
 +#ifdef BFQ_MQ
@@ -17429,10 +18203,10 @@ index a4783da90ba8..0f860cf0d56d 100644
  out_free:
 diff --git a/block/bfq-mq-iosched.c b/block/bfq-mq-iosched.c
 new file mode 100644
-index 000000000000..63fdd16dec3c
+index 000000000000..2581fe0f6f2f
 --- /dev/null
 +++ b/block/bfq-mq-iosched.c
-@@ -0,0 +1,6081 @@
+@@ -0,0 +1,6085 @@
 +/*
 + * Budget Fair Queueing (BFQ) I/O scheduler.
 + *
@@ -21820,10 +22594,11 @@ index 000000000000..63fdd16dec3c
 +	if (bfqq->bfqd)
 +		bfq_log_bfqq(bfqq->bfqd, bfqq, "put_queue: %p freed", bfqq);
 +
-+	kmem_cache_free(bfq_pool, bfqq);
 +#ifdef BFQ_GROUP_IOSCHED_ENABLED
++	bfq_log_bfqq(bfqq->bfqd, bfqq, "[%s] putting blkg and bfqg %p\n", __func__, bfqg);
 +	bfqg_and_blkg_put(bfqg);
 +#endif
++	kmem_cache_free(bfq_pool, bfqq);
 +}
 +
 +static void bfq_put_cooperator(struct bfq_queue *bfqq)
@@ -22943,6 +23718,9 @@ index 000000000000..63fdd16dec3c
 +	BUG_ON(hrtimer_active(&bfqd->idle_slice_timer));
 +
 +#ifdef BFQ_GROUP_IOSCHED_ENABLED
++	/* release oom-queue reference to root group */
++	bfqg_and_blkg_put(bfqd->root_group);
++
 +	blkcg_deactivate_policy(bfqd->queue, &blkcg_policy_bfq);
 +#else
 +	spin_lock_irq(&bfqd->lock);
@@ -26599,10 +27377,10 @@ index 000000000000..4e6c5232e2fb
 +}
 diff --git a/block/bfq-sq-iosched.c b/block/bfq-sq-iosched.c
 new file mode 100644
-index 000000000000..486493aafaf8
+index 000000000000..c4df156b1fb4
 --- /dev/null
 +++ b/block/bfq-sq-iosched.c
-@@ -0,0 +1,5615 @@
+@@ -0,0 +1,5618 @@
 +/*
 + * Budget Fair Queueing (BFQ) I/O scheduler.
 + *
@@ -31658,6 +32436,9 @@ index 000000000000..486493aafaf8
 +	BUG_ON(hrtimer_active(&bfqd->idle_slice_timer));
 +
 +#ifdef BFQ_GROUP_IOSCHED_ENABLED
++	/* release oom-queue reference to root group */
++	bfqg_put(bfqd->root_group);
++
 +	blkcg_deactivate_policy(q, &blkcg_policy_bfq);
 +#else
 +	bfq_put_async_queues(bfqd, bfqd->root_group);
@@ -39852,14 +40633,14 @@ index 0d89621d9fe8..b210495ff33c 100644
  	return rc;
  }
 diff --git a/drivers/infiniband/hw/cxgb4/cq.c b/drivers/infiniband/hw/cxgb4/cq.c
-index be07da1997e6..514c1000ded1 100644
+index be07da1997e6..73feeeeb4283 100644
 --- a/drivers/infiniband/hw/cxgb4/cq.c
 +++ b/drivers/infiniband/hw/cxgb4/cq.c
 @@ -410,6 +410,11 @@ void c4iw_flush_hw_cq(struct c4iw_cq *chp)
  
  static int cqe_completes_wr(struct t4_cqe *cqe, struct t4_wq *wq)
  {
-+	if (CQE_OPCODE(cqe) == C4IW_DRAIN_OPCODE) {
++	if (DRAIN_CQE(cqe)) {
 +		WARN_ONCE(1, "Unexpected DRAIN CQE qp id %u!\n", wq->sq.qid);
 +		return 0;
 +	}
@@ -39867,6 +40648,15 @@ index be07da1997e6..514c1000ded1 100644
  	if (CQE_OPCODE(cqe) == FW_RI_TERMINATE)
  		return 0;
  
+@@ -504,7 +509,7 @@ static int poll_cq(struct t4_wq *wq, struct t4_cq *cq, struct t4_cqe *cqe,
+ 	/*
+ 	 * Special cqe for drain WR completions...
+ 	 */
+-	if (CQE_OPCODE(hw_cqe) == C4IW_DRAIN_OPCODE) {
++	if (DRAIN_CQE(hw_cqe)) {
+ 		*cookie = CQE_DRAIN_COOKIE(hw_cqe);
+ 		*cqe = *hw_cqe;
+ 		goto skip_cqe;
 @@ -581,10 +586,10 @@ static int poll_cq(struct t4_wq *wq, struct t4_cq *cq, struct t4_cqe *cqe,
  			ret = -EAGAIN;
  			goto skip_cqe;
@@ -39881,11 +40671,184 @@ index be07da1997e6..514c1000ded1 100644
  		}
  		goto proc_cqe;
  	}
+@@ -761,9 +766,6 @@ static int c4iw_poll_cq_one(struct c4iw_cq *chp, struct ib_wc *wc)
+ 				c4iw_invalidate_mr(qhp->rhp,
+ 						   CQE_WRID_FR_STAG(&cqe));
+ 			break;
+-		case C4IW_DRAIN_OPCODE:
+-			wc->opcode = IB_WC_SEND;
+-			break;
+ 		default:
+ 			pr_err("Unexpected opcode %d in the CQE received for QPID=0x%0x\n",
+ 			       CQE_OPCODE(&cqe), CQE_QPID(&cqe));
+diff --git a/drivers/infiniband/hw/cxgb4/ev.c b/drivers/infiniband/hw/cxgb4/ev.c
+index 8f963df0bffc..9d25298d96fa 100644
+--- a/drivers/infiniband/hw/cxgb4/ev.c
++++ b/drivers/infiniband/hw/cxgb4/ev.c
+@@ -109,9 +109,11 @@ static void post_qp_event(struct c4iw_dev *dev, struct c4iw_cq *chp,
+ 	if (qhp->ibqp.event_handler)
+ 		(*qhp->ibqp.event_handler)(&event, qhp->ibqp.qp_context);
+ 
+-	spin_lock_irqsave(&chp->comp_handler_lock, flag);
+-	(*chp->ibcq.comp_handler)(&chp->ibcq, chp->ibcq.cq_context);
+-	spin_unlock_irqrestore(&chp->comp_handler_lock, flag);
++	if (t4_clear_cq_armed(&chp->cq)) {
++		spin_lock_irqsave(&chp->comp_handler_lock, flag);
++		(*chp->ibcq.comp_handler)(&chp->ibcq, chp->ibcq.cq_context);
++		spin_unlock_irqrestore(&chp->comp_handler_lock, flag);
++	}
+ }
+ 
+ void c4iw_ev_dispatch(struct c4iw_dev *dev, struct t4_cqe *err_cqe)
+diff --git a/drivers/infiniband/hw/cxgb4/iw_cxgb4.h b/drivers/infiniband/hw/cxgb4/iw_cxgb4.h
+index 819a30635d53..20c481115a99 100644
+--- a/drivers/infiniband/hw/cxgb4/iw_cxgb4.h
++++ b/drivers/infiniband/hw/cxgb4/iw_cxgb4.h
+@@ -631,8 +631,6 @@ static inline int to_ib_qp_state(int c4iw_qp_state)
+ 	return IB_QPS_ERR;
+ }
+ 
+-#define C4IW_DRAIN_OPCODE FW_RI_SGE_EC_CR_RETURN
+-
+ static inline u32 c4iw_ib_to_tpt_access(int a)
+ {
+ 	return (a & IB_ACCESS_REMOTE_WRITE ? FW_RI_MEM_ACCESS_REM_WRITE : 0) |
 diff --git a/drivers/infiniband/hw/cxgb4/qp.c b/drivers/infiniband/hw/cxgb4/qp.c
-index cb7fc0d35d1d..e69453665a17 100644
+index cb7fc0d35d1d..f311ea73c806 100644
 --- a/drivers/infiniband/hw/cxgb4/qp.c
 +++ b/drivers/infiniband/hw/cxgb4/qp.c
-@@ -868,7 +868,12 @@ int c4iw_post_send(struct ib_qp *ibqp, struct ib_send_wr *wr,
+@@ -794,21 +794,57 @@ static int ring_kernel_rq_db(struct c4iw_qp *qhp, u16 inc)
+ 	return 0;
+ }
+ 
+-static void complete_sq_drain_wr(struct c4iw_qp *qhp, struct ib_send_wr *wr)
++static int ib_to_fw_opcode(int ib_opcode)
++{
++	int opcode;
++
++	switch (ib_opcode) {
++	case IB_WR_SEND_WITH_INV:
++		opcode = FW_RI_SEND_WITH_INV;
++		break;
++	case IB_WR_SEND:
++		opcode = FW_RI_SEND;
++		break;
++	case IB_WR_RDMA_WRITE:
++		opcode = FW_RI_RDMA_WRITE;
++		break;
++	case IB_WR_RDMA_READ:
++	case IB_WR_RDMA_READ_WITH_INV:
++		opcode = FW_RI_READ_REQ;
++		break;
++	case IB_WR_REG_MR:
++		opcode = FW_RI_FAST_REGISTER;
++		break;
++	case IB_WR_LOCAL_INV:
++		opcode = FW_RI_LOCAL_INV;
++		break;
++	default:
++		opcode = -EINVAL;
++	}
++	return opcode;
++}
++
++static int complete_sq_drain_wr(struct c4iw_qp *qhp, struct ib_send_wr *wr)
+ {
+ 	struct t4_cqe cqe = {};
+ 	struct c4iw_cq *schp;
+ 	unsigned long flag;
+ 	struct t4_cq *cq;
++	int opcode;
+ 
+ 	schp = to_c4iw_cq(qhp->ibqp.send_cq);
+ 	cq = &schp->cq;
+ 
++	opcode = ib_to_fw_opcode(wr->opcode);
++	if (opcode < 0)
++		return opcode;
++
+ 	cqe.u.drain_cookie = wr->wr_id;
+ 	cqe.header = cpu_to_be32(CQE_STATUS_V(T4_ERR_SWFLUSH) |
+-				 CQE_OPCODE_V(C4IW_DRAIN_OPCODE) |
++				 CQE_OPCODE_V(opcode) |
+ 				 CQE_TYPE_V(1) |
+ 				 CQE_SWCQE_V(1) |
++				 CQE_DRAIN_V(1) |
+ 				 CQE_QPID_V(qhp->wq.sq.qid));
+ 
+ 	spin_lock_irqsave(&schp->lock, flag);
+@@ -817,10 +853,29 @@ static void complete_sq_drain_wr(struct c4iw_qp *qhp, struct ib_send_wr *wr)
+ 	t4_swcq_produce(cq);
+ 	spin_unlock_irqrestore(&schp->lock, flag);
+ 
+-	spin_lock_irqsave(&schp->comp_handler_lock, flag);
+-	(*schp->ibcq.comp_handler)(&schp->ibcq,
+-				   schp->ibcq.cq_context);
+-	spin_unlock_irqrestore(&schp->comp_handler_lock, flag);
++	if (t4_clear_cq_armed(&schp->cq)) {
++		spin_lock_irqsave(&schp->comp_handler_lock, flag);
++		(*schp->ibcq.comp_handler)(&schp->ibcq,
++					   schp->ibcq.cq_context);
++		spin_unlock_irqrestore(&schp->comp_handler_lock, flag);
++	}
++	return 0;
++}
++
++static int complete_sq_drain_wrs(struct c4iw_qp *qhp, struct ib_send_wr *wr,
++				struct ib_send_wr **bad_wr)
++{
++	int ret = 0;
++
++	while (wr) {
++		ret = complete_sq_drain_wr(qhp, wr);
++		if (ret) {
++			*bad_wr = wr;
++			break;
++		}
++		wr = wr->next;
++	}
++	return ret;
+ }
+ 
+ static void complete_rq_drain_wr(struct c4iw_qp *qhp, struct ib_recv_wr *wr)
+@@ -835,9 +890,10 @@ static void complete_rq_drain_wr(struct c4iw_qp *qhp, struct ib_recv_wr *wr)
+ 
+ 	cqe.u.drain_cookie = wr->wr_id;
+ 	cqe.header = cpu_to_be32(CQE_STATUS_V(T4_ERR_SWFLUSH) |
+-				 CQE_OPCODE_V(C4IW_DRAIN_OPCODE) |
++				 CQE_OPCODE_V(FW_RI_SEND) |
+ 				 CQE_TYPE_V(0) |
+ 				 CQE_SWCQE_V(1) |
++				 CQE_DRAIN_V(1) |
+ 				 CQE_QPID_V(qhp->wq.sq.qid));
+ 
+ 	spin_lock_irqsave(&rchp->lock, flag);
+@@ -846,10 +902,20 @@ static void complete_rq_drain_wr(struct c4iw_qp *qhp, struct ib_recv_wr *wr)
+ 	t4_swcq_produce(cq);
+ 	spin_unlock_irqrestore(&rchp->lock, flag);
+ 
+-	spin_lock_irqsave(&rchp->comp_handler_lock, flag);
+-	(*rchp->ibcq.comp_handler)(&rchp->ibcq,
+-				   rchp->ibcq.cq_context);
+-	spin_unlock_irqrestore(&rchp->comp_handler_lock, flag);
++	if (t4_clear_cq_armed(&rchp->cq)) {
++		spin_lock_irqsave(&rchp->comp_handler_lock, flag);
++		(*rchp->ibcq.comp_handler)(&rchp->ibcq,
++					   rchp->ibcq.cq_context);
++		spin_unlock_irqrestore(&rchp->comp_handler_lock, flag);
++	}
++}
++
++static void complete_rq_drain_wrs(struct c4iw_qp *qhp, struct ib_recv_wr *wr)
++{
++	while (wr) {
++		complete_rq_drain_wr(qhp, wr);
++		wr = wr->next;
++	}
+ }
+ 
+ int c4iw_post_send(struct ib_qp *ibqp, struct ib_send_wr *wr,
+@@ -868,9 +934,14 @@ int c4iw_post_send(struct ib_qp *ibqp, struct ib_send_wr *wr,
  
  	qhp = to_c4iw_qp(ibqp);
  	spin_lock_irqsave(&qhp->lock, flag);
@@ -39897,9 +40860,12 @@ index cb7fc0d35d1d..e69453665a17 100644
 +	 */
 +	if (qhp->wq.flushed) {
  		spin_unlock_irqrestore(&qhp->lock, flag);
- 		complete_sq_drain_wr(qhp, wr);
+-		complete_sq_drain_wr(qhp, wr);
++		err = complete_sq_drain_wrs(qhp, wr, bad_wr);
  		return err;
-@@ -1012,7 +1017,12 @@ int c4iw_post_receive(struct ib_qp *ibqp, struct ib_recv_wr *wr,
+ 	}
+ 	num_wrs = t4_sq_avail(&qhp->wq);
+@@ -1012,9 +1083,14 @@ int c4iw_post_receive(struct ib_qp *ibqp, struct ib_recv_wr *wr,
  
  	qhp = to_c4iw_qp(ibqp);
  	spin_lock_irqsave(&qhp->lock, flag);
@@ -39911,10 +40877,86 @@ index cb7fc0d35d1d..e69453665a17 100644
 +	 */
 +	if (qhp->wq.flushed) {
  		spin_unlock_irqrestore(&qhp->lock, flag);
- 		complete_rq_drain_wr(qhp, wr);
+-		complete_rq_drain_wr(qhp, wr);
++		complete_rq_drain_wrs(qhp, wr);
  		return err;
+ 	}
+ 	num_wrs = t4_rq_avail(&qhp->wq);
+@@ -1257,48 +1333,51 @@ static void __flush_qp(struct c4iw_qp *qhp, struct c4iw_cq *rchp,
+ 
+ 	pr_debug("%s qhp %p rchp %p schp %p\n", __func__, qhp, rchp, schp);
+ 
+-	/* locking hierarchy: cq lock first, then qp lock. */
++	/* locking hierarchy: cqs lock first, then qp lock. */
+ 	spin_lock_irqsave(&rchp->lock, flag);
++	if (schp != rchp)
++		spin_lock(&schp->lock);
+ 	spin_lock(&qhp->lock);
+ 
+ 	if (qhp->wq.flushed) {
+ 		spin_unlock(&qhp->lock);
++		if (schp != rchp)
++			spin_unlock(&schp->lock);
+ 		spin_unlock_irqrestore(&rchp->lock, flag);
+ 		return;
+ 	}
+ 	qhp->wq.flushed = 1;
++	t4_set_wq_in_error(&qhp->wq);
+ 
+ 	c4iw_flush_hw_cq(rchp);
+ 	c4iw_count_rcqes(&rchp->cq, &qhp->wq, &count);
+ 	rq_flushed = c4iw_flush_rq(&qhp->wq, &rchp->cq, count);
+-	spin_unlock(&qhp->lock);
+-	spin_unlock_irqrestore(&rchp->lock, flag);
+ 
+-	/* locking hierarchy: cq lock first, then qp lock. */
+-	spin_lock_irqsave(&schp->lock, flag);
+-	spin_lock(&qhp->lock);
+ 	if (schp != rchp)
+ 		c4iw_flush_hw_cq(schp);
+ 	sq_flushed = c4iw_flush_sq(qhp);
++
+ 	spin_unlock(&qhp->lock);
+-	spin_unlock_irqrestore(&schp->lock, flag);
++	if (schp != rchp)
++		spin_unlock(&schp->lock);
++	spin_unlock_irqrestore(&rchp->lock, flag);
+ 
+ 	if (schp == rchp) {
+-		if (t4_clear_cq_armed(&rchp->cq) &&
+-		    (rq_flushed || sq_flushed)) {
++		if ((rq_flushed || sq_flushed) &&
++		    t4_clear_cq_armed(&rchp->cq)) {
+ 			spin_lock_irqsave(&rchp->comp_handler_lock, flag);
+ 			(*rchp->ibcq.comp_handler)(&rchp->ibcq,
+ 						   rchp->ibcq.cq_context);
+ 			spin_unlock_irqrestore(&rchp->comp_handler_lock, flag);
+ 		}
+ 	} else {
+-		if (t4_clear_cq_armed(&rchp->cq) && rq_flushed) {
++		if (rq_flushed && t4_clear_cq_armed(&rchp->cq)) {
+ 			spin_lock_irqsave(&rchp->comp_handler_lock, flag);
+ 			(*rchp->ibcq.comp_handler)(&rchp->ibcq,
+ 						   rchp->ibcq.cq_context);
+ 			spin_unlock_irqrestore(&rchp->comp_handler_lock, flag);
+ 		}
+-		if (t4_clear_cq_armed(&schp->cq) && sq_flushed) {
++		if (sq_flushed && t4_clear_cq_armed(&schp->cq)) {
+ 			spin_lock_irqsave(&schp->comp_handler_lock, flag);
+ 			(*schp->ibcq.comp_handler)(&schp->ibcq,
+ 						   schp->ibcq.cq_context);
+@@ -1315,8 +1394,8 @@ static void flush_qp(struct c4iw_qp *qhp)
+ 	rchp = to_c4iw_cq(qhp->ibqp.recv_cq);
+ 	schp = to_c4iw_cq(qhp->ibqp.send_cq);
+ 
+-	t4_set_wq_in_error(&qhp->wq);
+ 	if (qhp->ibqp.uobject) {
++		t4_set_wq_in_error(&qhp->wq);
+ 		t4_set_cq_in_error(&rchp->cq);
+ 		spin_lock_irqsave(&rchp->comp_handler_lock, flag);
+ 		(*rchp->ibcq.comp_handler)(&rchp->ibcq, rchp->ibcq.cq_context);
 diff --git a/drivers/infiniband/hw/cxgb4/t4.h b/drivers/infiniband/hw/cxgb4/t4.h
-index e765c00303cd..bcb80ca67d3d 100644
+index e765c00303cd..80b390e861dc 100644
 --- a/drivers/infiniband/hw/cxgb4/t4.h
 +++ b/drivers/infiniband/hw/cxgb4/t4.h
 @@ -171,7 +171,7 @@ struct t4_cqe {
@@ -39926,6 +40968,26 @@ index e765c00303cd..bcb80ca67d3d 100644
  			u16 nada2;
  			u16 cidx;
  		} scqe;
+@@ -197,6 +197,11 @@ struct t4_cqe {
+ #define CQE_SWCQE_G(x)    ((((x) >> CQE_SWCQE_S)) & CQE_SWCQE_M)
+ #define CQE_SWCQE_V(x)	  ((x)<<CQE_SWCQE_S)
+ 
++#define CQE_DRAIN_S       10
++#define CQE_DRAIN_M       0x1
++#define CQE_DRAIN_G(x)    ((((x) >> CQE_DRAIN_S)) & CQE_DRAIN_M)
++#define CQE_DRAIN_V(x)	  ((x)<<CQE_DRAIN_S)
++
+ #define CQE_STATUS_S      5
+ #define CQE_STATUS_M      0x1F
+ #define CQE_STATUS_G(x)   ((((x) >> CQE_STATUS_S)) & CQE_STATUS_M)
+@@ -213,6 +218,7 @@ struct t4_cqe {
+ #define CQE_OPCODE_V(x)   ((x)<<CQE_OPCODE_S)
+ 
+ #define SW_CQE(x)         (CQE_SWCQE_G(be32_to_cpu((x)->header)))
++#define DRAIN_CQE(x)      (CQE_DRAIN_G(be32_to_cpu((x)->header)))
+ #define CQE_QPID(x)       (CQE_QPID_G(be32_to_cpu((x)->header)))
+ #define CQE_TYPE(x)       (CQE_TYPE_G(be32_to_cpu((x)->header)))
+ #define SQ_TYPE(x)	  (CQE_TYPE((x)))
 diff --git a/drivers/infiniband/hw/cxgb4/t4fw_ri_api.h b/drivers/infiniband/hw/cxgb4/t4fw_ri_api.h
 index 010c709ba3bb..58c531db4f4a 100644
 --- a/drivers/infiniband/hw/cxgb4/t4fw_ri_api.h
@@ -40516,10 +41578,29 @@ index fa5ccdb3bb2a..60d7b493ed2d 100644
  
  static int srp_send_req(struct srp_rdma_ch *ch, bool multich)
 diff --git a/drivers/infiniband/ulp/srpt/ib_srpt.c b/drivers/infiniband/ulp/srpt/ib_srpt.c
-index 9e8e9220f816..95178b4e3565 100644
+index 9e8e9220f816..ee578fa713c2 100644
 --- a/drivers/infiniband/ulp/srpt/ib_srpt.c
 +++ b/drivers/infiniband/ulp/srpt/ib_srpt.c
-@@ -2777,7 +2777,7 @@ static int srpt_parse_i_port_id(u8 i_port_id[16], const char *name)
+@@ -1000,8 +1000,7 @@ static int srpt_init_ch_qp(struct srpt_rdma_ch *ch, struct ib_qp *qp)
+ 		return -ENOMEM;
+ 
+ 	attr->qp_state = IB_QPS_INIT;
+-	attr->qp_access_flags = IB_ACCESS_LOCAL_WRITE | IB_ACCESS_REMOTE_READ |
+-	    IB_ACCESS_REMOTE_WRITE;
++	attr->qp_access_flags = IB_ACCESS_LOCAL_WRITE;
+ 	attr->port_num = ch->sport->port;
+ 	attr->pkey_index = 0;
+ 
+@@ -1992,7 +1991,7 @@ static int srpt_cm_req_recv(struct ib_cm_id *cm_id,
+ 		goto destroy_ib;
+ 	}
+ 
+-	guid = (__be16 *)&param->primary_path->sgid.global.interface_id;
++	guid = (__be16 *)&param->primary_path->dgid.global.interface_id;
+ 	snprintf(ch->ini_guid, sizeof(ch->ini_guid), "%04x:%04x:%04x:%04x",
+ 		 be16_to_cpu(guid[0]), be16_to_cpu(guid[1]),
+ 		 be16_to_cpu(guid[2]), be16_to_cpu(guid[3]));
+@@ -2777,7 +2776,7 @@ static int srpt_parse_i_port_id(u8 i_port_id[16], const char *name)
  {
  	const char *p;
  	unsigned len, count, leading_zero_bytes;
@@ -40528,7 +41609,7 @@ index 9e8e9220f816..95178b4e3565 100644
  
  	p = name;
  	if (strncasecmp(p, "0x", 2) == 0)
-@@ -2789,10 +2789,9 @@ static int srpt_parse_i_port_id(u8 i_port_id[16], const char *name)
+@@ -2789,10 +2788,9 @@ static int srpt_parse_i_port_id(u8 i_port_id[16], const char *name)
  	count = min(len / 2, 16U);
  	leading_zero_bytes = 16 - count;
  	memset(i_port_id, 0, leading_zero_bytes);
@@ -40542,6 +41623,19 @@ index 9e8e9220f816..95178b4e3565 100644
  out:
  	return ret;
  }
+diff --git a/drivers/input/mouse/elantech.c b/drivers/input/mouse/elantech.c
+index b84cd978fce2..a4aaa748e987 100644
+--- a/drivers/input/mouse/elantech.c
++++ b/drivers/input/mouse/elantech.c
+@@ -1613,7 +1613,7 @@ static int elantech_set_properties(struct elantech_data *etd)
+ 		case 5:
+ 			etd->hw_version = 3;
+ 			break;
+-		case 6 ... 14:
++		case 6 ... 15:
+ 			etd->hw_version = 4;
+ 			break;
+ 		default:
 diff --git a/drivers/input/mouse/synaptics.c b/drivers/input/mouse/synaptics.c
 index ee5466a374bf..4fce7aa591b4 100644
 --- a/drivers/input/mouse/synaptics.c
@@ -40609,6 +41703,52 @@ index 8e8874d23717..99a2a57b6cfd 100644
 +	end   = IOVA_PFN(region->start + region->length - 1);
  
  	WARN_ON_ONCE(reserve_iova(&dma_dom->iovad, start, end) == NULL);
+ }
+diff --git a/drivers/iommu/arm-smmu-v3.c b/drivers/iommu/arm-smmu-v3.c
+index e67ba6c40faf..8f7a3c00b6cf 100644
+--- a/drivers/iommu/arm-smmu-v3.c
++++ b/drivers/iommu/arm-smmu-v3.c
+@@ -1611,13 +1611,15 @@ static int arm_smmu_domain_finalise(struct iommu_domain *domain)
+ 	domain->pgsize_bitmap = pgtbl_cfg.pgsize_bitmap;
+ 	domain->geometry.aperture_end = (1UL << ias) - 1;
+ 	domain->geometry.force_aperture = true;
+-	smmu_domain->pgtbl_ops = pgtbl_ops;
+ 
+ 	ret = finalise_stage_fn(smmu_domain, &pgtbl_cfg);
+-	if (ret < 0)
++	if (ret < 0) {
+ 		free_io_pgtable_ops(pgtbl_ops);
++		return ret;
++	}
+ 
+-	return ret;
++	smmu_domain->pgtbl_ops = pgtbl_ops;
++	return 0;
+ }
+ 
+ static __le64 *arm_smmu_get_step_for_sid(struct arm_smmu_device *smmu, u32 sid)
+@@ -1644,7 +1646,7 @@ static __le64 *arm_smmu_get_step_for_sid(struct arm_smmu_device *smmu, u32 sid)
+ 
+ static void arm_smmu_install_ste_for_dev(struct iommu_fwspec *fwspec)
+ {
+-	int i;
++	int i, j;
+ 	struct arm_smmu_master_data *master = fwspec->iommu_priv;
+ 	struct arm_smmu_device *smmu = master->smmu;
+ 
+@@ -1652,6 +1654,13 @@ static void arm_smmu_install_ste_for_dev(struct iommu_fwspec *fwspec)
+ 		u32 sid = fwspec->ids[i];
+ 		__le64 *step = arm_smmu_get_step_for_sid(smmu, sid);
+ 
++		/* Bridged PCI devices may end up with duplicated IDs */
++		for (j = 0; j < i; j++)
++			if (fwspec->ids[j] == sid)
++				break;
++		if (j < i)
++			continue;
++
+ 		arm_smmu_write_strtab_ent(smmu, sid, step, &master->ste);
+ 	}
  }
 diff --git a/drivers/iommu/intel-iommu.c b/drivers/iommu/intel-iommu.c
 index 6784a05dd6b2..83f3d4831f94 100644
@@ -41392,7 +42532,7 @@ index d2121637b4ab..0cabf31fb163 100644
  		int i;
  		while (block < (chunks << chunkshift)) {
 diff --git a/drivers/md/dm-bufio.c b/drivers/md/dm-bufio.c
-index d216a8f7bc22..8e3adcb46851 100644
+index d216a8f7bc22..6d416fdc25cb 100644
 --- a/drivers/md/dm-bufio.c
 +++ b/drivers/md/dm-bufio.c
 @@ -974,7 +974,8 @@ static void __get_memory_limit(struct dm_bufio_client *c,
@@ -41405,7 +42545,30 @@ index d216a8f7bc22..8e3adcb46851 100644
  }
  
  /*
-@@ -1910,19 +1911,15 @@ static int __init dm_bufio_init(void)
+@@ -1610,7 +1611,8 @@ static unsigned long __scan(struct dm_bufio_client *c, unsigned long nr_to_scan,
+ 	int l;
+ 	struct dm_buffer *b, *tmp;
+ 	unsigned long freed = 0;
+-	unsigned long count = nr_to_scan;
++	unsigned long count = c->n_buffers[LIST_CLEAN] +
++			      c->n_buffers[LIST_DIRTY];
+ 	unsigned long retain_target = get_retain_buffers(c);
+ 
+ 	for (l = 0; l < LIST_SIZE; l++) {
+@@ -1646,8 +1648,11 @@ static unsigned long
+ dm_bufio_shrink_count(struct shrinker *shrink, struct shrink_control *sc)
+ {
+ 	struct dm_bufio_client *c = container_of(shrink, struct dm_bufio_client, shrinker);
++	unsigned long count = ACCESS_ONCE(c->n_buffers[LIST_CLEAN]) +
++			      ACCESS_ONCE(c->n_buffers[LIST_DIRTY]);
++	unsigned long retain_target = get_retain_buffers(c);
+ 
+-	return ACCESS_ONCE(c->n_buffers[LIST_CLEAN]) + ACCESS_ONCE(c->n_buffers[LIST_DIRTY]);
++	return (count < retain_target) ? 0 : (count - retain_target);
+ }
+ 
+ /*
+@@ -1910,19 +1915,15 @@ static int __init dm_bufio_init(void)
  	memset(&dm_bufio_caches, 0, sizeof dm_bufio_caches);
  	memset(&dm_bufio_cache_names, 0, sizeof dm_bufio_cache_names);
  
@@ -44270,6 +45433,18 @@ index 54540c8fa1a2..9f98f74ff221 100644
  		mtd_set_ooblayout(mtd, &omap_ooblayout_ops);
  		oobbytes_per_step		= nand_chip->ecc.bytes;
  
+diff --git a/drivers/mtd/nand/pxa3xx_nand.c b/drivers/mtd/nand/pxa3xx_nand.c
+index 85cff68643e0..125b744c9c28 100644
+--- a/drivers/mtd/nand/pxa3xx_nand.c
++++ b/drivers/mtd/nand/pxa3xx_nand.c
+@@ -950,6 +950,7 @@ static void prepare_start_command(struct pxa3xx_nand_info *info, int command)
+ 
+ 	switch (command) {
+ 	case NAND_CMD_READ0:
++	case NAND_CMD_READOOB:
+ 	case NAND_CMD_PAGEPROG:
+ 		info->use_ecc = 1;
+ 		break;
 diff --git a/drivers/mtd/spi-nor/intel-spi.c b/drivers/mtd/spi-nor/intel-spi.c
 index 8a596bfeddff..7802ac3ba934 100644
 --- a/drivers/mtd/spi-nor/intel-spi.c
@@ -44435,6 +45610,19 @@ index 9fdb0f0bfa06..c6dcf93675c0 100644
  	case -ESHUTDOWN:
  		return;
  
+diff --git a/drivers/net/can/usb/gs_usb.c b/drivers/net/can/usb/gs_usb.c
+index 68ac3e88a8ce..8bf80ad9dc44 100644
+--- a/drivers/net/can/usb/gs_usb.c
++++ b/drivers/net/can/usb/gs_usb.c
+@@ -449,7 +449,7 @@ static int gs_usb_set_bittiming(struct net_device *netdev)
+ 		dev_err(netdev->dev.parent, "Couldn't set bittimings (err=%d)",
+ 			rc);
+ 
+-	return rc;
++	return (rc > 0) ? 0 : rc;
+ }
+ 
+ static void gs_usb_xmit_callback(struct urb *urb)
 diff --git a/drivers/net/can/usb/kvaser_usb.c b/drivers/net/can/usb/kvaser_usb.c
 index 9b18d96ef526..63587b8e6825 100644
 --- a/drivers/net/can/usb/kvaser_usb.c
@@ -44520,6 +45708,19 @@ index d000cb62d6ae..27861c417c94 100644
  	case -ESHUTDOWN:
  		return;
  
+diff --git a/drivers/net/can/vxcan.c b/drivers/net/can/vxcan.c
+index 8404e8852a0f..b4c4a2c76437 100644
+--- a/drivers/net/can/vxcan.c
++++ b/drivers/net/can/vxcan.c
+@@ -194,7 +194,7 @@ static int vxcan_newlink(struct net *net, struct net_device *dev,
+ 		tbp = peer_tb;
+ 	}
+ 
+-	if (tbp[IFLA_IFNAME]) {
++	if (ifmp && tbp[IFLA_IFNAME]) {
+ 		nla_strlcpy(ifname, tbp[IFLA_IFNAME], IFNAMSIZ);
+ 		name_assign_type = NET_NAME_USER;
+ 	} else {
 diff --git a/drivers/net/dsa/bcm_sf2.c b/drivers/net/dsa/bcm_sf2.c
 index d7b53d53c116..72d6ffbfd638 100644
 --- a/drivers/net/dsa/bcm_sf2.c
@@ -52461,6 +53662,17 @@ index 000000000000..209cb6487e24
 +
 +module_init(tp_init);
 +module_exit(tp_exit);
+diff --git a/drivers/platform/x86/wmi.c b/drivers/platform/x86/wmi.c
+index 0765b1797d4c..7f8fa42a1084 100644
+--- a/drivers/platform/x86/wmi.c
++++ b/drivers/platform/x86/wmi.c
+@@ -1268,5 +1268,5 @@ static void __exit acpi_wmi_exit(void)
+ 	bus_unregister(&wmi_bus_type);
+ }
+ 
+-subsys_initcall(acpi_wmi_init);
++subsys_initcall_sync(acpi_wmi_init);
+ module_exit(acpi_wmi_exit);
 diff --git a/drivers/rapidio/devices/rio_mport_cdev.c b/drivers/rapidio/devices/rio_mport_cdev.c
 index 5beb0c361076..76afe1449cab 100644
 --- a/drivers/rapidio/devices/rio_mport_cdev.c
@@ -131931,6 +133143,29 @@ index 9d357b2ea6cb..7572cc59ec3b 100644
  		   (unsigned long long)task->sched_info.run_delay,
  		   task->sched_info.pcount);
  
+diff --git a/fs/proc/cpuinfo.c b/fs/proc/cpuinfo.c
+index e0f867cd8553..96f1087e372c 100644
+--- a/fs/proc/cpuinfo.c
++++ b/fs/proc/cpuinfo.c
+@@ -1,12 +1,18 @@
+ // SPDX-License-Identifier: GPL-2.0
++#include <linux/cpufreq.h>
+ #include <linux/fs.h>
+ #include <linux/init.h>
+ #include <linux/proc_fs.h>
+ #include <linux/seq_file.h>
+ 
++__weak void arch_freq_prepare_all(void)
++{
++}
++
+ extern const struct seq_operations cpuinfo_op;
+ static int cpuinfo_open(struct inode *inode, struct file *file)
+ {
++	arch_freq_prepare_all();
+ 	return seq_open(file, &cpuinfo_op);
+ }
+ 
 diff --git a/fs/proc/proc_tty.c b/fs/proc/proc_tty.c
 index 2da657848cfc..d0cf1c50bb6c 100644
 --- a/fs/proc/proc_tty.c
@@ -133065,6 +134300,18 @@ index 000000000000..6b79a9bba9a7
 +#endif
 +
 +#endif /* __LINUX_COMPILER_TYPES_H */
+diff --git a/include/linux/cpufreq.h b/include/linux/cpufreq.h
+index 537ff842ff73..cbf85c4c745f 100644
+--- a/include/linux/cpufreq.h
++++ b/include/linux/cpufreq.h
+@@ -917,6 +917,7 @@ static inline bool policy_has_boost_freq(struct cpufreq_policy *policy)
+ }
+ #endif
+ 
++extern void arch_freq_prepare_all(void);
+ extern unsigned int arch_freq_get_on_cpu(int cpu);
+ 
+ /* the following are really really optional */
 diff --git a/include/linux/cpuhotplug.h b/include/linux/cpuhotplug.h
 index 2477a5cb5bd5..fb83dee528a1 100644
 --- a/include/linux/cpuhotplug.h
@@ -134612,6 +135859,31 @@ index 000000000000..fb634b74adf3
 +
 +/* This part must be outside protection */
 +#include <trace/define_trace.h>
+diff --git a/include/trace/events/kvm.h b/include/trace/events/kvm.h
+index e4b0b8e09932..2c735a3e6613 100644
+--- a/include/trace/events/kvm.h
++++ b/include/trace/events/kvm.h
+@@ -211,7 +211,7 @@ TRACE_EVENT(kvm_ack_irq,
+ 	{ KVM_TRACE_MMIO_WRITE, "write" }
+ 
+ TRACE_EVENT(kvm_mmio,
+-	TP_PROTO(int type, int len, u64 gpa, u64 val),
++	TP_PROTO(int type, int len, u64 gpa, void *val),
+ 	TP_ARGS(type, len, gpa, val),
+ 
+ 	TP_STRUCT__entry(
+@@ -225,7 +225,10 @@ TRACE_EVENT(kvm_mmio,
+ 		__entry->type		= type;
+ 		__entry->len		= len;
+ 		__entry->gpa		= gpa;
+-		__entry->val		= val;
++		__entry->val		= 0;
++		if (val)
++			memcpy(&__entry->val, val,
++			       min_t(u32, sizeof(__entry->val), len));
+ 	),
+ 
+ 	TP_printk("mmio %s len %u gpa 0x%llx val 0x%llx",
 diff --git a/include/trace/events/sunrpc.h b/include/trace/events/sunrpc.h
 index 25a7739514cd..3868b4752324 100644
 --- a/include/trace/events/sunrpc.h
@@ -144382,6 +145654,52 @@ index 418a1c045933..5f0dfb2abb8d 100644
  
  	/* Ensure unexpected behavior doesn't result in failing open. */
  	if (unlikely(WARN_ON(f == NULL)))
+diff --git a/kernel/signal.c b/kernel/signal.c
+index 8dcd8825b2de..1facff1dbbae 100644
+--- a/kernel/signal.c
++++ b/kernel/signal.c
+@@ -78,7 +78,7 @@ static int sig_task_ignored(struct task_struct *t, int sig, bool force)
+ 	handler = sig_handler(t, sig);
+ 
+ 	if (unlikely(t->signal->flags & SIGNAL_UNKILLABLE) &&
+-			handler == SIG_DFL && !force)
++	    handler == SIG_DFL && !(force && sig_kernel_only(sig)))
+ 		return 1;
+ 
+ 	return sig_handler_ignored(handler, sig);
+@@ -94,13 +94,15 @@ static int sig_ignored(struct task_struct *t, int sig, bool force)
+ 	if (sigismember(&t->blocked, sig) || sigismember(&t->real_blocked, sig))
+ 		return 0;
+ 
+-	if (!sig_task_ignored(t, sig, force))
+-		return 0;
+-
+ 	/*
+-	 * Tracers may want to know about even ignored signals.
++	 * Tracers may want to know about even ignored signal unless it
++	 * is SIGKILL which can't be reported anyway but can be ignored
++	 * by SIGNAL_UNKILLABLE task.
+ 	 */
+-	return !t->ptrace;
++	if (t->ptrace && sig != SIGKILL)
++		return 0;
++
++	return sig_task_ignored(t, sig, force);
+ }
+ 
+ /*
+@@ -929,9 +931,9 @@ static void complete_signal(int sig, struct task_struct *p, int group)
+ 	 * then start taking the whole group down immediately.
+ 	 */
+ 	if (sig_fatal(p, sig) &&
+-	    !(signal->flags & (SIGNAL_UNKILLABLE | SIGNAL_GROUP_EXIT)) &&
++	    !(signal->flags & SIGNAL_GROUP_EXIT) &&
+ 	    !sigismember(&t->real_blocked, sig) &&
+-	    (sig == SIGKILL || !t->ptrace)) {
++	    (sig == SIGKILL || !p->ptrace)) {
+ 		/*
+ 		 * This signal will be fatal to the whole group.
+ 		 */
 diff --git a/kernel/skip_list.c b/kernel/skip_list.c
 new file mode 100644
 index 000000000000..bf5c6e97e139
@@ -149388,6 +150706,50 @@ index 620e81169659..4ac095118717 100644
  		struct {
  			int rlim;
  			unsigned long max;
+diff --git a/security/apparmor/mount.c b/security/apparmor/mount.c
+index 82a64b58041d..e395137ecff1 100644
+--- a/security/apparmor/mount.c
++++ b/security/apparmor/mount.c
+@@ -330,6 +330,9 @@ static int match_mnt_path_str(struct aa_profile *profile,
+ 	AA_BUG(!mntpath);
+ 	AA_BUG(!buffer);
+ 
++	if (!PROFILE_MEDIATES(profile, AA_CLASS_MOUNT))
++		return 0;
++
+ 	error = aa_path_name(mntpath, path_flags(profile, mntpath), buffer,
+ 			     &mntpnt, &info, profile->disconnected);
+ 	if (error)
+@@ -381,6 +384,9 @@ static int match_mnt(struct aa_profile *profile, const struct path *path,
+ 	AA_BUG(!profile);
+ 	AA_BUG(devpath && !devbuffer);
+ 
++	if (!PROFILE_MEDIATES(profile, AA_CLASS_MOUNT))
++		return 0;
++
+ 	if (devpath) {
+ 		error = aa_path_name(devpath, path_flags(profile, devpath),
+ 				     devbuffer, &devname, &info,
+@@ -559,6 +565,9 @@ static int profile_umount(struct aa_profile *profile, struct path *path,
+ 	AA_BUG(!profile);
+ 	AA_BUG(!path);
+ 
++	if (!PROFILE_MEDIATES(profile, AA_CLASS_MOUNT))
++		return 0;
++
+ 	error = aa_path_name(path, path_flags(profile, path), buffer, &name,
+ 			     &info, profile->disconnected);
+ 	if (error)
+@@ -614,7 +623,8 @@ static struct aa_label *build_pivotroot(struct aa_profile *profile,
+ 	AA_BUG(!new_path);
+ 	AA_BUG(!old_path);
+ 
+-	if (profile_unconfined(profile))
++	if (profile_unconfined(profile) ||
++	    !PROFILE_MEDIATES(profile, AA_CLASS_MOUNT))
+ 		return aa_get_newest_label(&profile->label);
+ 
+ 	error = aa_path_name(old_path, path_flags(profile, old_path),
 diff --git a/security/apparmor/policy.c b/security/apparmor/policy.c
 index 4243b0c3f0e4..586b249d3b46 100644
 --- a/security/apparmor/policy.c
@@ -152344,6 +153706,36 @@ index a3f18d362366..d7fd46fe9efb 100644
  }
  
  static void __hyp_text save_lrs(struct kvm_vcpu *vcpu, void __iomem *base)
+diff --git a/virt/kvm/arm/mmio.c b/virt/kvm/arm/mmio.c
+index b6e715fd3c90..dac7ceb1a677 100644
+--- a/virt/kvm/arm/mmio.c
++++ b/virt/kvm/arm/mmio.c
+@@ -112,7 +112,7 @@ int kvm_handle_mmio_return(struct kvm_vcpu *vcpu, struct kvm_run *run)
+ 		}
+ 
+ 		trace_kvm_mmio(KVM_TRACE_MMIO_READ, len, run->mmio.phys_addr,
+-			       data);
++			       &data);
+ 		data = vcpu_data_host_to_guest(vcpu, data, len);
+ 		vcpu_set_reg(vcpu, vcpu->arch.mmio_decode.rt, data);
+ 	}
+@@ -182,14 +182,14 @@ int io_mem_abort(struct kvm_vcpu *vcpu, struct kvm_run *run,
+ 		data = vcpu_data_guest_to_host(vcpu, vcpu_get_reg(vcpu, rt),
+ 					       len);
+ 
+-		trace_kvm_mmio(KVM_TRACE_MMIO_WRITE, len, fault_ipa, data);
++		trace_kvm_mmio(KVM_TRACE_MMIO_WRITE, len, fault_ipa, &data);
+ 		kvm_mmio_write_buf(data_buf, len, data);
+ 
+ 		ret = kvm_io_bus_write(vcpu, KVM_MMIO_BUS, fault_ipa, len,
+ 				       data_buf);
+ 	} else {
+ 		trace_kvm_mmio(KVM_TRACE_MMIO_READ_UNSATISFIED, len,
+-			       fault_ipa, 0);
++			       fault_ipa, NULL);
+ 
+ 		ret = kvm_io_bus_read(vcpu, KVM_MMIO_BUS, fault_ipa, len,
+ 				      data_buf);
 diff --git a/virt/kvm/arm/mmu.c b/virt/kvm/arm/mmu.c
 index b36945d49986..b4b69c2d1012 100644
 --- a/virt/kvm/arm/mmu.c
