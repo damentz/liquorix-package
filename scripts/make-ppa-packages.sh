@@ -21,7 +21,6 @@ package_source="${package_name}_${version_kernel}.orig.tar.xz"
 
 releases=(
     xenial
-    zesty
     artful
     bionic
 )
