@@ -32,7 +32,7 @@ function prepare_env {
     fi
 
     echo "[INFO ] Unpacking kernel source into package folder."
-    tar -xf "$dir_base/$package_source" --strip-components=1 -C "$dir_package/"
+    tar -xpf "$dir_base/$package_source" --strip-components=1 -C "$dir_package/"
 }
 
 function build_source_package {
