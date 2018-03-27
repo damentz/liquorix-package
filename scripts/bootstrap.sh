@@ -94,7 +94,7 @@ for bootstrap in "${pbuilder_bootstraps[@]}"; do
 
     if [[ ! -f "$pbuilder_chroots/$bootstrap" ]]; then
         echo "[INFO ] Creating pbuilder base, ${bootstrap}"
-        sudo pbuilder --create \
+        sudo pbuilder create \
             --architecture "$bootstrap_arch" \
             --distribution "$pbuilder_branch" \
             --mirror "$pbuilder_mirror" \
@@ -102,7 +102,7 @@ for bootstrap in "${pbuilder_bootstraps[@]}"; do
             { echo "[ERROR] Failed to execute 'pbuilder'"; exit 1; }
     else
         echo "[INFO ] Updating pbuilder base, ${bootstrap}"
-        sudo pbuilder --update \
+        sudo pbuilder update \
             --architecture "$bootstrap_arch" \
             --distribution "$pbuilder_branch" \
             --mirror "$pbuilder_mirror" \
