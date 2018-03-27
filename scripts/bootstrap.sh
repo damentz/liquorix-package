@@ -78,6 +78,10 @@ for dir in "$pbuilder_chroots" "$pbuilder_results" "$pbuilder_cache"; do
     fi
 done
 
+declare opts_base=""
+opts_base="$opts_base --distribution $pbuilder_branch"
+opts_base="$opts_base --mirror $pbuilder_mirror"
+
 echo "[INFO ] Checking pbuilder bootstraps"
 for bootstrap in "${pbuilder_bootstraps[@]}"; do
 
@@ -92,21 +96,19 @@ for bootstrap in "${pbuilder_bootstraps[@]}"; do
     fi
     echo "[DEBUG] bootstrap_arch = $bootstrap_arch"
 
+    declare opts_arch="--architecture $bootstrap_arch"
+    declare opts_chroot="--basetgz $pbuilder_chroots/$bootstrap"
+    declare opts_final="$opts_base $opts_arch $opts_chroot"
+
+    echo "[DEBUG] opts_final = $opts_final"
+
     if [[ ! -f "$pbuilder_chroots/$bootstrap" ]]; then
         echo "[INFO ] Creating pbuilder base, ${bootstrap}"
-        sudo pbuilder create \
-            --architecture "$bootstrap_arch" \
-            --distribution "$pbuilder_branch" \
-            --mirror "$pbuilder_mirror" \
-            --basetgz "$pbuilder_chroots/$bootstrap" ||
+        sudo pbuilder create $opts_final ||
             { echo "[ERROR] Failed to execute 'pbuilder'"; exit 1; }
     else
         echo "[INFO ] Updating pbuilder base, ${bootstrap}"
-        sudo pbuilder update \
-            --architecture "$bootstrap_arch" \
-            --distribution "$pbuilder_branch" \
-            --mirror "$pbuilder_mirror" \
-            --basetgz "$pbuilder_chroots/$bootstrap" ||
+        sudo pbuilder update $opts_final ||
             { echo "[ERROR] Failed to execute 'pbuilder'"; exit 1; }
     fi
 done
