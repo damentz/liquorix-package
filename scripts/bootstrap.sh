@@ -27,16 +27,25 @@ fi
 grep -q 'Debian' /etc/issue ||
     { echo "[ERROR] Please run this script on a Debian machine."; exit 1; }
 
+dir_script="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+dir_base="${dir_script%/*}"
+dir_pbuilder="${dir_script%/*}/pbuilder"
+
 # Now that we're sure this system is compatible with the bootstrap script, lets
 # set all the variables needed to proceed.
 build_user="$(whoami)"
 build_base=$(grep -E "^${build_user}:" /etc/passwd | cut -f6 -d:)
-build_deps="debhelper devscripts fakeroot gcc pbuilder ubuntu-dev-tools unzip"
-pbuilder_base="${build_base}/pbuilder"
+build_deps="debhelper devscripts fakeroot gcc pbuilder unzip"
+pbuilder_base="${dir_base}/pbuilder"
 pbuilder_branch='unstable'
-pbuilder_bootstrap_amd64="${pbuilder_branch}-base.tgz"
+pbuilder_bootstrap_amd64="${pbuilder_branch}-amd64-base.tgz"
 pbuilder_bootstrap_i386="${pbuilder_branch}-i386-base.tgz"
 pbuilder_bootstraps=("$pbuilder_bootstrap_amd64" "$pbuilder_bootstrap_i386")
+pbuilder_mirror="http://ftp.us.debian.org/debian"
+pbuilder_chroots="/var/cache/pbuilder"
+pbuilder_results="$pbuilder_base/results"
+pbuilder_cache="$pbuilder_base/cache"
+
 
 # The usual debugging, purely here to reference if something goes wrong.
 echo "[DEBUG] build_user = $build_user"
@@ -45,6 +54,10 @@ echo "[DEBUG] build_deps = $build_deps"
 echo "[DEBUG] pbuilder_base = $pbuilder_base"
 echo "[DEBUG] pbuilder_branch = $pbuilder_branch"
 echo "[DEBUG] pbuilder_bootstraps = (${pbuilder_bootstraps[@]})"
+echo "[DEBUG] pbuilder_mirror = $pbuilder_mirror"
+echo "[DEBUG] pbuilder_chroots = $pbuilder_chroots"
+echo "[DEBUG] pbuilder_results = $pbuilder_results"
+echo "[DEBUG] pbuilder_cache = $pbuilder_cache"
 
 # The rest of this script, you can read the "[INFO ]"" messages and deduce what
 # it is that we're doing.
@@ -57,11 +70,13 @@ echo "[INFO ] Installing dependencies"
 sudo apt-get install $build_deps ||
     { echo "[ERROR] apt-get failed to install dependencies: [${build_deps}]!"; exit 1; }
 
-echo "[INFO ] Checking if directory exists: $pbuilder_base"
-if [[ ! -d "$pbuilder_base" ]]; then
-    echo "[INFO ] Making directory: $pbuilder_base"
-    mkdir -v -m 755 "$pbuilder_base"
-fi
+for dir in "$pbuilder_chroots" "$pbuilder_results" "$pbuilder_cache"; do
+    echo "[INFO ] Checking if directory exists: $dir"
+    if [[ ! -d "$dir" ]]; then
+        echo "[INFO ] Making directory: $dir"
+        mkdir -v -m 755 "$dir"
+    fi
+done
 
 echo "[INFO ] Checking pbuilder bootstraps"
 for bootstrap in "${pbuilder_bootstraps[@]}"; do
@@ -77,14 +92,22 @@ for bootstrap in "${pbuilder_bootstraps[@]}"; do
     fi
     echo "[DEBUG] bootstrap_arch = $bootstrap_arch"
 
-    if [[ ! -f "${pbuilder_base}/${bootstrap}" ]]; then
+    if [[ ! -f "$pbuilder_chroots/$bootstrap" ]]; then
         echo "[INFO ] Creating pbuilder base, ${bootstrap}"
-        pbuilder-dist $pbuilder_branch $bootstrap_arch create ||
-            { echo "[ERROR] Failed to execute 'pbuilder-dist'"; exit 1; }
+        sudo pbuilder --create \
+            --architecture "$bootstrap_arch" \
+            --distribution "$pbuilder_branch" \
+            --mirror "$pbuilder_mirror" \
+            --basetgz "$pbuilder_chroots/$bootstrap" ||
+            { echo "[ERROR] Failed to execute 'pbuilder'"; exit 1; }
     else
         echo "[INFO ] Updating pbuilder base, ${bootstrap}"
-        pbuilder-dist $pbuilder_branch $bootstrap_arch update ||
-            { echo "[ERROR] Failed to execute 'pbuilder-dist'"; exit 1; }
+        sudo pbuilder --update \
+            --architecture "$bootstrap_arch" \
+            --distribution "$pbuilder_branch" \
+            --mirror "$pbuilder_mirror" \
+            --basetgz "$pbuilder_chroots/$bootstrap" ||
+            { echo "[ERROR] Failed to execute 'pbuilder'"; exit 1; }
     fi
 done
 
