@@ -27,35 +27,17 @@ fi
 grep -q 'Debian' /etc/issue ||
     { echo "[ERROR] Please run this script on a Debian machine."; exit 1; }
 
-dir_script="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-dir_base="${dir_script%/*}"
-dir_pbuilder="${dir_script%/*}/pbuilder"
-
-# Now that we're sure this system is compatible with the bootstrap script, lets
-# set all the variables needed to proceed.
-build_user="$(whoami)"
-build_base=$(grep -E "^${build_user}:" /etc/passwd | cut -f6 -d:)
-build_deps="debhelper devscripts fakeroot gcc pbuilder unzip"
-pbuilder_base="$dir_base/pbuilder"
-pbuilder_branch='unstable'
-pbuilder_bootstraps=("$pbuilder_branch-amd64-base.tgz" "$pbuilder_branch-i386-base.tgz")
-pbuilder_mirror="http://ftp.us.debian.org/debian"
-pbuilder_chroots="/var/cache/pbuilder"
-pbuilder_results="$pbuilder_base/results"
-pbuilder_cache="$pbuilder_base/cache"
-
+source "$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/env.sh"
 
 # The usual debugging, purely here to reference if something goes wrong.
 echo "[DEBUG] build_user = $build_user"
 echo "[DEBUG] build_base = $build_base"
 echo "[DEBUG] build_deps = $build_deps"
-echo "[DEBUG] pbuilder_base = $pbuilder_base"
-echo "[DEBUG] pbuilder_branch = $pbuilder_branch"
-echo "[DEBUG] pbuilder_bootstraps = (${pbuilder_bootstraps[@]})"
+echo "[DEBUG] pbuilder_releases = ${pbuilder_releases[@]}"
+echo "[DEBUG] pbuilder_arches = ${pbuilder_arches[@]}"
 echo "[DEBUG] pbuilder_mirror = $pbuilder_mirror"
 echo "[DEBUG] pbuilder_chroots = $pbuilder_chroots"
 echo "[DEBUG] pbuilder_results = $pbuilder_results"
-echo "[DEBUG] pbuilder_cache = $pbuilder_cache"
 
 # The rest of this script, you can read the "[INFO ]"" messages and deduce what
 # it is that we're doing.
@@ -68,7 +50,7 @@ echo "[INFO ] Installing dependencies"
 sudo apt-get install $build_deps ||
     { echo "[ERROR] apt-get failed to install dependencies: [${build_deps}]!"; exit 1; }
 
-for dir in "$pbuilder_chroots" "$pbuilder_results" "$pbuilder_cache"; do
+for dir in "$pbuilder_chroots" "$pbuilder_results"; do
     echo "[INFO ] Checking if directory exists: $dir"
     if [[ ! -d "$dir" ]]; then
         echo "[INFO ] Making directory: $dir"
@@ -76,39 +58,32 @@ for dir in "$pbuilder_chroots" "$pbuilder_results" "$pbuilder_cache"; do
     fi
 done
 
-declare opts_base=""
-opts_base="$opts_base --distribution $pbuilder_branch"
-opts_base="$opts_base --mirror $pbuilder_mirror"
+declare opts_mirror="--mirror $pbuilder_mirror"
 
 echo "[INFO ] Checking pbuilder bootstraps"
-for bootstrap in "${pbuilder_bootstraps[@]}"; do
 
-    # pbuilder likes to store native architectures without the arch in the
-    # file name.  Due to the requirements of this script, 32-bit bootstraps
-    # will contain "i386" while 64-bit bootstraps will not have arch in filename.
-    bootstrap_arch=''
-    if [[ "$bootstrap" =~ i386 ]]; then
-        bootstrap_arch='i386'
-    else
-        bootstrap_arch='amd64'
-    fi
-    echo "[DEBUG] bootstrap_arch = $bootstrap_arch"
+for release in "${pbuilder_releases[@]}"; do
+    for arch in "${pbuilder_arches[@]}"; do
+        echo "[DEBUG] arch = $arch"
 
-    declare opts_arch="--architecture $bootstrap_arch"
-    declare opts_chroot="--basetgz $pbuilder_chroots/$bootstrap"
-    declare opts_final="$opts_base $opts_arch $opts_chroot"
+        declare bootstrap="$pbuilder_chroots/$release-$arch-base.tgz"
+        declare opts_release="--distribution $release"
+        declare opts_arch="--architecture $arch"
+        declare opts_chroot="--basetgz $bootstrap"
+        declare opts_final="$opts_mirror $opts_release $opts_arch $opts_chroot"
 
-    echo "[DEBUG] opts_final = $opts_final"
+        echo "[DEBUG] opts_final = $opts_final"
 
-    if [[ ! -f "$pbuilder_chroots/$bootstrap" ]]; then
-        echo "[INFO ] Creating pbuilder base, ${bootstrap}"
-        sudo pbuilder create $opts_final ||
-            { echo "[ERROR] Failed to execute 'pbuilder'"; exit 1; }
-    else
-        echo "[INFO ] Updating pbuilder base, ${bootstrap}"
-        sudo pbuilder update $opts_final ||
-            { echo "[ERROR] Failed to execute 'pbuilder'"; exit 1; }
-    fi
+        if [[ ! -f "$bootstrap" ]]; then
+            echo "[INFO ] Creating pbuilder base, $bootstrap"
+            sudo pbuilder create $opts_final ||
+                { echo "[ERROR] Failed to execute 'pbuilder'"; exit 1; }
+        else
+            echo "[INFO ] Updating pbuilder base, $bootstrap"
+            sudo pbuilder update $opts_final ||
+                { echo "[ERROR] Failed to execute 'pbuilder'"; exit 1; }
+        fi
+    done
 done
 
 echo "[INFO ] Script completed successfully!"
