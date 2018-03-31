@@ -4,6 +4,7 @@ set -e
 
 source "$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/env.sh"
 version_build="1"
+dir_build="$dir_base/ppa"
 
 if [[ -n "$1" ]]; then
     echo "[INFO ] Build version overridden to: $1"
