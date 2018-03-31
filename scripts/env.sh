@@ -15,7 +15,7 @@ version_build="1"
 
 package_source="${package_name}_${version_kernel}.orig.tar.xz"
 
-releases_debian=('sid' 'buster' 'stretch')
+releases_debian=('sid')
 releases_ubuntu=('xenial' 'artful' 'bionic')
 mirror_debian='http://ftp.us.debian.org/debian'
 mirror_ubuntu='http://us.archive.ubuntu.com/ubuntu'
