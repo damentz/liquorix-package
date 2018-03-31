@@ -67,10 +67,11 @@ for release in "${pbuilder_releases[@]}"; do
         echo "[DEBUG] arch = $arch"
 
         declare bootstrap="$pbuilder_chroots/$release-$arch-base.tgz"
-        declare opts_release="--distribution $release"
-        declare opts_arch="--architecture $arch"
-        declare opts_chroot="--basetgz $bootstrap"
-        declare opts_final="$opts_mirror $opts_release $opts_arch $opts_chroot"
+        declare opts_final="--distribution $release"
+        opts_final="$opts_final --distribution $release"
+        opts_final="$opts_final --architecture $arch"
+        opts_final="$opts_final --basetgz $bootstrap"
+        opts_final="$opts_final --compressprog pigz"
 
         echo "[DEBUG] opts_final = $opts_final"
 

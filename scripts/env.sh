@@ -24,7 +24,7 @@ mirror_ubuntu='http://us.archive.ubuntu.com/ubuntu'
 # set all the variables needed to proceed.
 build_user="$(whoami)"
 build_base=$(grep -E "^${build_user}:" /etc/passwd | cut -f6 -d:)
-build_deps="debhelper devscripts fakeroot gcc pbuilder unzip"
+build_deps="debhelper devscripts fakeroot gcc pbuilder gunzip pigz xz-utils"
 pbuilder_releases=("${releases_debian[@]}")
 pbuilder_arches=('amd64' 'i386')
 pbuilder_mirror="$mirror_debian"
