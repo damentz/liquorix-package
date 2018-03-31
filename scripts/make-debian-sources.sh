@@ -2,24 +2,17 @@
 
 set -e
 
-package_name='linux-liquorix'
-dir_script="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-dir_base="${dir_script%/*}"
-dir_package="$dir_base/$package_name"
-
-version_kernel="$( head -n1 "$dir_package"/debian/changelog | grep -Po '\d+\.\d+' )"
-
-package_source="${package_name}_${version_kernel}.orig.tar.xz"
+source "$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/env.sh"
 
 echo "[DEBUG] package_name:   $package_name"
 echo "[DEBUG] package_source: $package_source"
 echo "[DEBUG] dir_script:  $dir_script"
 echo "[DEBUG] dir_base:    $dir_base"
 echo "[DEBUG] dir_package: $dir_package"
-echo "[DEBUG] dir_ppa:     $dir_ppa"
 echo "[DEBUG] releases:    ${releases[@]}"
 
 function prepare_env {
+
     echo "[INFO ] Preparing package directory: $dir_package"
 
     cd "$dir_package"
