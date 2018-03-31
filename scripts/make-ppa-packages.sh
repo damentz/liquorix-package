@@ -56,9 +56,6 @@ function build_source_package {
     echo "[INFO ] Updating changelog to: $release_version"
     sed -r -i "1s/[^;]+(;.*)/$package_name ($release_version) $release_name\1/" debian/changelog
 
-    echo "[INFO ] Stripping gcc version (use release native gcc)"
-    sed -r -i "s/gcc-[0-9]+/gcc/g" debian/config/defines
-
     echo "[INFO ] Cleaning package"
     local clean='fakeroot debian/rules clean'
     $clean || $clean
