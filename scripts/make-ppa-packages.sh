@@ -2,14 +2,7 @@
 
 set -e
 
-package_name='linux-liquorix'
-dir_script="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-dir_base="${dir_script%/*}"
-dir_package="$dir_base/$package_name"
-dir_ppa="$dir_base/ppa"
-
-version_package="$( head -n1 "$dir_package"/debian/changelog | grep -Po '\d+\.\d+-\d+' )"
-version_kernel="$(  head -n1 "$dir_package"/debian/changelog | grep -Po '\d+\.\d+' )"
+source "$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/env.sh"
 version_build="1"
 
 if [[ -n "$1" ]]; then
@@ -17,21 +10,13 @@ if [[ -n "$1" ]]; then
     version_build="$1"
 fi
 
-package_source="${package_name}_${version_kernel}.orig.tar.xz"
-
-releases=(
-    xenial
-    artful
-    bionic
-)
-
 echo "[DEBUG] package_name:   $package_name"
 echo "[DEBUG] package_source: $package_source"
 echo "[DEBUG] dir_script:  $dir_script"
 echo "[DEBUG] dir_base:    $dir_base"
 echo "[DEBUG] dir_package: $dir_package"
 echo "[DEBUG] dir_ppa:     $dir_ppa"
-echo "[DEBUG] releases:    ${releases[@]}"
+echo "[DEBUG] releases_ubuntu: ${releases_ubuntu[@]}"
 
 function prepare_env {
     echo "[INFO ] Preparing PPA directory: $dir_ppa"
@@ -63,13 +48,13 @@ function prepare_env {
 }
 
 function build_source_package {
-    local release="$1"
-    local version_ppa="$2"
+    local release_name="$1"
+    local release_version="$2"
 
     cd "$dir_ppa/$package_name"
 
-    echo "[INFO ] Updating changelog to: $version_ppa"
-    sed -r -i "1s/[^;]+(;.*)/$package_name ($version_ppa) $release\1/" debian/changelog
+    echo "[INFO ] Updating changelog to: $release_version"
+    sed -r -i "1s/[^;]+(;.*)/$package_name ($release_version) $release_name\1/" debian/changelog
 
     echo "[INFO ] Stripping gcc version (use release native gcc)"
     sed -r -i "s/gcc-[0-9]+/gcc/g" debian/config/defines
@@ -84,13 +69,13 @@ function build_source_package {
 
 prepare_env
 
-for release in "${releases[@]}"; do
-    version_ppa="${version_package}ubuntu${version_build}~${release}"
+for release_name in "${releases_ubuntu[@]}"; do
+    declare release_version="${version_package}ubuntu${version_build}~${release_name}"
 
     echo "[INFO ] Building source package for $release"
-    build_source_package "$release" "$version_ppa"
+    build_source_package "$release_name" "$release_version"
 
     echo "[INFO ] Uploading packages to Launchpad PPA"
-    dput 'liquorix' "${dir_ppa}/${package_name}_${version_ppa}_source.changes" ||
+    dput 'liquorix' "${dir_ppa}/${package_name}_${release_version}_source.changes" ||
         { echo "[ERROR] dput failed to push package!"; }
 done
