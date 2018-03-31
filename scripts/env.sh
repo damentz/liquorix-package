@@ -5,7 +5,7 @@ package_name='linux-liquorix'
 
 dir_base="${dir_script%/*}"
 dir_package="$dir_base/$package_name"
-dir_ppa="$dir_base/ppa"
+dir_build="$dir_base/build"
 dir_pbuilder="${dir_script%/*}/pbuilder"
 
 
@@ -30,3 +30,7 @@ pbuilder_arches=('amd64' 'i386')
 pbuilder_mirror="$mirror_debian"
 pbuilder_chroots="/var/cache/pbuilder"
 pbuilder_results="$dir_base/debs"
+
+function prepare_env {
+    local dir_build="$1"
+}
