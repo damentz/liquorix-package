@@ -30,11 +30,11 @@ function build_binary_package {
 
     for arch in "${pbuilder_arches[@]}"; do
         declare bootstrap="$pbuilder_chroots/$release_name-$arch-base.tgz"
-        declare opts_release="--distribution $release_name"
-        declare opts_arch="--architecture $arch"
-        declare opts_chroot="--basetgz $bootstrap"
-        declare opts_results="--buildresult $pbuilder_results"
-        declare opts_final="$opts_mirror $opts_release $opts_arch $opts_chroot"
+        declare opts_final="--distribution $release_name"
+        opts_final="$opts_final --architecture $arch"
+        opts_final="$opts_final --basetgz $bootstrap"
+        opts_final="$opts_final --buildresult $pbuilder_results"
+        opts_final="$opts_final --compressprog pigz"
 
         echo "[DEBUG] opts_final = $opts_final"
 

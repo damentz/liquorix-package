@@ -68,7 +68,6 @@ for release in "${pbuilder_releases[@]}"; do
 
         declare bootstrap="$pbuilder_chroots/$release-$arch-base.tgz"
         declare opts_final="--distribution $release"
-        opts_final="$opts_final --distribution $release"
         opts_final="$opts_final --architecture $arch"
         opts_final="$opts_final --basetgz $bootstrap"
         opts_final="$opts_final --compressprog pigz"
