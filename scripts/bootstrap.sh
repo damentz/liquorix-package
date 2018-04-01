@@ -70,6 +70,8 @@ for release in "${pbuilder_releases[@]}"; do
         declare opts_final="--distribution $release"
         opts_final="$opts_final --architecture $arch"
         opts_final="$opts_final --host-arch $arch"
+        opts_final="$opts_final --debootstrapopts --variant=buildd"
+        opts_final="$opts_final --debootstrapopts --arch=$arch"
         opts_final="$opts_final --basetgz $bootstrap"
         opts_final="$opts_final --compressprog pigz"
 
