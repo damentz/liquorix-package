@@ -32,6 +32,7 @@ function build_binary_package {
         declare bootstrap="$pbuilder_chroots/$release_name-$arch-base.tgz"
         declare opts_final="--distribution $release_name"
         opts_final="$opts_final --architecture $arch"
+        opts_final="$opts_final --host-arch $arch"
         opts_final="$opts_final --basetgz $bootstrap"
         opts_final="$opts_final --buildresult $pbuilder_results"
         opts_final="$opts_final --compressprog pigz"
