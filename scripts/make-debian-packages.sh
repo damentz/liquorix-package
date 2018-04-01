@@ -54,3 +54,6 @@ for release_name in "${releases_debian[@]}"; do
     echo "[INFO ] Building binary package for $release_name"
     build_binary_package "$release_name" "$release_version"
 done
+
+echo "[INFO ] Script completed successfully!"
+exit 0
