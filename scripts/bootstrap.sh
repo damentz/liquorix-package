@@ -47,8 +47,8 @@ sudo apt-get update ||
     { echo "[ERROR] apt-get failed to run, 'apt-get update'"; exit 1; }
 
 echo "[INFO ] Installing dependencies"
-sudo apt-get install $build_deps ||
-    { echo "[ERROR] apt-get failed to install dependencies: [${build_deps}]!"; exit 1; }
+echo "${build_deps[@]}" | xargs sudo apt-get install -y ||
+    { echo "[ERROR] apt-get failed to install dependencies: [${build_deps[@]}]!"; exit 1; }
 
 for dir in "$pbuilder_chroots" "$pbuilder_results"; do
     echo "[INFO ] Checking if directory exists: $dir"
