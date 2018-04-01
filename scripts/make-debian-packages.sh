@@ -46,7 +46,7 @@ function build_binary_package {
 prepare_env
 
 for release_name in "${releases_debian[@]}"; do
-    release_version="${version_package}.${version_build}~${release_name}"
+    release_version="${version_package}debian${version_build}~${release_name}"
 
     echo "[INFO ] Building source package for $release_name"
     build_source_package "$release_name" "$release_version"
