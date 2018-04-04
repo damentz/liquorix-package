@@ -17,8 +17,8 @@ package_source="${package_name}_${version_kernel}.orig.tar.xz"
 
 releases_debian=('sid')
 releases_ubuntu=('xenial' 'artful' 'bionic')
-mirror_debian='http://ftp.us.debian.org/debian'
-mirror_ubuntu='http://us.archive.ubuntu.com/ubuntu'
+mirror_debian='http://deb.debian.org/debian'
+mirror_ubuntu='http://archive.ubuntu.com/ubuntu'
 
 # Now that we're sure this system is compatible with the bootstrap script, lets
 # set all the variables needed to proceed.
