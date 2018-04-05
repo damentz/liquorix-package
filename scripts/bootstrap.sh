@@ -14,18 +14,13 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 # Check prerequisites first.
-if [[ "$(id -u)" -eq 0 ]]; then
-    echo "[ERROR] Cannot run as root.  Actions that require root will use sudo."
-    exit 1
-fi
-
 if [[ "$(uname -m)" != 'x86_64' ]]; then
     echo "[ERROR] Please run this script on a 64-bit operating system."
     exit 1
 fi
 
-grep -q 'Debian' /etc/issue ||
-    { echo "[ERROR] Please run this script on a Debian machine."; exit 1; }
+grep -q -P 'Debian|Ubuntu' /etc/issue ||
+    { echo "[ERROR] Please run this script on a Debian or Ubuntu machine."; exit 1; }
 
 source "$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/env.sh"
 
