@@ -11,8 +11,18 @@ if ! which docker; then
     exit 1
 fi
 
-declare -a distros=('debian' 'ubuntu')
+declare -i processes_default=2
+declare -i processes=${1:-"$processes_default"}
 
+if [[ $processes -eq $processes_default ]]; then
+    echo "[INFO ] Using default process count, $processes"
+else
+    echo "[INFO ] Using override process count, $processes"
+fi
+
+# Build arguments to bootstrap images in parallel
+declare -a distros=('debian' 'ubuntu')
+declare -a args=()
 for distro in "${distros[@]}"; do
 
     declare -a releases=()
@@ -23,16 +33,11 @@ for distro in "${distros[@]}"; do
     fi
 
     for release  in "${releases[@]}"; do
-        declare release_string="liquorix_$distro/$release"
-        if docker image ls | grep "$release_string"; then
-            echo "[INFO ] Docker image '$release_string' already built, performing update."
-            echo "[INFO ] STUB -- update not implemented yet."
-        else
-            echo "[INFO ] Docker image '$release_string' not found, building with Dockerfile."
-            docker build -t "$release_string" \
-                --build-arg=DISTRO=$distro \
-                --build-arg=RELEASE=$release \
-                ./
-        fi
+        args+=("$distro" "$release")
     done
 done
+
+# Then pass them into _bootstrap_image with xargs
+for item in "${args[@]}"; do
+    echo $item
+done | xargs -n2 -P "$processes" "$dir_base/scripts/bootstrap-docker-image.sh"
