@@ -27,9 +27,9 @@ for distro in "${distros[@]}"; do
 
     declare -a releases=()
     if [[ "$distro" == 'debian' ]]; then
-        releases=(${releases_debian[@]})
+        releases=("${releases_debian[@]}")
     elif [[ "$distro" == 'ubuntu' ]]; then
-        releases=(${releases_ubuntu[@]})
+        releases=("${releases_ubuntu[@]}")
     fi
 
     for release  in "${releases[@]}"; do
@@ -39,5 +39,5 @@ done
 
 # Then pass them into _bootstrap_image with xargs
 for item in "${args[@]}"; do
-    echo $item
+    echo "$item"
 done | xargs -n2 -P "$processes" "$dir_base/scripts/bootstrap-docker-image.sh"
