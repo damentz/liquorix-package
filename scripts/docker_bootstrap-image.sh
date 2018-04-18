@@ -23,9 +23,25 @@ if [[ $fail -eq 1 ]]; then
 fi
 
 declare release_string="liquorix_$distro/$release"
-if docker image ls | grep "$release_string" -q; then
+if docker image ls | grep -q "$release_string"; then
     echo "[INFO ] Docker image '$release_string' already built, performing update."
-    echo "[INFO ] STUB -- update not implemented yet."
+    declare update_cmd='apt-get update && apt-get dist-upgrade && rm -rf /var/cache/apt'
+    declare container_id=$(docker run -d $release_string bash -c '$update_cmd')
+
+    echo "[INFO ] Trailing image:container - $release_string:$container_id"
+    while true; do
+        if [[ -n "$(docker container ls -q -f id=$container_id)" ]]; then
+            sleep 1
+        else
+            break
+        fi
+    done
+
+    echo "[INFO ] Committing updated container to repository, $release_string"
+    docker commit -m "Update system packages" "$container_id" "$release_string" > /dev/null
+
+    echo "[INFO ] Removing container, $release_string:$container_id"
+    docker container rm "$container_id" > /dev/null
 else
     echo "[INFO ] Docker image '$release_string' not found, building with Dockerfile."
     docker build -t "$release_string" \
