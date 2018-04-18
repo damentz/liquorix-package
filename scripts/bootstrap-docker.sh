@@ -37,7 +37,7 @@ for distro in "${distros[@]}"; do
     done
 done
 
-# Then pass them into _bootstrap_image with xargs
+# Then pass them into bootstrap-docker-image.sh with xargs
 for item in "${args[@]}"; do
     echo "$item"
 done | xargs -n2 -P "$processes" "$dir_base/scripts/bootstrap-docker-image.sh"
