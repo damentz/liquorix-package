@@ -25,8 +25,10 @@ fi
 declare release_string="liquorix_$distro/$release"
 if [[ "$(docker image ls)" == *"$release_string"* ]]; then
     echo "[INFO ] $release_string: Docker image already built, performing update."
-    declare update_cmd='apt-get update && apt-get dist-upgrade && rm -rf /var/cache/apt'
-    declare container_id=$(docker run -d $release_string bash -c '$update_cmd')
+    declare container_id=$(
+        docker run -d $release_string bash -c \
+        'apt-get update && apt-get dist-upgrade && rm -rf /var/cache/apt'
+    )
 
     echo "[INFO ] $release_string: Trailing container - $container_id"
     while true; do
