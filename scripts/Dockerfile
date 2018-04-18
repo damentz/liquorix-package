@@ -9,4 +9,6 @@ LABEL RELEASE=$RELEASE
 RUN apt-get update &&\
     apt-get dist-upgrade -y &&\
     apt-get install build-essential devscripts -y &&\
-    apt-get clean
+    rm -rfv /var/cache/apt &&\
+    rm -rfv /var/lib/apt/lists/*
+
