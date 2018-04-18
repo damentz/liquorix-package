@@ -6,7 +6,7 @@ source "$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/env.sh"
 
 cd "$dir_base/scripts"
 
-if ! which docker; then
+if ! which docker > /dev/null; then
     echo "[ERROR] Docker is not installed, cannot continue!"
     exit 1
 fi
