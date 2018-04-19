@@ -35,7 +35,7 @@ if [[ "$(docker image ls)" == *"$release_string"* ]]; then
         docker run -d $release_string bash -c \
         'eatmydata apt-get update && \
          eatmydata apt-get dist-upgrade && \
-         eatmydata apt-get clean \
+         eatmydata apt-get clean &&\
          eatmydata rm -rf /var/lib/apt/lists'
     )
 
