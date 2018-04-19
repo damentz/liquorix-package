@@ -24,23 +24,25 @@ else
 fi
 
 # Build arguments to bootstrap images in parallel
+declare -a architectures=('amd64' 'i386')
 declare -a distros=('debian' 'ubuntu')
 declare -a args=()
-for distro in "${distros[@]}"; do
+for arch in "${architectures[@]}"; do
+    for distro in "${distros[@]}"; do
+        declare -a releases=()
+        if [[ "$distro" == 'debian' ]]; then
+            releases=("${releases_debian[@]}")
+        elif [[ "$distro" == 'ubuntu' ]]; then
+            releases=("${releases_ubuntu[@]}")
+        fi
 
-    declare -a releases=()
-    if [[ "$distro" == 'debian' ]]; then
-        releases=("${releases_debian[@]}")
-    elif [[ "$distro" == 'ubuntu' ]]; then
-        releases=("${releases_ubuntu[@]}")
-    fi
-
-    for release  in "${releases[@]}"; do
-        args+=("$distro" "$release")
+        for release  in "${releases[@]}"; do
+            args+=("$arch" "$distro" "$release")
+        done
     done
 done
 
 # Then pass them into docker_bootstrap-image.sh with xargs
 for item in "${args[@]}"; do
     echo "$item"
-done | xargs -n2 -P "$processes" "$dir_base/scripts/docker_bootstrap-image.sh"
+done | xargs -n3 -P "$processes" "$dir_base/scripts/docker_bootstrap-image.sh"

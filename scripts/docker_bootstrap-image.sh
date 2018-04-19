@@ -2,10 +2,16 @@
 
 set -euo pipefail
 
-declare distro=${1:-}
-declare release=${2:-}
+declare arch=${1:-}
+declare distro=${2:-}
+declare release=${3:-}
 
 declare -i fail=0
+
+if [[ -z "$arch" ]]; then
+    echo "[ERROR] No architecture set!"
+    fail=1
+fi
 
 if [[ -z "$distro" ]]; then
     echo "[ERROR] No distribution set!"
@@ -22,7 +28,7 @@ if [[ $fail -eq 1 ]]; then
     exit 1
 fi
 
-declare release_string="liquorix_$distro/$release"
+declare release_string="liquorix_$arch/$distro/$release"
 if [[ "$(docker image ls)" == *"$release_string"* ]]; then
     echo "[INFO ] $release_string: Docker image already built, performing update."
     declare container_id=$(
@@ -50,6 +56,7 @@ if [[ "$(docker image ls)" == *"$release_string"* ]]; then
 else
     echo "[INFO ] $release_string: Docker image not found, building with Dockerfile."
     docker build -t "$release_string" \
+        --build-arg=ARCH=$arch
         --build-arg=DISTRO=$distro \
         --build-arg=RELEASE=$release \
         ./
