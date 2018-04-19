@@ -27,8 +27,10 @@ if [[ "$(docker image ls)" == *"$release_string"* ]]; then
     echo "[INFO ] $release_string: Docker image already built, performing update."
     declare container_id=$(
         docker run -d $release_string bash -c \
-        'apt-get update && apt-get dist-upgrade && \
-         rm -rf /var/cache/apt /var/lib/apt/lists/*'
+        'eatmydata apt-get update && \
+         eatmydata apt-get dist-upgrade && \
+         eatmydata apt-get clean \
+         eatmydata rm -rf /var/lib/apt/lists'
     )
 
     echo "[INFO ] $release_string: Trailing container - $container_id"
