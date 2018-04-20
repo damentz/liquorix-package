@@ -5,8 +5,7 @@ set -euo pipefail
 
 declare distro=${1:-}
 declare release=${2:-}
-declare vesion_build=${3:-1}
-#declare dir_build="${dir_base}/container/${distro}_${release}"
+declare version_build=${3:-1}
 declare dir_build="/build"
 declare dir_sources="$dir_base/$distro/$release"
 
