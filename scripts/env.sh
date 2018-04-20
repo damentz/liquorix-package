@@ -83,7 +83,8 @@ function build_source_package {
     local clean='fakeroot debian/rules clean'
     $clean || $clean
 
-    if [[ "$(pwd)" == *"/container/"* ]]; then
+    # Check if we're in a docker container and install package dependencies
+    if cat /proc/1/cgroup | grep -Eq '^0:.*docker'; then
         mk-build-deps -ir -t 'apt-get -y'
     fi
 
