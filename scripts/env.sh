@@ -83,6 +83,10 @@ function build_source_package {
     local clean='fakeroot debian/rules clean'
     $clean || $clean
 
+    if [[ "$(pwd)" == *"/container/"* ]]; then
+        mk-build-deps -ir -t 'apt-get -y'
+    fi
+
     echo "[INFO ] Making source package"
     debuild --no-lintian -S -sa
 }

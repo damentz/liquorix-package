@@ -39,8 +39,4 @@ if [[ -z "$release_string" ]]; then
     exit 1
 fi
 
-# STUB!
-docker run -v $dir_base:/liquorix-package -it $release_string /bin/bash
-
-echo "[ERROR] Not implemented!"
-exit 1
+docker run -v $dir_base:/liquorix-package -it $release_string /liquorix-package/scripts/container_build-sources.sh $distro $release
