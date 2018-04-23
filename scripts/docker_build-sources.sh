@@ -41,4 +41,9 @@ if [[ -z "$release_string" ]]; then
     exit 1
 fi
 
-docker run -v $dir_base:/liquorix-package -it $release_string /liquorix-package/scripts/container_build-sources.sh $distro $release
+docker run \
+    -v $dir_base:/liquorix-package \
+    -it $release_string \
+    /liquorix-package/scripts/container_build-sources.sh \
+        $distro \
+        $release
