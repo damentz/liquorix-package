@@ -2,6 +2,8 @@
 
 set -euo pipefail
 
+source "$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/env.sh"
+
 declare arch=${1:-}
 declare distro=${2:-}
 declare release=${3:-}
@@ -56,10 +58,11 @@ if [[ "$(docker image ls)" == *"$release_string"* ]]; then
 else
     echo "[INFO ] $release_string: Docker image not found, building with Dockerfile."
     docker build \
+        -f "$dir_base/scripts/Dockerfile" \
         -t "$release_string" \
         --pull=true \
         --build-arg=ARCH=$arch \
         --build-arg=DISTRO=$distro \
         --build-arg=RELEASE=$release \
-        ./
+        $dir_base/
 fi
