@@ -14,6 +14,7 @@ RUN apt-get update &&\
     eatmydata apt-get install -y \
         build-essential \
         devscripts \
-        wget &&\
+        wget \
+        gnupg &&\
     eatmydata apt-get clean &&\
     eatmydata rm -rfv /var/lib/apt/lists/*
