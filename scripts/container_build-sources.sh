@@ -7,7 +7,7 @@ declare distro=${1:-}
 declare release=${2:-}
 declare version_build=${3:-1}
 declare dir_build="/build"
-declare dir_sources="$dir_base/$distro/$release"
+declare dir_artifacts="$dir_base/artifacts/$distro/$release"
 
 declare -i fail=0
 
@@ -42,6 +42,6 @@ fi
 echo "[INFO ] Building source package for $release"
 build_source_package "$release" "$version"
 
-echo "[INFO ] Copying sources to bind mount: $dir_sources/"
-mkdir -p "$dir_sources"
-cp -arv "$dir_build/"*$version* "$dir_sources/"
+echo "[INFO ] Copying sources to bind mount: $dir_artifacts/"
+mkdir -p "$dir_artifacts"
+cp -arv "$dir_build/"*$version* "$dir_artifacts/"
