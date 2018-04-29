@@ -49,12 +49,15 @@ function prepare_env {
         rm -rf "$dir_build/$package_name"
     fi
 
-    cd "$dir_package"
-    echo "[INFO ] Cleaning $package_name"
-    fakeroot debian/rules maintainerclean
+    echo "[INFO ] Creating folder $package_name in $dir_build/"
+    mkdir -pv "$dir_build/$package_name"
 
-    echo "[INFO ] Copying $package_name to $dir_build/"
-    cp -raf "$dir_package/" "$dir_build/"
+    echo "[INFO ] Copying $package_name/debian to $dir_build/$package_name/"
+    cp -raf "$dir_package/debian" "$dir_build/$package_name/"
+
+    echo "[INFO ] Running 'fakeroot debian/rules maintainerclean'"
+    cd "$dir_build/$package_name"
+    fakeroot debian/rules maintainerclean
 
     if [[ ! -f "$dir_base/$package_source" ]]; then
         echo "[WARN ] Missing source file: $dir_base/$package_source, downloading now."
