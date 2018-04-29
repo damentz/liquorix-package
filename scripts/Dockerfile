@@ -8,7 +8,7 @@ LABEL ARCH=$ARCH
 LABEL DISTRO=$DISTRO
 LABEL RELEASE=$RELEASE
 
-ADD gnupg.tar.gz /root/
+ADD docker_gnupg.tar.gz /root/
 
 RUN apt-get update &&\
     apt-get install eatmydata -y &&\

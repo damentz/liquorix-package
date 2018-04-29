@@ -9,7 +9,7 @@ if [[ ! -f "$dir_base/$package_source" ]]; then
     wget -O "$dir_base/$package_source" "https://cdn.kernel.org/pub/linux/kernel/v4.x/linux-${version_kernel}.tar.xz"
 fi
 
-declare gnupg_archive="$dir_base/gnupg.tar.gz"
+declare gnupg_archive="$dir_base/docker_gnupg.tar.gz"
 if [[ ! -f "$gnupg_archive" ]]; then
     echo "[WARN ] Missing gnupg archive file: $dir_base/$gnupg_archive, creating now."
     
