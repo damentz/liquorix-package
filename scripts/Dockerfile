@@ -16,7 +16,7 @@ RUN apt-get update &&\
     eatmydata apt-get install -y \
         build-essential \
         devscripts \
-        debhelper \
+        equivs \
         wget \
         gnupg &&\
     eatmydata apt-get clean &&\
