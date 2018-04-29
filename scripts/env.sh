@@ -6,7 +6,6 @@ package_name='linux-liquorix'
 dir_base="${dir_script%/*}"
 dir_package="$dir_base/$package_name"
 dir_build="$dir_base/build"
-dir_pbuilder="${dir_script%/*}/pbuilder"
 
 
 version_package="$( head -n1 "$dir_package"/debian/changelog | grep -Po '\d+\.\d+-\d+' )"
