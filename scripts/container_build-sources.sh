@@ -1,7 +1,8 @@
 #!/bin/bash
 
-source "$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/env.sh"
 set -euo pipefail
+
+source "$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/env.sh"
 
 declare distro=${1:-}
 declare release=${2:-}
