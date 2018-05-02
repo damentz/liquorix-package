@@ -30,6 +30,7 @@ if [[ $fail -eq 1 ]]; then
     exit 1
 fi
 
+declare public="$(gpg --export --armor)"
 declare secret="$(gpg --export-secret-keys --armor)"
 declare release_string="liquorix_$arch/$distro/$release"
 if [[ "$(docker image ls)" == *"$release_string"* ]]; then
@@ -65,6 +66,7 @@ else
         --build-arg ARCH="$arch" \
         --build-arg DISTRO="$distro" \
         --build-arg RELEASE="$release" \
+        --build-arg PUBLIC="$public" \
         --build-arg SECRET="$secret" \
         $dir_base/
 fi

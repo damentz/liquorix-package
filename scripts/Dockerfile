@@ -4,6 +4,7 @@ ARG RELEASE
 
 FROM $ARCH/$DISTRO:$RELEASE
 
+ARG PUBLIC
 ARG SECRET
 RUN apt-get update &&\
     apt-get install eatmydata -y &&\
