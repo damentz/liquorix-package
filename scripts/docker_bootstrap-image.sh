@@ -30,8 +30,19 @@ if [[ $fail -eq 1 ]]; then
     exit 1
 fi
 
-declare public="$(gpg --export --armor)"
-declare secret="$(gpg --export-secret-keys --armor)"
+declare default_key="$(
+    cat ~/.gnupg/gpg.conf ~/.gnupg/options | \
+    grep 'default-key' | grep -Po '\S+\s*$'
+)"
+
+if [[ -z "$default_key" ]]; then
+    echo "[ERROR] No default key found in ~/.gnupg/gpg.conf or ~/.gnupg.options!  Cannot proceed with building bootstrap images."
+    exit 1
+fi
+
+declare public="$(gpg --armor --export -a "$default_key")"
+declare secret="$(gpg --armor --export-secret-keys -a "$default_key")"
+
 declare release_string="liquorix_$arch/$distro/$release"
 if [[ "$(docker image ls)" == *"$release_string"* ]]; then
     echo "[INFO ] $release_string: Docker image already built, performing update."

@@ -17,4 +17,5 @@ RUN apt-get update &&\
         gnupg &&\
     eatmydata apt-get clean &&\
     eatmydata rm -rfv /var/lib/apt/lists/* &&\
+    echo "$PUBLIC" | gpg --import &&\
     echo "$SECRET" | gpg --import
