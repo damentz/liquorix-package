@@ -4,6 +4,7 @@ ARG RELEASE
 
 FROM $ARCH/$DISTRO:$RELEASE
 
+ARG DEFAULT
 ARG PUBLIC
 ARG SECRET
 RUN apt-get update &&\
@@ -18,4 +19,5 @@ RUN apt-get update &&\
     eatmydata apt-get clean &&\
     eatmydata rm -rfv /var/lib/apt/lists/* &&\
     echo "$PUBLIC" | gpg --import &&\
-    echo "$SECRET" | gpg --import
+    echo "$SECRET" | gpg --import &&\
+    echo "default-key $DEFAULT" > ~/.gnupg/gpg.conf

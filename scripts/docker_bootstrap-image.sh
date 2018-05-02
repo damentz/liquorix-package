@@ -77,6 +77,7 @@ else
         --build-arg ARCH="$arch" \
         --build-arg DISTRO="$distro" \
         --build-arg RELEASE="$release" \
+        --build-arg DEFAULT="$default_key" \
         --build-arg PUBLIC="$public" \
         --build-arg SECRET="$secret" \
         $dir_base/
