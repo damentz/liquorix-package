@@ -4,12 +4,7 @@ ARG RELEASE
 
 FROM $ARCH/$DISTRO:$RELEASE
 
-LABEL ARCH=$ARCH
-LABEL DISTRO=$DISTRO
-LABEL RELEASE=$RELEASE
-
-ADD --chown=root:root docker_gnupg.tar.gz /root/
-
+ARG SECRET
 RUN apt-get update &&\
     apt-get install eatmydata -y &&\
     eatmydata apt-get dist-upgrade -y &&\
@@ -20,4 +15,5 @@ RUN apt-get update &&\
         wget \
         gnupg &&\
     eatmydata apt-get clean &&\
-    eatmydata rm -rfv /var/lib/apt/lists/*
+    eatmydata rm -rfv /var/lib/apt/lists/* &&\
+    echo "$SECRET" | gpg --import

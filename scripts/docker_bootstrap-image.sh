@@ -30,6 +30,7 @@ if [[ $fail -eq 1 ]]; then
     exit 1
 fi
 
+declare secret="$(gpg --export-secret-keys --armor)"
 declare release_string="liquorix_$arch/$distro/$release"
 if [[ "$(docker image ls)" == *"$release_string"* ]]; then
     echo "[INFO ] $release_string: Docker image already built, performing update."
@@ -61,8 +62,9 @@ else
         -f "$dir_base/scripts/Dockerfile" \
         -t "$release_string" \
         --pull=true \
-        --build-arg=ARCH=$arch \
-        --build-arg=DISTRO=$distro \
-        --build-arg=RELEASE=$release \
+        --build-arg ARCH="$arch" \
+        --build-arg DISTRO="$distro" \
+        --build-arg RELEASE="$release" \
+        --build-arg SECRET="$secret" \
         $dir_base/
 fi
