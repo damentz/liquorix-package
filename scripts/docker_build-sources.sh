@@ -42,6 +42,7 @@ if [[ -z "$release_string" ]]; then
 fi
 
 docker run \
+    --rm \
     -v $dir_base:/liquorix-package \
     -it $release_string \
     /liquorix-package/scripts/container_build-sources.sh \
