@@ -31,7 +31,7 @@ if [[ $fail -eq 1 ]]; then
 fi
 
 declare default_key="$(
-    cat ~/.gnupg/gpg.conf ~/.gnupg/options | \
+    cat ~/.gnupg/gpg.conf ~/.gnupg/options 2>/dev/null | \
     grep 'default-key' | grep -Po '\S+\s*$'
 )"
 
