@@ -14,6 +14,10 @@ version_build="1"
 
 package_source="${package_name}_${version_kernel}.orig.tar.xz"
 
+# Distribution and release to build source packages with
+source_distro='debian'
+source_release='sid'
+
 releases_debian=('sid')
 releases_ubuntu=('xenial' 'artful' 'bionic' 'cosmic')
 mirror_debian='http://deb.debian.org/debian'
