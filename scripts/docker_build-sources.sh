@@ -30,7 +30,7 @@ declare arch=''
 declare release_string=''
 for i in "${architectures[@]}"; do
     arch=$i
-    release_string="liquorix_$arch/$distro/$release"
+    release_string="liquorix_$arch/$source_distro/$source_release"
     if [[ "$(docker image ls)" == *"$release_string"* ]]; then
         break
     fi
