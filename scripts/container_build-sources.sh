@@ -6,7 +6,7 @@ source "$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/env.sh"
 
 declare distro=${1:-}
 declare release=${2:-}
-declare version_build=${3:-1}
+declare build=${3:-${version_build}}
 declare dir_build="/build"
 declare dir_artifacts="$dir_base/artifacts/$distro/$release"
 
@@ -32,7 +32,7 @@ prepare_env
 # We need to update our lists to we can install dependencies correctly
 apt-get update
 
-version="$(get_release_version $distro $release)"
+version="$(get_release_version $distro $release $build)"
 
 echo "[INFO ] Building source package for $release"
 build_source_package "$release" "$version"
