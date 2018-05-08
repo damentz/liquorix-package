@@ -32,14 +32,8 @@ prepare_env
 # We need to update our lists to we can install dependencies correctly
 apt-get update
 
-# Ubuntu packages like to have the "ubuntu" name inserted between the package
-# version and the build number, while Debian packages don't care.
-declare version=''
-if [[ "$distro" == "ubuntu" ]]; then
-    version="${version_package}ubuntu${version_build}~${release}"
-else
-    version="${version_package}.${version_build}~${release}"
-fi
+version="$(get_release_version $distro $release)"
+
 echo "[INFO ] Building source package for $release"
 build_source_package "$release" "$version"
 

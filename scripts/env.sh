@@ -46,6 +46,22 @@ pbuilder_mirror="$mirror_debian"
 pbuilder_chroots="/var/cache/pbuilder"
 pbuilder_results="$dir_base/debs"
 
+# Common routine to get correct release version for Debian / Ubuntu
+function get_release_version {
+    local distro="${1:-}"
+    local release="${2:-}"
+    local build="${3:-${version_build}}"
+
+    declare version=''
+    if [[ "$distro" == "ubuntu" ]]; then
+        version="${version_package}ubuntu${build}~${release}"
+    else
+        version="${version_package}.${build}~${release}"
+    fi
+
+    echo "$version"
+}
+
 function prepare_env {
     echo "[INFO ] Preparing build directory: $dir_build"
     mkdir -p "$dir_build"

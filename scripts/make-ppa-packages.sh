@@ -22,7 +22,7 @@ echo "[DEBUG] releases_ubuntu: ${releases_ubuntu[@]}"
 prepare_env
 
 for release_name in "${releases_ubuntu[@]}"; do
-    declare release_version="${version_package}ubuntu${version_build}~${release_name}"
+    declare release_version="$(get_release_version ubuntu $release_name $version_build)"
 
     echo "[INFO ] Building source package for $release"
     build_source_package "$release_name" "$release_version"
