@@ -32,7 +32,7 @@ fi
 
 declare default_key="$(
     cat ~/.gnupg/gpg.conf ~/.gnupg/options 2>/dev/null | \
-    grep 'default-key' | grep -Po '\S+\s*$'
+    grep -E '^\s*default-key' | grep -Po '\S+\s*$'
 )"
 
 if [[ -z "$default_key" ]]; then
