@@ -4,6 +4,8 @@ ARG RELEASE
 
 FROM $ARCH/$DISTRO:$RELEASE
 
+ADD --chown=root:root configs/.dput.cf ~/
+
 ARG DEFAULT
 ARG PUBLIC
 ARG SECRET
