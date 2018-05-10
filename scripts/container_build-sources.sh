@@ -8,7 +8,7 @@ declare distro=${1:-}
 declare release=${2:-}
 declare build=${3:-${version_build}}
 declare dir_build="/build"
-declare dir_artifacts="$dir_base/artifacts/$distro/$release"
+declare dir_artifacts="$dir_artifacts/$distro/$release"
 
 declare -i fail=0
 
