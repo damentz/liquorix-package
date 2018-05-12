@@ -114,5 +114,5 @@ function build_source_package {
     fi
 
     echo "[INFO ] Making source package"
-    debuild --no-lintian -S -sa
+    dpkg-buildpackage --build=source
 }
