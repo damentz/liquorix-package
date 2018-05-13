@@ -9,7 +9,7 @@ dir_build="$dir_base/build"
 dir_artifacts="$dir_base/artifacts"
 
 version_package="$( head -n1 "$dir_package"/debian/changelog | grep -Po '\d+\.\d+-\d+' )"
-version_kernel="$(  head -n1 "$dir_package"/debian/changelog | grep -Po '\d+\.\d+' )"
+version_kernel="$(  echo $version_package                    | grep -Po '\d+\.\d+' )"
 version_build="1"
 
 package_source="${package_name}_${version_kernel}.orig.tar.xz"
