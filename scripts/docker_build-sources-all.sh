@@ -24,4 +24,4 @@ done
 echo "[DEBUG] $0, args: ${args[@]}"
 for item in "${args[@]}"; do
     echo "$item"
-done | xargs -n3 -P "$processes" "$dir_base/scripts/docker_build-sources.sh"
+done | xargs -n3 -P "$processes" "$dir_base/scripts/docker_build-source.sh"

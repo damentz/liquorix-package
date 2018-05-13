@@ -29,7 +29,7 @@ docker run \
     --rm \
     -v $dir_base:/liquorix-package \
     -t "liquorix_$source_arch/$source_distro/$source_release" \
-    /liquorix-package/scripts/container_build-sources.sh \
+    /liquorix-package/scripts/container_build-source.sh \
         $distro \
         $release \
         $build
