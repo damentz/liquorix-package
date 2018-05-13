@@ -53,7 +53,7 @@ def main():
         'Liquorix', 'production', cachedir, version='devel')
     ppa = launchpad.me.getPPAByName(name="liquorix")
 
-    # We can either user superseded sources or binaries.  Sources supersede
+    # We can either delete superseded sources or binaries.  Sources supersede
     # immediately while binaries only superseded after a new binary has been
     # published.  This works in our favor since we only want to delete the
     # package if there's a new version available for download.
