@@ -77,9 +77,15 @@ function prepare_env {
     echo "[INFO ] Copying $package_name/debian to $dir_build/$package_name/"
     cp -raf "$dir_package/debian" "$dir_build/$package_name/"
 
-    echo "[INFO ] Running 'fakeroot debian/rules maintainerclean'"
+    # Fakeroot has a 15% chance of failing for a semop error in docker
+    local maintainerclean='fakeroot debian/rules maintainerclean'
+    if cat /proc/1/cgroup | grep -Eq '^0:.*docker'; then
+        maintainerclean='debian/rules maintainerclean'
+    fi
     cd "$dir_build/$package_name"
-    fakeroot debian/rules maintainerclean
+
+    echo "[INFO ] Running '$maintainerclean'"
+    $maintainerclean
 
     if [[ ! -f "$dir_base/$package_source" ]]; then
         echo "[WARN ] Missing source file: $dir_base/$package_source, downloading now."
@@ -105,7 +111,14 @@ function build_source_package {
     sed -r -i "1s/[^;]+(;.*)/$package_name ($release_version) $release_name\1/" debian/changelog
 
     echo "[INFO ] Cleaning package"
+
     local clean='fakeroot debian/rules clean'
+
+    # Fakeroot has a 15% chance of failing for a semop error in docker
+    if cat /proc/1/cgroup | grep -Eq '^0:.*docker'; then
+        clean='debian/rules clean'
+    fi
+
     $clean || $clean
 
     # Check if we're in a docker container and install package dependencies
