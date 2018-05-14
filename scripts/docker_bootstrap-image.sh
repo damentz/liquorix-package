@@ -80,5 +80,8 @@ else
         --build-arg DEFAULT="$default_key" \
         --build-arg PUBLIC="$public" \
         --build-arg SECRET="$secret" \
-        $dir_base/
+        $dir_base/ || true
+
+        # We don't want the docker build bootstrap script from stopping release
+        # scripts from completing.
 fi
