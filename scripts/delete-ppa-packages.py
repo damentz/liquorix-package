@@ -38,16 +38,12 @@ def delete_binary(launchpad, entry):
     if entry['status'] == 'Deleted':
         return True
 
-    if entry['status'] == 'Superseded':
-        print("[INFO ] Deleting superseded binary: " + entry["display_name"])
-        obj = launchpad.load(entry['self_link'])
-        obj.requestDeletion(
-            removal_comment='Automated removal of superseded package.')
+    print("[INFO ] Deleting superseded binary: " + entry["display_name"])
+    obj = launchpad.load(entry['self_link'])
+    obj.requestDeletion(
+        removal_comment='Automated removal of superseded package.')
 
-        return True
-
-    print("[WARN ] Binary is not superseded, skipping.")
-    return False
+    return True
 
 
 def main():
