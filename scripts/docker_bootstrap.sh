@@ -6,7 +6,7 @@ set -euo pipefail
 source "$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/env.sh"
 
 # Bootstrap common prerequisites
-$dir_base/scripts/common_bootstrap.sh
+"$dir_base"/scripts/common_bootstrap.sh
 
 cd "$dir_base/scripts"
 
