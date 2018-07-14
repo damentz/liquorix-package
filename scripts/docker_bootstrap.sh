@@ -10,7 +10,7 @@ $dir_base/scripts/common_bootstrap.sh
 
 cd "$dir_base/scripts"
 
-if ! which docker > /dev/null; then
+if ! command -v docker > /dev/null; then
     echo "[ERROR] Docker is not installed, cannot continue!"
     exit 1
 fi
