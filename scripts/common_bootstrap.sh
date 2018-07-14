@@ -2,6 +2,7 @@
 
 set -euo pipefail
 
+# shellcheck source=env.sh
 source "$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/env.sh"
 
 if [[ ! -f "$dir_base/$package_source" ]]; then
