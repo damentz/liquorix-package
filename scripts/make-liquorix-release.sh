@@ -13,7 +13,7 @@ if which nproc > /dev/null 2>&1; then
     procs=$(( $(nproc) / 2 ))
 fi
 
-if [[ $procs < 2 ]]; then
+if [[ $procs -lt 2 ]]; then
     procs=2
 fi
 
