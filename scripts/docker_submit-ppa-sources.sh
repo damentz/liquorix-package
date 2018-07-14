@@ -6,9 +6,8 @@ set -euo pipefail
 source "$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/env.sh"
 
 declare -i build=${1:-${version_build}}
-declare -a args=()
-
 declare distro='ubuntu'
+
 for release in "${releases_ubuntu[@]}"; do
     echo "[INFO ] Uploading sources for $distro/$release"
     docker run \
