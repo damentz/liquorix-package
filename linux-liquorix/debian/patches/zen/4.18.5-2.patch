@@ -2058,7 +2058,7 @@ index 000000000000..a249678a8866
 +thinkpad_ec module and the H8S hardware documentation:
 +http://documentation.renesas.com/eng/products/mpumcu/rej09b0300_2140bhm.pdf
 diff --git a/Makefile b/Makefile
-index 863f58503bee..bf157c8a3790 100644
+index 863f58503bee..7c5ff9bcd2c6 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -1,9 +1,9 @@
@@ -2069,7 +2069,7 @@ index 863f58503bee..bf157c8a3790 100644
 -EXTRAVERSION =
 -NAME = Merciless Moray
 +SUBLEVEL = 5
-+EXTRAVERSION = -lqx1
++EXTRAVERSION = -lqx2
 +NAME = Short and Stout
  
  # *DOCUMENTATION*
@@ -7751,10 +7751,10 @@ index 000000000000..fb7bb8f08b75
 +}
 diff --git a/block/bfq-mq-iosched.c b/block/bfq-mq-iosched.c
 new file mode 100644
-index 000000000000..cd6d5a2f838f
+index 000000000000..5b3d8f6c10dd
 --- /dev/null
 +++ b/block/bfq-mq-iosched.c
-@@ -0,0 +1,6426 @@
+@@ -0,0 +1,6356 @@
 +/*
 + * Budget Fair Queueing (BFQ) I/O scheduler.
 + *
@@ -11322,13 +11322,6 @@ index 000000000000..cd6d5a2f838f
 +		    jiffies + nsecs_to_jiffies(bfqq->bfqd->bfq_slice_idle) + 4);
 +}
 +
-+static bool bfq_bfqq_injectable(struct bfq_queue *bfqq)
-+{
-+	return BFQQ_SEEKY(bfqq) && bfqq->wr_coeff == 1 &&
-+		blk_queue_nonrot(bfqq->bfqd->queue) &&
-+		bfqq->bfqd->hw_tag;
-+}
-+
 +/**
 + * bfq_bfqq_expire - expire a queue.
 + * @bfqd: device owning the queue.
@@ -11453,8 +11446,6 @@ index 000000000000..cd6d5a2f838f
 +	BUG_ON(ref > 1 &&
 +	       !bfq_bfqq_busy(bfqq) && reason == BFQ_BFQQ_BUDGET_EXHAUSTED &&
 +		!bfq_class_idle(bfqq));
-+
-+	bfqq->injected_service = 0;
 +
 +	/* mark bfqq as waiting a request only if a bic still points to it */
 +	if (!bfq_bfqq_busy(bfqq) &&
@@ -11807,33 +11798,6 @@ index 000000000000..cd6d5a2f838f
 +	return RB_EMPTY_ROOT(&bfqq->sort_list) && bfq_better_to_idle(bfqq);
 +}
 +
-+static struct bfq_queue *bfq_choose_bfqq_for_injection(struct bfq_data *bfqd)
-+{
-+	struct bfq_queue *bfqq;
-+
-+	/*
-+	 * A linear search; but, with a high probability, very few
-+	 * steps are needed to find a candidate queue, i.e., a queue
-+	 * with enough budget left for its next request. In fact:
-+	 * - BFQ dynamically updates the budget of every queue so as
-+	 *   to accomodate the expected backlog of the queue;
-+	 * - if a queue gets all its requests dispatched as injected
-+	 *   service, then the queue is removed from the active list
-+	 *   (and re-added only if it gets new requests, but with
-+	 *   enough budget for its new backlog).
-+	 */
-+	list_for_each_entry(bfqq, &bfqd->active_list, bfqq_list)
-+		if (!RB_EMPTY_ROOT(&bfqq->sort_list) &&
-+		    bfq_serv_to_charge(bfqq->next_rq, bfqq) <=
-+		    bfq_bfqq_budget_left(bfqq)) {
-+			bfq_log_bfqq(bfqd, bfqq, "returned this queue");
-+			return bfqq;
-+		}
-+
-+	bfq_log(bfqd, "no queue found");
-+	return NULL;
-+}
-+
 +/*
 + * Select a queue for service.  If we have a current queue in service,
 + * check whether to continue servicing it, or retrieve and set a new one.
@@ -11917,25 +11881,10 @@ index 000000000000..cd6d5a2f838f
 +	 * No requests pending. However, if the in-service queue is idling
 +	 * for a new request, or has requests waiting for a completion and
 +	 * may idle after their completion, then keep it anyway.
-+	 *
-+	 * Yet, to boost throughput, inject service from other queues if
-+	 * possible.
 +	 */
 +	if (bfq_bfqq_wait_request(bfqq) ||
 +	    (bfqq->dispatched != 0 && bfq_better_to_idle(bfqq))) {
-+		if (bfq_bfqq_injectable(bfqq) &&
-+		    bfqq->injected_service * bfqq->inject_coeff <
-+		    bfqq->entity.service * 10) {
-+			bfq_log_bfqq(bfqd, bfqq, "looking for queue for injection");
-+			bfqq = bfq_choose_bfqq_for_injection(bfqd);
-+		} else {
-+			if (BFQQ_SEEKY(bfqq))
-+				bfq_log_bfqq(bfqd, bfqq,
-+					"injection saturated %d * %d >= %d * 10",
-+					bfqq->injected_service, bfqq->inject_coeff,
-+					bfqq->entity.service);
-+			bfqq = NULL;
-+		}
++		bfqq = NULL;
 +		goto keep_queue;
 +	}
 +
@@ -12044,24 +11993,6 @@ index 000000000000..cd6d5a2f838f
 +
 +	bfq_dispatch_remove(bfqd->queue, rq);
 +
-+	bfq_log_bfqq(bfqd, bfqq,
-+	     "dispatched %u sec req (%llu), budg left %d, new disp_nr %d",
-+			blk_rq_sectors(rq),
-+			(unsigned long long) blk_rq_pos(rq),
-+		     bfq_bfqq_budget_left(bfqq),
-+		     bfqq->dispatched);
-+
-+	if (bfqq != bfqd->in_service_queue) {
-+		if (likely(bfqd->in_service_queue)) {
-+			bfqd->in_service_queue->injected_service +=
-+				bfq_serv_to_charge(rq, bfqq);
-+			bfq_log_bfqq(bfqd, bfqd->in_service_queue,
-+				     "injected_service increased to %d",
-+				     bfqd->in_service_queue->injected_service);
-+		}
-+		goto return_rq;
-+	}
-+
 +	/*
 +	 * If weight raising has to terminate for bfqq, then next
 +	 * function causes an immediate update of bfqq's weight,
@@ -12075,17 +12006,25 @@ index 000000000000..cd6d5a2f838f
 +	 */
 +	bfq_update_wr_data(bfqd, bfqq);
 +
++	bfq_log_bfqq(bfqd, bfqq,
++	     "dispatched %u sec req (%llu), budg left %d, new disp_nr %d",
++			blk_rq_sectors(rq),
++			(unsigned long long) blk_rq_pos(rq),
++		     bfq_bfqq_budget_left(bfqq),
++		     bfqq->dispatched);
++
 +	/*
 +	 * Expire bfqq, pretending that its budget expired, if bfqq
 +	 * belongs to CLASS_IDLE and other queues are waiting for
 +	 * service.
 +	 */
-+	if (!(bfqd->busy_queues > 1 && bfq_class_idle(bfqq)))
-+		goto return_rq;
++	if (bfqd->busy_queues > 1 && bfq_class_idle(bfqq))
++		goto expire;
 +
++	return rq;
++
++expire:
 +	bfq_bfqq_expire(bfqd, bfqq, false, BFQ_BFQQ_BUDGET_EXHAUSTED);
-+
-+return_rq:
 +	return rq;
 +}
 +
@@ -12191,11 +12130,9 @@ index 000000000000..cd6d5a2f838f
 +	if (!bfqq)
 +		goto exit;
 +
-+	BUG_ON(bfqq == bfqd->in_service_queue &&
-+	       bfqq->entity.budget < bfqq->entity.service);
++	BUG_ON(bfqq->entity.budget < bfqq->entity.service);
 +
-+	BUG_ON(bfqq == bfqd->in_service_queue &&
-+	       bfq_bfqq_wait_request(bfqq));
++	BUG_ON(bfq_bfqq_wait_request(bfqq));
 +
 +	rq = bfq_dispatch_rq_from_bfqq(bfqd, bfqq);
 +
@@ -12544,13 +12481,6 @@ index 000000000000..cd6d5a2f838f
 +			bfq_mark_bfqq_has_short_ttime(bfqq);
 +		bfq_mark_bfqq_sync(bfqq);
 +		bfq_mark_bfqq_just_created(bfqq);
-+		/*
-+		 * Aggressively inject a lot of service: up to 90%.
-+		 * This coefficient remains constant during bfqq life,
-+		 * but this behavior might be changed, after enough
-+		 * testing and tuning.
-+		 */
-+		bfqq->inject_coeff = 1;
 +	} else
 +		bfq_clear_bfqq_sync(bfqq);
 +
@@ -14183,10 +14113,10 @@ index 000000000000..cd6d5a2f838f
 +MODULE_DESCRIPTION("MQ Budget Fair Queueing I/O Scheduler");
 diff --git a/block/bfq-mq.h b/block/bfq-mq.h
 new file mode 100644
-index 000000000000..d15f8ab85817
+index 000000000000..52b6e7342c91
 --- /dev/null
 +++ b/block/bfq-mq.h
-@@ -0,0 +1,1031 @@
+@@ -0,0 +1,1005 @@
 +/*
 + * BFQ v8r12 for 4.11.0: data structures and common functions prototypes.
 + *
@@ -14532,32 +14462,6 @@ index 000000000000..d15f8ab85817
 +
 +	unsigned long split_time; /* time of last split */
 +	unsigned long first_IO_time; /* time of first I/O for this queue */
-+
-+	/* max service rate measured so far */
-+	u32 max_service_rate;
-+	/*
-+	 * Ratio between the service received by bfqq while it is in
-+	 * service, and the cumulative service (of requests of other
-+	 * queues) that may be injected while bfqq is empty but still
-+	 * in service. To increase precision, the coefficient is
-+	 * measured in tenths of unit. Here are some example of (1)
-+	 * ratios, (2) resulting percentages of service injected
-+	 * w.r.t. to the total service dispatched while bfqq is in
-+	 * service, and (3) corresponding values of the coefficient:
-+	 * 1 (50%) -> 10
-+	 * 2 (33%) -> 20
-+	 * 10 (9%) -> 100
-+	 * 9.9 (9%) -> 99
-+	 * 1.5 (40%) -> 15
-+	 * 0.5 (66%) -> 5
-+	 * 0.1 (90%) -> 1
-+	 *
-+	 * So, if the coefficient is lower than 10, then
-+	 * injected service is more than bfqq service.
-+	 */
-+	unsigned int inject_coeff;
-+	/* amount of service injected in current service slot */
-+	unsigned int injected_service;
 +};
 +
 +/**
@@ -17303,10 +17207,10 @@ index 000000000000..32d66282bec9
 +}
 diff --git a/block/bfq-sq-iosched.c b/block/bfq-sq-iosched.c
 new file mode 100644
-index 000000000000..660ab522aefa
+index 000000000000..bf8a44b30bbd
 --- /dev/null
 +++ b/block/bfq-sq-iosched.c
-@@ -0,0 +1,5841 @@
+@@ -0,0 +1,5769 @@
 +/*
 + * Budget Fair Queueing (BFQ) I/O scheduler.
 + *
@@ -20678,13 +20582,6 @@ index 000000000000..660ab522aefa
 +		    jiffies + nsecs_to_jiffies(bfqq->bfqd->bfq_slice_idle) + 4);
 +}
 +
-+static bool bfq_bfqq_injectable(struct bfq_queue *bfqq)
-+{
-+	return BFQQ_SEEKY(bfqq) && bfqq->wr_coeff == 1 &&
-+		blk_queue_nonrot(bfqq->bfqd->queue) &&
-+		bfqq->bfqd->hw_tag;
-+}
-+
 +/**
 + * bfq_bfqq_expire - expire a queue.
 + * @bfqd: device owning the queue.
@@ -20809,8 +20706,6 @@ index 000000000000..660ab522aefa
 +	BUG_ON(ref > 1 &&
 +	       !bfq_bfqq_busy(bfqq) && reason == BFQ_BFQQ_BUDGET_EXHAUSTED &&
 +		!bfq_class_idle(bfqq));
-+
-+	bfqq->injected_service = 0;
 +
 +	/* mark bfqq as waiting a request only if a bic still points to it */
 +	if (!bfq_bfqq_busy(bfqq) &&
@@ -21163,33 +21058,6 @@ index 000000000000..660ab522aefa
 +	return RB_EMPTY_ROOT(&bfqq->sort_list) && bfq_better_to_idle(bfqq);
 +}
 +
-+static struct bfq_queue *bfq_choose_bfqq_for_injection(struct bfq_data *bfqd)
-+{
-+	struct bfq_queue *bfqq;
-+
-+	/*
-+	 * A linear search; but, with a high probability, very few
-+	 * steps are needed to find a candidate queue, i.e., a queue
-+	 * with enough budget left for its next request. In fact:
-+	 * - BFQ dynamically updates the budget of every queue so as
-+	 *   to accomodate the expected backlog of the queue;
-+	 * - if a queue gets all its requests dispatched as injected
-+	 *   service, then the queue is removed from the active list
-+	 *   (and re-added only if it gets new requests, but with
-+	 *   enough budget for its new backlog).
-+	 */
-+	list_for_each_entry(bfqq, &bfqd->active_list, bfqq_list)
-+		if (!RB_EMPTY_ROOT(&bfqq->sort_list) &&
-+		    bfq_serv_to_charge(bfqq->next_rq, bfqq) <=
-+		    bfq_bfqq_budget_left(bfqq)) {
-+			bfq_log_bfqq(bfqd, bfqq, "returned this queue");
-+			return bfqq;
-+		}
-+
-+	bfq_log(bfqd, "no queue found");
-+	return NULL;
-+}
-+
 +/*
 + * Select a queue for service.  If we have a current queue in service,
 + * check whether to continue servicing it, or retrieve and set a new one.
@@ -21275,25 +21143,10 @@ index 000000000000..660ab522aefa
 +	 * No requests pending. However, if the in-service queue is idling
 +	 * for a new request, or has requests waiting for a completion and
 +	 * may idle after their completion, then keep it anyway.
-+	 *
-+	 * Yet, to boost throughput, inject service from other queues if
-+	 * possible.
 +	 */
 +	if (hrtimer_active(&bfqd->idle_slice_timer) ||
 +	    (bfqq->dispatched != 0 && bfq_better_to_idle(bfqq))) {
-+		if (bfq_bfqq_injectable(bfqq) &&
-+		    bfqq->injected_service * bfqq->inject_coeff <
-+		    bfqq->entity.service * 10) {
-+			bfq_log_bfqq(bfqd, bfqq, "looking for queue for injection");
-+			bfqq = bfq_choose_bfqq_for_injection(bfqd);
-+		} else {
-+			if (BFQQ_SEEKY(bfqq))
-+				bfq_log_bfqq(bfqd, bfqq,
-+					"injection saturated %d * %d >= %d * 10",
-+					bfqq->injected_service, bfqq->inject_coeff,
-+					bfqq->entity.service);
-+			bfqq = NULL;
-+		}
++		bfqq = NULL;
 +		goto keep_queue;
 +	}
 +
@@ -21404,26 +21257,6 @@ index 000000000000..660ab522aefa
 +
 +	bfq_dispatch_insert(bfqd->queue, rq);
 +
-+	bfq_log_bfqq(bfqd, bfqq,
-+	     "dispatched %u sec req (%llu), budg left %d, new disp_nr %d",
-+			blk_rq_sectors(rq),
-+			(unsigned long long) blk_rq_pos(rq),
-+		     bfq_bfqq_budget_left(bfqq),
-+		     bfqq->dispatched);
-+
-+	dispatched++;
-+
-+	if (bfqq != bfqd->in_service_queue) {
-+		if (likely(bfqd->in_service_queue)) {
-+			bfqd->in_service_queue->injected_service +=
-+				bfq_serv_to_charge(rq, bfqq);
-+			bfq_log_bfqq(bfqd, bfqd->in_service_queue,
-+				     "injected_service increased to %d",
-+				     bfqd->in_service_queue->injected_service);
-+		}
-+		return dispatched;
-+	}
-+
 +	/*
 +	 * If weight raising has to terminate for bfqq, then next
 +	 * function causes an immediate update of bfqq's weight,
@@ -21436,6 +21269,14 @@ index 000000000000..660ab522aefa
 +	 * device immediately to possible other weight-raised queues.
 +	 */
 +	bfq_update_wr_data(bfqd, bfqq);
++
++	bfq_log_bfqq(bfqd, bfqq,
++			"dispatched %u sec req (%llu), budg left %d",
++			blk_rq_sectors(rq),
++			(unsigned long long) blk_rq_pos(rq),
++			bfq_bfqq_budget_left(bfqq));
++
++	dispatched++;
 +
 +	if (!bfqd->in_service_bic) {
 +		atomic_long_inc(&RQ_BIC(rq)->icq.ioc->refcount);
@@ -21531,11 +21372,9 @@ index 000000000000..660ab522aefa
 +	if (!bfqq)
 +		return 0;
 +
-+	BUG_ON(bfqq == bfqd->in_service_queue &&
-+	       bfqq->entity.budget < bfqq->entity.service);
++	BUG_ON(bfqq->entity.budget < bfqq->entity.service);
 +
-+	BUG_ON(bfqq == bfqd->in_service_queue &&
-+	       bfq_bfqq_wait_request(bfqq));
++	BUG_ON(bfq_bfqq_wait_request(bfqq));
 +
 +	if (!bfq_dispatch_request(bfqd, bfqq))
 +		return 0;
@@ -21780,13 +21619,6 @@ index 000000000000..660ab522aefa
 +			bfq_mark_bfqq_has_short_ttime(bfqq);
 +		bfq_mark_bfqq_sync(bfqq);
 +		bfq_mark_bfqq_just_created(bfqq);
-+		/*
-+		 * Aggressively inject a lot of service: up to 90%.
-+		 * This coefficient remains constant during bfqq life,
-+		 * but this behavior might be changed, after enough
-+		 * testing and tuning.
-+		 */
-+		bfqq->inject_coeff = 1;
 +	} else
 +		bfq_clear_bfqq_sync(bfqq);
 +	bfq_mark_bfqq_IO_bound(bfqq);
@@ -23150,10 +22982,10 @@ index 000000000000..660ab522aefa
 +MODULE_LICENSE("GPL");
 diff --git a/block/bfq.h b/block/bfq.h
 new file mode 100644
-index 000000000000..b258b92ac44d
+index 000000000000..2850bf053b67
 --- /dev/null
 +++ b/block/bfq.h
-@@ -0,0 +1,1022 @@
+@@ -0,0 +1,996 @@
 +/*
 + * BFQ v8r12 for 4.11.0: data structures and common functions prototypes.
 + *
@@ -23492,32 +23324,6 @@ index 000000000000..b258b92ac44d
 +	unsigned long split_time; /* time of last split */
 +
 +	unsigned long first_IO_time; /* time of first I/O for this queue */
-+
-+	/* max service rate measured so far */
-+	u32 max_service_rate;
-+	/*
-+	 * Ratio between the service received by bfqq while it is in
-+	 * service, and the cumulative service (of requests of other
-+	 * queues) that may be injected while bfqq is empty but still
-+	 * in service. To increase precision, the coefficient is
-+	 * measured in tenths of unit. Here are some example of (1)
-+	 * ratios, (2) resulting percentages of service injected
-+	 * w.r.t. to the total service dispatched while bfqq is in
-+	 * service, and (3) corresponding values of the coefficient:
-+	 * 1 (50%) -> 10
-+	 * 2 (33%) -> 20
-+	 * 10 (9%) -> 100
-+	 * 9.9 (9%) -> 99
-+	 * 1.5 (40%) -> 15
-+	 * 0.5 (66%) -> 5
-+	 * 0.1 (90%) -> 1
-+	 *
-+	 * So, if the coefficient is lower than 10, then
-+	 * injected service is more than bfqq service.
-+	 */
-+	unsigned int inject_coeff;
-+	/* amount of service injected in current service slot */
-+	unsigned int injected_service;
 +};
 +
 +/**
