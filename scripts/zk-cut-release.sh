@@ -10,9 +10,9 @@ fi
 
 sed -r -i "s/^EXTRAVERSION = .*/EXTRAVERSION = -${ev}/" Makefile
 
-declare -i kv=$(grep '^VERSION = ' Makefile | sed -r 's/^VERSION = //')
-declare -i kpl=$(grep '^PATCHLEVEL = ' Makefile | sed -r 's/^PATCHLEVEL = //')
-declare -i ksl=$(grep '^SUBLEVEL = ' Makefile | sed -r 's/^SUBLEVEL = //')
+declare -i kv=$(grep -E '^VERSION = ' Makefile | sed -r 's/^VERSION = //')
+declare -i kpl=$(grep -E '^PATCHLEVEL = ' Makefile | sed -r 's/^PATCHLEVEL = //')
+declare -i ksl=$(grep -E '^SUBLEVEL = ' Makefile | sed -r 's/^SUBLEVEL = //')
 
 tag="v$kv.$kpl.$ksl-$ev"
 
