@@ -10,6 +10,11 @@ declare repo_local_path="${liquorix_repo:-${HOME}/www/debian/}"
 echo "[DEBUG] build: $build"
 echo "[DEBUG] repo_local_path: $repo_local_path"
 
+if [[ ! -d "$repo_local_path" ]]; then
+    "[ERROR] Debian repository path $repo_local_path doesn't exist!  Not including changes."
+    exit 1
+fi
+
 for arch in 'amd64' 'i386'; do
     distro='debian'
     for release in "${releases_debian[@]}"; do
@@ -25,6 +30,11 @@ declare repo_server_name="${liquorix_server_name:-localhost}"
 declare repo_server_path="${liquorix_server_repo:-/var/www/debian/}"
 echo "[DEBUG] repo_server_name: $repo_server_name"
 echo "[DEBUG] repo_server_path: $repo_server_path"
+
+if [[ "$repo_server_name" == "localhost" ]]; then
+    echo "[ERROR] Remote server not configured, not syncing"
+    exit 1
+fi
 
 echo "[INFO ] Syncing $repo_local_path to $repo_server_name:$repo_server_path"
 rsync --progress -ahvz --delete "$repo_local_path" -e ssh "$repo_server_name":"$repo_server_path"
