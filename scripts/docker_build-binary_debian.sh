@@ -6,7 +6,7 @@ set -euo pipefail
 source "$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/env.sh"
 
 declare -i processes_default=2
-declare -i processes=${1:-"$processes_default"}
+declare -i processes=${1:-${processes_default}}
 declare -i build=${2:-${version_build}}
 declare -a args=()
 
