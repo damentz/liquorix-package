@@ -22,7 +22,7 @@ for arch in 'amd64' 'i386'; do
         changes="${package_name}_${version_package}.${build}~${release}_${arch}.changes"
 
         echo "[INFO ] Including $changes to repo at $repo_local_path"
-        reprepro -b $repo_local_path include "$release" "$changes"
+        reprepro -b "$repo_local_path" include "$release" "$changes"
     done
 done
 
