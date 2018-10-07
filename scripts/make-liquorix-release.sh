@@ -22,3 +22,5 @@ schedtool -D -n19 -e "$dir_scripts"/docker_bootstrap.sh $procs
 schedtool -D -n19 -e "$dir_scripts"/docker_build-source_all.sh $procs $build
 schedtool -D -n19 -e "$dir_scripts"/docker_submit-ppa-sources.sh $build
 schedtool -D -n19 -e "$dir_scripts"/docker_build-binary_debian.sh $build
+
+"$dir_scripts"/repo_add-debian-packages.sh
