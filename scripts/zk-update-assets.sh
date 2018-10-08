@@ -8,6 +8,11 @@ if [[ ! -f "Makefile" ]]; then
     exit 1
 fi
 
+if [[ -z "${GH_ASSET_TOKEN:-}" ]]; then
+    echo "[ERROR] No GitHub API token found under GH_ASSET_TOKEN!"
+    exit 1
+fi
+
 declare -i kv=$(grep -E '^VERSION = ' Makefile | sed -r 's/^VERSION = //')
 declare -i kpl=$(grep -E '^PATCHLEVEL = ' Makefile | sed -r 's/^PATCHLEVEL = //')
 declare -i ksl=$(grep -E '^SUBLEVEL = ' Makefile | sed -r 's/^SUBLEVEL = //')
