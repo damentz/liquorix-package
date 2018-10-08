@@ -27,7 +27,7 @@ tag_patch_dir="../"
 declare -i repository_id=2465166
 release_data='{"tag_name": "'"$tag"'", "tag_commitish": "'"$tag_commit"'"}'
 
-git diff "v${kv}.$kpl" "$tag" | xz -9 > "$tag_patch_dir/$tag_patch_file"
+git diff "v$kv.$kpl" "$tag" | xz -9 > "$tag_patch_dir/$tag_patch_file"
 gpg --output "$tag_patch_dir/$tag_patch_file.sig" \
     --detach-sign "$tag_patch_dir/$tag_patch_file"
 
