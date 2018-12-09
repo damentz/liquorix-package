@@ -21,7 +21,7 @@ source_distro='debian'
 source_release='sid'
 
 releases_debian=('sid')
-releases_ubuntu=('xenial' 'bionic' 'cosmic')
+releases_ubuntu=('xenial' 'bionic' 'cosmic' 'disco')
 mirror_debian='http://deb.debian.org/debian'
 mirror_ubuntu='http://archive.ubuntu.com/ubuntu'
 
