@@ -34,7 +34,7 @@ fi
 
 docker run \
     --rm \
-	--tmpfs /build:exec \
+    --tmpfs /build:exec \
     -v $dir_base:/liquorix-package \
     -t "liquorix_$arch/$distro/$release" \
     /liquorix-package/scripts/container_build-binary.sh \
