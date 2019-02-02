@@ -79,7 +79,7 @@ function prepare_env {
 
     # Fakeroot has a 15% chance of failing for a semop error in docker
     local maintainerclean='fakeroot debian/rules maintainerclean'
-    if cat /proc/1/cgroup | grep -Eq '^0:.*docker'; then
+    if [[ "$(id -u)" == 0 ]]; then
         maintainerclean='debian/rules maintainerclean'
     fi
     cd "$dir_build/$package_name"
@@ -115,16 +115,13 @@ function build_source_package {
     local clean='fakeroot debian/rules clean'
 
     # Fakeroot has a 15% chance of failing for a semop error in docker
-    if cat /proc/1/cgroup | grep -Eq '^0:.*docker'; then
+    if [[ "$(id -u)" == 0 ]]; then
         clean='debian/rules clean'
     fi
 
     $clean || $clean
 
-    # Check if we're in a docker container and install package dependencies
-    if cat /proc/1/cgroup | grep -Eq '^0:.*docker'; then
-        mk-build-deps -ir -t 'apt-get -y'
-    fi
+    mk-build-deps -ir -t 'apt-get -y'
 
     echo "[INFO ] Making source package"
     dpkg-buildpackage --build=source
