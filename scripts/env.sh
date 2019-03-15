@@ -17,8 +17,8 @@ package_source="${package_name}_${version_kernel}.orig.tar.xz"
 # Distribution and release to build source packages with.  Normally defaulted
 # to Debian Sid since it normally tracks the latest upstream.
 source_arch='amd64'
-source_distro='debian'
-source_release='sid'
+source_distro='ubuntu'
+source_release='bionic'
 
 releases_debian=('sid')
 releases_ubuntu=('xenial' 'bionic' 'cosmic' 'disco')
