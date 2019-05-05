@@ -134,6 +134,31 @@ index a10c1f89037d..e1fe02f3e3e9 100644
  			Must be "samsung,exynos7-adc" for
  				the ADC in Exynos7 and compatibles
  			Must be "samsung,s3c2410-adc" for
+diff --git a/Documentation/driver-api/usb/power-management.rst b/Documentation/driver-api/usb/power-management.rst
+index 79beb807996b..4a74cf6f2797 100644
+--- a/Documentation/driver-api/usb/power-management.rst
++++ b/Documentation/driver-api/usb/power-management.rst
+@@ -370,11 +370,15 @@ autosuspend the interface's device.  When the usage counter is = 0
+ then the interface is considered to be idle, and the kernel may
+ autosuspend the device.
+ 
+-Drivers need not be concerned about balancing changes to the usage
+-counter; the USB core will undo any remaining "get"s when a driver
+-is unbound from its interface.  As a corollary, drivers must not call
+-any of the ``usb_autopm_*`` functions after their ``disconnect``
+-routine has returned.
++Drivers must be careful to balance their overall changes to the usage
++counter.  Unbalanced "get"s will remain in effect when a driver is
++unbound from its interface, preventing the device from going into
++runtime suspend should the interface be bound to a driver again.  On
++the other hand, drivers are allowed to achieve this balance by calling
++the ``usb_autopm_*`` functions even after their ``disconnect`` routine
++has returned -- say from within a work-queue routine -- provided they
++retain an active reference to the interface (via ``usb_get_intf`` and
++``usb_put_intf``).
+ 
+ Drivers using the async routines are responsible for their own
+ synchronization and mutual exclusion.
 diff --git a/Documentation/i2c/busses/i2c-i801 b/Documentation/i2c/busses/i2c-i801
 index d1ee484a787d..ee9984f35868 100644
 --- a/Documentation/i2c/busses/i2c-i801
@@ -1338,7 +1363,7 @@ index 356156f5c52d..ba8927c0d45c 100644
  In general file descriptors can be migrated among processes by means
  of fork() and the SCM_RIGHTS facility of unix domain socket.  These
 diff --git a/Makefile b/Makefile
-index d5713e7b1e50..5dc20e34dc63 100644
+index d5713e7b1e50..5185ca05c776 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -1,9 +1,9 @@
@@ -1348,7 +1373,7 @@ index d5713e7b1e50..5dc20e34dc63 100644
 -SUBLEVEL = 0
 -EXTRAVERSION =
 -NAME = Shy Crocodile
-+SUBLEVEL = 12
++SUBLEVEL = 13
 +EXTRAVERSION = -lqx1
 +NAME = High Five
  
@@ -1602,6 +1627,23 @@ index 7b2340996cf8..7b3a7b3b380c 100644
  	if (uboot_tag != UBOOT_TAG_NONE &&
              uboot_arg_invalid((unsigned long)uboot_arg)) {
  		pr_warn(IGNORE_ARGS "invalid uboot arg: '%px'\n", uboot_arg);
+diff --git a/arch/arc/lib/memset-archs.S b/arch/arc/lib/memset-archs.S
+index f230bb7092fd..b3373f5c88e0 100644
+--- a/arch/arc/lib/memset-archs.S
++++ b/arch/arc/lib/memset-archs.S
+@@ -30,10 +30,10 @@
+ 
+ #else
+ 
+-.macro PREALLOC_INSTR
++.macro PREALLOC_INSTR	reg, off
+ .endm
+ 
+-.macro PREFETCHW_INSTR
++.macro PREFETCHW_INSTR	reg, off
+ .endm
+ 
+ #endif
 diff --git a/arch/arm/Kconfig b/arch/arm/Kconfig
 index 26524b75970a..3ab5f1d50685 100644
 --- a/arch/arm/Kconfig
@@ -8025,6 +8067,167 @@ index 89d20ed1d2e8..371c669696d7 100644
  	return 0;
  }
  
+diff --git a/arch/x86/kvm/lapic.c b/arch/x86/kvm/lapic.c
+index 4b6c2da7265c..4ae142eea96a 100644
+--- a/arch/x86/kvm/lapic.c
++++ b/arch/x86/kvm/lapic.c
+@@ -70,7 +70,6 @@
+ #define APIC_BROADCAST			0xFF
+ #define X2APIC_BROADCAST		0xFFFFFFFFul
+ 
+-static bool lapic_timer_advance_adjust_done = false;
+ #define LAPIC_TIMER_ADVANCE_ADJUST_DONE 100
+ /* step-by-step approximation to mitigate fluctuation */
+ #define LAPIC_TIMER_ADVANCE_ADJUST_STEP 8
+@@ -1479,9 +1478,30 @@ static bool lapic_timer_int_injected(struct kvm_vcpu *vcpu)
+ 	return false;
+ }
+ 
++static inline void __wait_lapic_expire(struct kvm_vcpu *vcpu, u64 guest_cycles)
++{
++	u64 timer_advance_ns = vcpu->arch.apic->lapic_timer.timer_advance_ns;
++
++	/*
++	 * If the guest TSC is running at a different ratio than the host, then
++	 * convert the delay to nanoseconds to achieve an accurate delay.  Note
++	 * that __delay() uses delay_tsc whenever the hardware has TSC, thus
++	 * always for VMX enabled hardware.
++	 */
++	if (vcpu->arch.tsc_scaling_ratio == kvm_default_tsc_scaling_ratio) {
++		__delay(min(guest_cycles,
++			nsec_to_cycles(vcpu, timer_advance_ns)));
++	} else {
++		u64 delay_ns = guest_cycles * 1000000ULL;
++		do_div(delay_ns, vcpu->arch.virtual_tsc_khz);
++		ndelay(min_t(u32, delay_ns, timer_advance_ns));
++	}
++}
++
+ void wait_lapic_expire(struct kvm_vcpu *vcpu)
+ {
+ 	struct kvm_lapic *apic = vcpu->arch.apic;
++	u32 timer_advance_ns = apic->lapic_timer.timer_advance_ns;
+ 	u64 guest_tsc, tsc_deadline, ns;
+ 
+ 	if (!lapic_in_kernel(vcpu))
+@@ -1498,33 +1518,37 @@ void wait_lapic_expire(struct kvm_vcpu *vcpu)
+ 	guest_tsc = kvm_read_l1_tsc(vcpu, rdtsc());
+ 	trace_kvm_wait_lapic_expire(vcpu->vcpu_id, guest_tsc - tsc_deadline);
+ 
+-	/* __delay is delay_tsc whenever the hardware has TSC, thus always.  */
+ 	if (guest_tsc < tsc_deadline)
+-		__delay(min(tsc_deadline - guest_tsc,
+-			nsec_to_cycles(vcpu, lapic_timer_advance_ns)));
++		__wait_lapic_expire(vcpu, tsc_deadline - guest_tsc);
+ 
+-	if (!lapic_timer_advance_adjust_done) {
++	if (!apic->lapic_timer.timer_advance_adjust_done) {
+ 		/* too early */
+ 		if (guest_tsc < tsc_deadline) {
+ 			ns = (tsc_deadline - guest_tsc) * 1000000ULL;
+ 			do_div(ns, vcpu->arch.virtual_tsc_khz);
+-			lapic_timer_advance_ns -= min((unsigned int)ns,
+-				lapic_timer_advance_ns / LAPIC_TIMER_ADVANCE_ADJUST_STEP);
++			timer_advance_ns -= min((u32)ns,
++				timer_advance_ns / LAPIC_TIMER_ADVANCE_ADJUST_STEP);
+ 		} else {
+ 		/* too late */
+ 			ns = (guest_tsc - tsc_deadline) * 1000000ULL;
+ 			do_div(ns, vcpu->arch.virtual_tsc_khz);
+-			lapic_timer_advance_ns += min((unsigned int)ns,
+-				lapic_timer_advance_ns / LAPIC_TIMER_ADVANCE_ADJUST_STEP);
++			timer_advance_ns += min((u32)ns,
++				timer_advance_ns / LAPIC_TIMER_ADVANCE_ADJUST_STEP);
+ 		}
+ 		if (abs(guest_tsc - tsc_deadline) < LAPIC_TIMER_ADVANCE_ADJUST_DONE)
+-			lapic_timer_advance_adjust_done = true;
++			apic->lapic_timer.timer_advance_adjust_done = true;
++		if (unlikely(timer_advance_ns > 5000)) {
++			timer_advance_ns = 0;
++			apic->lapic_timer.timer_advance_adjust_done = true;
++		}
++		apic->lapic_timer.timer_advance_ns = timer_advance_ns;
+ 	}
+ }
+ 
+ static void start_sw_tscdeadline(struct kvm_lapic *apic)
+ {
+-	u64 guest_tsc, tscdeadline = apic->lapic_timer.tscdeadline;
++	struct kvm_timer *ktimer = &apic->lapic_timer;
++	u64 guest_tsc, tscdeadline = ktimer->tscdeadline;
+ 	u64 ns = 0;
+ 	ktime_t expire;
+ 	struct kvm_vcpu *vcpu = apic->vcpu;
+@@ -1539,13 +1563,15 @@ static void start_sw_tscdeadline(struct kvm_lapic *apic)
+ 
+ 	now = ktime_get();
+ 	guest_tsc = kvm_read_l1_tsc(vcpu, rdtsc());
+-	if (likely(tscdeadline > guest_tsc)) {
+-		ns = (tscdeadline - guest_tsc) * 1000000ULL;
+-		do_div(ns, this_tsc_khz);
++
++	ns = (tscdeadline - guest_tsc) * 1000000ULL;
++	do_div(ns, this_tsc_khz);
++
++	if (likely(tscdeadline > guest_tsc) &&
++	    likely(ns > apic->lapic_timer.timer_advance_ns)) {
+ 		expire = ktime_add_ns(now, ns);
+-		expire = ktime_sub_ns(expire, lapic_timer_advance_ns);
+-		hrtimer_start(&apic->lapic_timer.timer,
+-				expire, HRTIMER_MODE_ABS_PINNED);
++		expire = ktime_sub_ns(expire, ktimer->timer_advance_ns);
++		hrtimer_start(&ktimer->timer, expire, HRTIMER_MODE_ABS_PINNED);
+ 	} else
+ 		apic_timer_expired(apic);
+ 
+@@ -2252,7 +2278,7 @@ static enum hrtimer_restart apic_timer_fn(struct hrtimer *data)
+ 		return HRTIMER_NORESTART;
+ }
+ 
+-int kvm_create_lapic(struct kvm_vcpu *vcpu)
++int kvm_create_lapic(struct kvm_vcpu *vcpu, int timer_advance_ns)
+ {
+ 	struct kvm_lapic *apic;
+ 
+@@ -2276,6 +2302,14 @@ int kvm_create_lapic(struct kvm_vcpu *vcpu)
+ 	hrtimer_init(&apic->lapic_timer.timer, CLOCK_MONOTONIC,
+ 		     HRTIMER_MODE_ABS_PINNED);
+ 	apic->lapic_timer.timer.function = apic_timer_fn;
++	if (timer_advance_ns == -1) {
++		apic->lapic_timer.timer_advance_ns = 1000;
++		apic->lapic_timer.timer_advance_adjust_done = false;
++	} else {
++		apic->lapic_timer.timer_advance_ns = timer_advance_ns;
++		apic->lapic_timer.timer_advance_adjust_done = true;
++	}
++
+ 
+ 	/*
+ 	 * APIC is created enabled. This will prevent kvm_lapic_set_base from
+diff --git a/arch/x86/kvm/lapic.h b/arch/x86/kvm/lapic.h
+index ff6ef9c3d760..d6d049ba3045 100644
+--- a/arch/x86/kvm/lapic.h
++++ b/arch/x86/kvm/lapic.h
+@@ -31,8 +31,10 @@ struct kvm_timer {
+ 	u32 timer_mode_mask;
+ 	u64 tscdeadline;
+ 	u64 expired_tscdeadline;
++	u32 timer_advance_ns;
+ 	atomic_t pending;			/* accumulated triggered timers */
+ 	bool hv_timer_in_use;
++	bool timer_advance_adjust_done;
+ };
+ 
+ struct kvm_lapic {
+@@ -62,7 +64,7 @@ struct kvm_lapic {
+ 
+ struct dest_map;
+ 
+-int kvm_create_lapic(struct kvm_vcpu *vcpu);
++int kvm_create_lapic(struct kvm_vcpu *vcpu, int timer_advance_ns);
+ void kvm_free_lapic(struct kvm_vcpu *vcpu);
+ 
+ int kvm_apic_has_interrupt(struct kvm_vcpu *vcpu);
 diff --git a/arch/x86/kvm/mmu.c b/arch/x86/kvm/mmu.c
 index f2d1d230d5b8..77dbb57412cc 100644
 --- a/arch/x86/kvm/mmu.c
@@ -8482,7 +8685,7 @@ index d737a51a53ca..a4bcac94392c 100644
  
  		if (copy_from_user(shadow_vmcs12,
 diff --git a/arch/x86/kvm/vmx/vmx.c b/arch/x86/kvm/vmx/vmx.c
-index 30a6bcd735ec..e7fe8c692362 100644
+index 30a6bcd735ec..72f1d17711f2 100644
 --- a/arch/x86/kvm/vmx/vmx.c
 +++ b/arch/x86/kvm/vmx/vmx.c
 @@ -1679,12 +1679,6 @@ static int vmx_get_msr(struct kvm_vcpu *vcpu, struct msr_data *msr_info)
@@ -8577,7 +8780,25 @@ index 30a6bcd735ec..e7fe8c692362 100644
  	vmx->nested.nested_run_pending = 0;
  	vmx->idt_vectoring_info = 0;
  
-@@ -7527,6 +7526,11 @@ static int enable_smi_window(struct kvm_vcpu *vcpu)
+@@ -7134,6 +7133,7 @@ static int vmx_set_hv_timer(struct kvm_vcpu *vcpu, u64 guest_deadline_tsc)
+ {
+ 	struct vcpu_vmx *vmx;
+ 	u64 tscl, guest_tscl, delta_tsc, lapic_timer_advance_cycles;
++	struct kvm_timer *ktimer = &vcpu->arch.apic->lapic_timer;
+ 
+ 	if (kvm_mwait_in_guest(vcpu->kvm))
+ 		return -EOPNOTSUPP;
+@@ -7142,7 +7142,8 @@ static int vmx_set_hv_timer(struct kvm_vcpu *vcpu, u64 guest_deadline_tsc)
+ 	tscl = rdtsc();
+ 	guest_tscl = kvm_read_l1_tsc(vcpu, tscl);
+ 	delta_tsc = max(guest_deadline_tsc, guest_tscl) - guest_tscl;
+-	lapic_timer_advance_cycles = nsec_to_cycles(vcpu, lapic_timer_advance_ns);
++	lapic_timer_advance_cycles = nsec_to_cycles(vcpu,
++						    ktimer->timer_advance_ns);
+ 
+ 	if (delta_tsc > lapic_timer_advance_cycles)
+ 		delta_tsc -= lapic_timer_advance_cycles;
+@@ -7527,6 +7528,11 @@ static int enable_smi_window(struct kvm_vcpu *vcpu)
  	return 0;
  }
  
@@ -8589,7 +8810,7 @@ index 30a6bcd735ec..e7fe8c692362 100644
  static __init int hardware_setup(void)
  {
  	unsigned long host_bndcfgs;
-@@ -7829,6 +7833,7 @@ static struct kvm_x86_ops vmx_x86_ops __ro_after_init = {
+@@ -7829,6 +7835,7 @@ static struct kvm_x86_ops vmx_x86_ops __ro_after_init = {
  	.set_nested_state = NULL,
  	.get_vmcs12_pages = NULL,
  	.nested_enable_evmcs = NULL,
@@ -8610,10 +8831,28 @@ index 0ac0a64c7790..1abae731c3e4 100644
  
  	u32 vm_entry_controls_shadow;
 diff --git a/arch/x86/kvm/x86.c b/arch/x86/kvm/x86.c
-index 941f932373d0..7e413ea19a9a 100644
+index 941f932373d0..613dd3c89b94 100644
 --- a/arch/x86/kvm/x86.c
 +++ b/arch/x86/kvm/x86.c
-@@ -800,7 +800,7 @@ void kvm_lmsw(struct kvm_vcpu *vcpu, unsigned long msw)
+@@ -136,10 +136,14 @@ EXPORT_SYMBOL_GPL(kvm_default_tsc_scaling_ratio);
+ static u32 __read_mostly tsc_tolerance_ppm = 250;
+ module_param(tsc_tolerance_ppm, uint, S_IRUGO | S_IWUSR);
+ 
+-/* lapic timer advance (tscdeadline mode only) in nanoseconds */
+-unsigned int __read_mostly lapic_timer_advance_ns = 1000;
++/*
++ * lapic timer advance (tscdeadline mode only) in nanoseconds.  '-1' enables
++ * adaptive tuning starting from default advancment of 1000ns.  '0' disables
++ * advancement entirely.  Any other value is used as-is and disables adaptive
++ * tuning, i.e. allows priveleged userspace to set an exact advancement time.
++ */
++static int __read_mostly lapic_timer_advance_ns = -1;
+ module_param(lapic_timer_advance_ns, uint, S_IRUGO | S_IWUSR);
+-EXPORT_SYMBOL_GPL(lapic_timer_advance_ns);
+ 
+ static bool __read_mostly vector_hashing = true;
+ module_param(vector_hashing, bool, S_IRUGO);
+@@ -800,7 +804,7 @@ void kvm_lmsw(struct kvm_vcpu *vcpu, unsigned long msw)
  }
  EXPORT_SYMBOL_GPL(kvm_lmsw);
  
@@ -8622,7 +8861,7 @@ index 941f932373d0..7e413ea19a9a 100644
  {
  	if (kvm_read_cr4_bits(vcpu, X86_CR4_OSXSAVE) &&
  			!vcpu->guest_xcr0_loaded) {
-@@ -810,8 +810,9 @@ static void kvm_load_guest_xcr0(struct kvm_vcpu *vcpu)
+@@ -810,8 +814,9 @@ static void kvm_load_guest_xcr0(struct kvm_vcpu *vcpu)
  		vcpu->guest_xcr0_loaded = 1;
  	}
  }
@@ -8633,7 +8872,7 @@ index 941f932373d0..7e413ea19a9a 100644
  {
  	if (vcpu->guest_xcr0_loaded) {
  		if (vcpu->arch.xcr0 != host_xcr0)
-@@ -819,6 +820,7 @@ static void kvm_put_guest_xcr0(struct kvm_vcpu *vcpu)
+@@ -819,6 +824,7 @@ static void kvm_put_guest_xcr0(struct kvm_vcpu *vcpu)
  		vcpu->guest_xcr0_loaded = 0;
  	}
  }
@@ -8641,7 +8880,7 @@ index 941f932373d0..7e413ea19a9a 100644
  
  static int __kvm_set_xcr(struct kvm_vcpu *vcpu, u32 index, u64 xcr)
  {
-@@ -1125,7 +1127,7 @@ static u32 msrs_to_save[] = {
+@@ -1125,7 +1131,7 @@ static u32 msrs_to_save[] = {
  #endif
  	MSR_IA32_TSC, MSR_IA32_CR_PAT, MSR_VM_HSAVE_PA,
  	MSR_IA32_FEATURE_CONTROL, MSR_IA32_BNDCFGS, MSR_TSC_AUX,
@@ -8650,7 +8889,7 @@ index 941f932373d0..7e413ea19a9a 100644
  	MSR_IA32_RTIT_CTL, MSR_IA32_RTIT_STATUS, MSR_IA32_RTIT_CR3_MATCH,
  	MSR_IA32_RTIT_OUTPUT_BASE, MSR_IA32_RTIT_OUTPUT_MASK,
  	MSR_IA32_RTIT_ADDR0_A, MSR_IA32_RTIT_ADDR0_B,
-@@ -1158,6 +1160,7 @@ static u32 emulated_msrs[] = {
+@@ -1158,6 +1164,7 @@ static u32 emulated_msrs[] = {
  
  	MSR_IA32_TSC_ADJUST,
  	MSR_IA32_TSCDEADLINE,
@@ -8658,7 +8897,7 @@ index 941f932373d0..7e413ea19a9a 100644
  	MSR_IA32_MISC_ENABLE,
  	MSR_IA32_MCG_STATUS,
  	MSR_IA32_MCG_CTL,
-@@ -2443,6 +2446,11 @@ int kvm_set_msr_common(struct kvm_vcpu *vcpu, struct msr_data *msr_info)
+@@ -2443,6 +2450,11 @@ int kvm_set_msr_common(struct kvm_vcpu *vcpu, struct msr_data *msr_info)
  		if (msr_info->host_initiated)
  			vcpu->arch.microcode_version = data;
  		break;
@@ -8670,7 +8909,7 @@ index 941f932373d0..7e413ea19a9a 100644
  	case MSR_EFER:
  		return set_efer(vcpu, data);
  	case MSR_K7_HWCR:
-@@ -2747,6 +2755,12 @@ int kvm_get_msr_common(struct kvm_vcpu *vcpu, struct msr_data *msr_info)
+@@ -2747,6 +2759,12 @@ int kvm_get_msr_common(struct kvm_vcpu *vcpu, struct msr_data *msr_info)
  	case MSR_IA32_UCODE_REV:
  		msr_info->data = vcpu->arch.microcode_version;
  		break;
@@ -8683,7 +8922,7 @@ index 941f932373d0..7e413ea19a9a 100644
  	case MSR_IA32_TSC:
  		msr_info->data = kvm_scale_tsc(vcpu, rdtsc()) + vcpu->arch.tsc_offset;
  		break;
-@@ -6522,15 +6536,45 @@ int kvm_emulate_instruction_from_buffer(struct kvm_vcpu *vcpu,
+@@ -6522,15 +6540,45 @@ int kvm_emulate_instruction_from_buffer(struct kvm_vcpu *vcpu,
  }
  EXPORT_SYMBOL_GPL(kvm_emulate_instruction_from_buffer);
  
@@ -8732,7 +8971,7 @@ index 941f932373d0..7e413ea19a9a 100644
  }
  
  static int complete_fast_pio_in(struct kvm_vcpu *vcpu)
-@@ -6540,6 +6584,11 @@ static int complete_fast_pio_in(struct kvm_vcpu *vcpu)
+@@ -6540,6 +6588,11 @@ static int complete_fast_pio_in(struct kvm_vcpu *vcpu)
  	/* We should only ever be called with arch.pio.count equal to 1 */
  	BUG_ON(vcpu->arch.pio.count != 1);
  
@@ -8744,7 +8983,7 @@ index 941f932373d0..7e413ea19a9a 100644
  	/* For size less than 4 we merge, else we zero extend */
  	val = (vcpu->arch.pio.size < 4) ? kvm_register_read(vcpu, VCPU_REGS_RAX)
  					: 0;
-@@ -6552,7 +6601,7 @@ static int complete_fast_pio_in(struct kvm_vcpu *vcpu)
+@@ -6552,7 +6605,7 @@ static int complete_fast_pio_in(struct kvm_vcpu *vcpu)
  				 vcpu->arch.pio.port, &val, 1);
  	kvm_register_write(vcpu, VCPU_REGS_RAX, val);
  
@@ -8753,7 +8992,7 @@ index 941f932373d0..7e413ea19a9a 100644
  }
  
  static int kvm_fast_pio_in(struct kvm_vcpu *vcpu, int size,
-@@ -6571,6 +6620,7 @@ static int kvm_fast_pio_in(struct kvm_vcpu *vcpu, int size,
+@@ -6571,6 +6624,7 @@ static int kvm_fast_pio_in(struct kvm_vcpu *vcpu, int size,
  		return ret;
  	}
  
@@ -8761,7 +9000,7 @@ index 941f932373d0..7e413ea19a9a 100644
  	vcpu->arch.complete_userspace_io = complete_fast_pio_in;
  
  	return 0;
-@@ -6578,16 +6628,13 @@ static int kvm_fast_pio_in(struct kvm_vcpu *vcpu, int size,
+@@ -6578,16 +6632,13 @@ static int kvm_fast_pio_in(struct kvm_vcpu *vcpu, int size,
  
  int kvm_fast_pio(struct kvm_vcpu *vcpu, int size, unsigned short port, int in)
  {
@@ -8782,7 +9021,7 @@ index 941f932373d0..7e413ea19a9a 100644
  }
  EXPORT_SYMBOL_GPL(kvm_fast_pio);
  
-@@ -7829,8 +7876,6 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
+@@ -7829,15 +7880,13 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
  		goto cancel_injection;
  	}
  
@@ -8791,7 +9030,15 @@ index 941f932373d0..7e413ea19a9a 100644
  	if (req_immediate_exit) {
  		kvm_make_request(KVM_REQ_EVENT, vcpu);
  		kvm_x86_ops->request_immediate_exit(vcpu);
-@@ -7883,8 +7928,6 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
+ 	}
+ 
+ 	trace_kvm_entry(vcpu->vcpu_id);
+-	if (lapic_timer_advance_ns)
++	if (vcpu->arch.apic->lapic_timer.timer_advance_ns)
+ 		wait_lapic_expire(vcpu);
+ 	guest_enter_irqoff();
+ 
+@@ -7883,8 +7932,6 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
  	vcpu->mode = OUTSIDE_GUEST_MODE;
  	smp_wmb();
  
@@ -8800,7 +9047,7 @@ index 941f932373d0..7e413ea19a9a 100644
  	kvm_before_interrupt(vcpu);
  	kvm_x86_ops->handle_external_intr(vcpu);
  	kvm_after_interrupt(vcpu);
-@@ -8725,6 +8768,7 @@ struct kvm_vcpu *kvm_arch_vcpu_create(struct kvm *kvm,
+@@ -8725,6 +8772,7 @@ struct kvm_vcpu *kvm_arch_vcpu_create(struct kvm *kvm,
  
  int kvm_arch_vcpu_setup(struct kvm_vcpu *vcpu)
  {
@@ -8808,7 +9055,16 @@ index 941f932373d0..7e413ea19a9a 100644
  	vcpu->arch.msr_platform_info = MSR_PLATFORM_INFO_CPUID_FAULT;
  	kvm_vcpu_mtrr_init(vcpu);
  	vcpu_load(vcpu);
-@@ -9348,13 +9392,13 @@ int kvm_arch_create_memslot(struct kvm *kvm, struct kvm_memory_slot *slot,
+@@ -9026,7 +9074,7 @@ int kvm_arch_vcpu_init(struct kvm_vcpu *vcpu)
+ 		goto fail_free_pio_data;
+ 
+ 	if (irqchip_in_kernel(vcpu->kvm)) {
+-		r = kvm_create_lapic(vcpu);
++		r = kvm_create_lapic(vcpu, lapic_timer_advance_ns);
+ 		if (r < 0)
+ 			goto fail_mmu_destroy;
+ 	} else
+@@ -9348,13 +9396,13 @@ int kvm_arch_create_memslot(struct kvm *kvm, struct kvm_memory_slot *slot,
  	return -ENOMEM;
  }
  
@@ -8825,7 +9081,7 @@ index 941f932373d0..7e413ea19a9a 100644
  
  int kvm_arch_prepare_memory_region(struct kvm *kvm,
 diff --git a/arch/x86/kvm/x86.h b/arch/x86/kvm/x86.h
-index 224cd0a47568..de3d46769ee3 100644
+index 224cd0a47568..b457160dc7ba 100644
 --- a/arch/x86/kvm/x86.h
 +++ b/arch/x86/kvm/x86.h
 @@ -181,6 +181,11 @@ static inline bool emul_is_noncanonical_address(u64 la,
@@ -8849,7 +9105,16 @@ index 224cd0a47568..de3d46769ee3 100644
  }
  
  static inline bool vcpu_match_mmio_gen(struct kvm_vcpu *vcpu)
-@@ -342,4 +347,6 @@ static inline void kvm_after_interrupt(struct kvm_vcpu *vcpu)
+@@ -289,8 +294,6 @@ extern u64 kvm_supported_xcr0(void);
+ 
+ extern unsigned int min_timer_period_us;
+ 
+-extern unsigned int lapic_timer_advance_ns;
+-
+ extern bool enable_vmware_backdoor;
+ 
+ extern struct static_key kvm_no_apic_vcpu;
+@@ -342,4 +345,6 @@ static inline void kvm_after_interrupt(struct kvm_vcpu *vcpu)
  	__this_cpu_write(current_vcpu, NULL);
  }
  
@@ -19318,6 +19583,35 @@ index c91e145ef5a5..679c6c41f64b 100644
  		priv->features |= FEATURE_I2C_BLOCK_READ;
  		priv->features |= FEATURE_IRQ;
  		priv->features |= FEATURE_SMBUS_PEC;
+diff --git a/drivers/i2c/busses/i2c-imx.c b/drivers/i2c/busses/i2c-imx.c
+index fa9ad53845d9..d4b72e4ffd71 100644
+--- a/drivers/i2c/busses/i2c-imx.c
++++ b/drivers/i2c/busses/i2c-imx.c
+@@ -510,9 +510,9 @@ static int i2c_imx_clk_notifier_call(struct notifier_block *nb,
+ 				     unsigned long action, void *data)
+ {
+ 	struct clk_notifier_data *ndata = data;
+-	struct imx_i2c_struct *i2c_imx = container_of(&ndata->clk,
++	struct imx_i2c_struct *i2c_imx = container_of(nb,
+ 						      struct imx_i2c_struct,
+-						      clk);
++						      clk_change_nb);
+ 
+ 	if (action & POST_RATE_CHANGE)
+ 		i2c_imx_set_clk(i2c_imx, ndata->new_rate);
+diff --git a/drivers/i2c/busses/i2c-synquacer.c b/drivers/i2c/busses/i2c-synquacer.c
+index 2184b7c3580e..6b8d803bd30e 100644
+--- a/drivers/i2c/busses/i2c-synquacer.c
++++ b/drivers/i2c/busses/i2c-synquacer.c
+@@ -602,6 +602,8 @@ static int synquacer_i2c_probe(struct platform_device *pdev)
+ 	i2c->adapter = synquacer_i2c_ops;
+ 	i2c_set_adapdata(&i2c->adapter, i2c);
+ 	i2c->adapter.dev.parent = &pdev->dev;
++	i2c->adapter.dev.of_node = pdev->dev.of_node;
++	ACPI_COMPANION_SET(&i2c->adapter.dev, ACPI_COMPANION(&pdev->dev));
+ 	i2c->adapter.nr = pdev->id;
+ 	init_completion(&i2c->completion);
+ 
 diff --git a/drivers/i2c/busses/i2c-tegra.c b/drivers/i2c/busses/i2c-tegra.c
 index c77adbbea0c7..e85dc8583896 100644
 --- a/drivers/i2c/busses/i2c-tegra.c
@@ -19349,19 +19643,30 @@ index c77adbbea0c7..e85dc8583896 100644
  
  static const struct tegra_i2c_hw_feature tegra20_i2c_hw = {
 diff --git a/drivers/i2c/i2c-core-base.c b/drivers/i2c/i2c-core-base.c
-index 28460f6a60cc..af87a16ac3a5 100644
+index 28460f6a60cc..60fb2afc0e50 100644
 --- a/drivers/i2c/i2c-core-base.c
 +++ b/drivers/i2c/i2c-core-base.c
-@@ -430,7 +430,7 @@ static int i2c_device_remove(struct device *dev)
+@@ -327,6 +327,8 @@ static int i2c_device_probe(struct device *dev)
+ 
+ 		if (client->flags & I2C_CLIENT_HOST_NOTIFY) {
+ 			dev_dbg(dev, "Using Host Notify IRQ\n");
++			/* Keep adapter active when Host Notify is required */
++			pm_runtime_get_sync(&client->adapter->dev);
+ 			irq = i2c_smbus_host_notify_to_irq(client);
+ 		} else if (dev->of_node) {
+ 			irq = of_irq_get_byname(dev->of_node, "irq");
+@@ -430,7 +432,9 @@ static int i2c_device_remove(struct device *dev)
  	dev_pm_clear_wake_irq(&client->dev);
  	device_init_wakeup(&client->dev, false);
  
 -	client->irq = 0;
 +	client->irq = client->init_irq;
++	if (client->flags & I2C_CLIENT_HOST_NOTIFY)
++		pm_runtime_put(&client->adapter->dev);
  
  	return status;
  }
-@@ -741,10 +741,11 @@ i2c_new_device(struct i2c_adapter *adap, struct i2c_board_info const *info)
+@@ -741,10 +745,11 @@ i2c_new_device(struct i2c_adapter *adap, struct i2c_board_info const *info)
  	client->flags = info->flags;
  	client->addr = info->addr;
  
@@ -24284,6 +24589,36 @@ index c11c18a9aacb..9ec300ec94ba 100644
  };
  
  static int sdhci_omap_set_capabilities(struct sdhci_omap_host *omap_host)
+diff --git a/drivers/mtd/nand/raw/marvell_nand.c b/drivers/mtd/nand/raw/marvell_nand.c
+index 84283c6bb0ff..66a161b8f745 100644
+--- a/drivers/mtd/nand/raw/marvell_nand.c
++++ b/drivers/mtd/nand/raw/marvell_nand.c
+@@ -722,12 +722,6 @@ static void marvell_nfc_select_target(struct nand_chip *chip,
+ 	struct marvell_nfc *nfc = to_marvell_nfc(chip->controller);
+ 	u32 ndcr_generic;
+ 
+-	if (chip == nfc->selected_chip && die_nr == marvell_nand->selected_die)
+-		return;
+-
+-	writel_relaxed(marvell_nand->ndtr0, nfc->regs + NDTR0);
+-	writel_relaxed(marvell_nand->ndtr1, nfc->regs + NDTR1);
+-
+ 	/*
+ 	 * Reset the NDCR register to a clean state for this particular chip,
+ 	 * also clear ND_RUN bit.
+@@ -739,6 +733,12 @@ static void marvell_nfc_select_target(struct nand_chip *chip,
+ 	/* Also reset the interrupt status register */
+ 	marvell_nfc_clear_int(nfc, NDCR_ALL_INT);
+ 
++	if (chip == nfc->selected_chip && die_nr == marvell_nand->selected_die)
++		return;
++
++	writel_relaxed(marvell_nand->ndtr0, nfc->regs + NDTR0);
++	writel_relaxed(marvell_nand->ndtr1, nfc->regs + NDTR1);
++
+ 	nfc->selected_chip = chip;
+ 	marvell_nand->selected_die = die_nr;
+ }
 diff --git a/drivers/net/Kconfig b/drivers/net/Kconfig
 index 21bf8ac78380..390e896dadc7 100644
 --- a/drivers/net/Kconfig
@@ -28664,6 +28999,27 @@ index 52e5ed2d3bc2..7d72a8b62700 100644
  		/* Todo... wait for sync command ... */
  
  		read_register(priv->net_dev, IPW_REG_INTA, &inta);
+diff --git a/drivers/net/wireless/intel/iwlwifi/cfg/5000.c b/drivers/net/wireless/intel/iwlwifi/cfg/5000.c
+index 575a7022d045..3846064d51a5 100644
+--- a/drivers/net/wireless/intel/iwlwifi/cfg/5000.c
++++ b/drivers/net/wireless/intel/iwlwifi/cfg/5000.c
+@@ -1,7 +1,7 @@
+ /******************************************************************************
+  *
+  * Copyright(c) 2007 - 2014 Intel Corporation. All rights reserved.
+- * Copyright(c) 2018 Intel Corporation
++ * Copyright(c) 2018 - 2019 Intel Corporation
+  *
+  * This program is free software; you can redistribute it and/or modify it
+  * under the terms of version 2 of the GNU General Public License as
+@@ -136,6 +136,7 @@ const struct iwl_cfg iwl5350_agn_cfg = {
+ 	.ht_params = &iwl5000_ht_params,
+ 	.led_mode = IWL_LED_BLINK,
+ 	.internal_wimax_coex = true,
++	.csr = &iwl_csr_v1,
+ };
+ 
+ #define IWL_DEVICE_5150						\
 diff --git a/drivers/net/wireless/intel/iwlwifi/mvm/debugfs-vif.c b/drivers/net/wireless/intel/iwlwifi/mvm/debugfs-vif.c
 index 33b0af24a537..d61ab3e80759 100644
 --- a/drivers/net/wireless/intel/iwlwifi/mvm/debugfs-vif.c
@@ -28856,6 +29212,19 @@ index 1467af22e394..883752f640b4 100644
  	if (ISSUPP_RANDOM_MAC(adapter->fw_cap_info))
  		wiphy->features |= NL80211_FEATURE_SCAN_RANDOM_MAC_ADDR |
  				   NL80211_FEATURE_SCHED_SCAN_RANDOM_MAC_ADDR |
+diff --git a/drivers/net/wireless/marvell/mwifiex/sdio.c b/drivers/net/wireless/marvell/mwifiex/sdio.c
+index d49fbd58afa7..bfbe3aa058d9 100644
+--- a/drivers/net/wireless/marvell/mwifiex/sdio.c
++++ b/drivers/net/wireless/marvell/mwifiex/sdio.c
+@@ -181,7 +181,7 @@ static int mwifiex_sdio_resume(struct device *dev)
+ 
+ 	adapter = card->adapter;
+ 
+-	if (test_bit(MWIFIEX_IS_SUSPENDED, &adapter->work_flags)) {
++	if (!test_bit(MWIFIEX_IS_SUSPENDED, &adapter->work_flags)) {
+ 		mwifiex_dbg(adapter, WARN,
+ 			    "device already resumed\n");
+ 		return 0;
 diff --git a/drivers/net/wireless/mediatek/mt76/eeprom.c b/drivers/net/wireless/mediatek/mt76/eeprom.c
 index 530e5593765c..a1529920d877 100644
 --- a/drivers/net/wireless/mediatek/mt76/eeprom.c
@@ -39850,10 +40219,72 @@ index 48277bbc15e4..73c8e6591746 100644
  		do {
  			if (arg0 == -1) {
 diff --git a/drivers/usb/core/driver.c b/drivers/usb/core/driver.c
-index 53564386ed57..8987cec9549d 100644
+index 53564386ed57..ebcadaad89d1 100644
 --- a/drivers/usb/core/driver.c
 +++ b/drivers/usb/core/driver.c
-@@ -1896,14 +1896,11 @@ int usb_runtime_idle(struct device *dev)
+@@ -473,11 +473,6 @@ static int usb_unbind_interface(struct device *dev)
+ 		pm_runtime_disable(dev);
+ 	pm_runtime_set_suspended(dev);
+ 
+-	/* Undo any residual pm_autopm_get_interface_* calls */
+-	for (r = atomic_read(&intf->pm_usage_cnt); r > 0; --r)
+-		usb_autopm_put_interface_no_suspend(intf);
+-	atomic_set(&intf->pm_usage_cnt, 0);
+-
+ 	if (!error)
+ 		usb_autosuspend_device(udev);
+ 
+@@ -1633,7 +1628,6 @@ void usb_autopm_put_interface(struct usb_interface *intf)
+ 	int			status;
+ 
+ 	usb_mark_last_busy(udev);
+-	atomic_dec(&intf->pm_usage_cnt);
+ 	status = pm_runtime_put_sync(&intf->dev);
+ 	dev_vdbg(&intf->dev, "%s: cnt %d -> %d\n",
+ 			__func__, atomic_read(&intf->dev.power.usage_count),
+@@ -1662,7 +1656,6 @@ void usb_autopm_put_interface_async(struct usb_interface *intf)
+ 	int			status;
+ 
+ 	usb_mark_last_busy(udev);
+-	atomic_dec(&intf->pm_usage_cnt);
+ 	status = pm_runtime_put(&intf->dev);
+ 	dev_vdbg(&intf->dev, "%s: cnt %d -> %d\n",
+ 			__func__, atomic_read(&intf->dev.power.usage_count),
+@@ -1684,7 +1677,6 @@ void usb_autopm_put_interface_no_suspend(struct usb_interface *intf)
+ 	struct usb_device	*udev = interface_to_usbdev(intf);
+ 
+ 	usb_mark_last_busy(udev);
+-	atomic_dec(&intf->pm_usage_cnt);
+ 	pm_runtime_put_noidle(&intf->dev);
+ }
+ EXPORT_SYMBOL_GPL(usb_autopm_put_interface_no_suspend);
+@@ -1715,8 +1707,6 @@ int usb_autopm_get_interface(struct usb_interface *intf)
+ 	status = pm_runtime_get_sync(&intf->dev);
+ 	if (status < 0)
+ 		pm_runtime_put_sync(&intf->dev);
+-	else
+-		atomic_inc(&intf->pm_usage_cnt);
+ 	dev_vdbg(&intf->dev, "%s: cnt %d -> %d\n",
+ 			__func__, atomic_read(&intf->dev.power.usage_count),
+ 			status);
+@@ -1750,8 +1740,6 @@ int usb_autopm_get_interface_async(struct usb_interface *intf)
+ 	status = pm_runtime_get(&intf->dev);
+ 	if (status < 0 && status != -EINPROGRESS)
+ 		pm_runtime_put_noidle(&intf->dev);
+-	else
+-		atomic_inc(&intf->pm_usage_cnt);
+ 	dev_vdbg(&intf->dev, "%s: cnt %d -> %d\n",
+ 			__func__, atomic_read(&intf->dev.power.usage_count),
+ 			status);
+@@ -1775,7 +1763,6 @@ void usb_autopm_get_interface_no_resume(struct usb_interface *intf)
+ 	struct usb_device	*udev = interface_to_usbdev(intf);
+ 
+ 	usb_mark_last_busy(udev);
+-	atomic_inc(&intf->pm_usage_cnt);
+ 	pm_runtime_get_noresume(&intf->dev);
+ }
+ EXPORT_SYMBOL_GPL(usb_autopm_get_interface_no_resume);
+@@ -1896,14 +1883,11 @@ int usb_runtime_idle(struct device *dev)
  	return -EBUSY;
  }
  
@@ -39869,7 +40300,7 @@ index 53564386ed57..8987cec9549d 100644
  	if (hcd->driver->set_usb2_hw_lpm) {
  		ret = hcd->driver->set_usb2_hw_lpm(hcd, udev, enable);
  		if (!ret)
-@@ -1913,6 +1910,24 @@ int usb_set_usb2_hardware_lpm(struct usb_device *udev, int enable)
+@@ -1913,6 +1897,24 @@ int usb_set_usb2_hardware_lpm(struct usb_device *udev, int enable)
  	return ret;
  }
  
@@ -39957,10 +40388,23 @@ index 1d1e61e980f3..55c87be5764c 100644
  	usb_enable_ltm(udev);
  	usb_release_bos_descriptor(udev);
 diff --git a/drivers/usb/core/message.c b/drivers/usb/core/message.c
-index bfa5eda0cc26..4f33eb632a88 100644
+index bfa5eda0cc26..4020ce8db6ce 100644
 --- a/drivers/usb/core/message.c
 +++ b/drivers/usb/core/message.c
-@@ -1243,8 +1243,7 @@ void usb_disable_device(struct usb_device *dev, int skip_ep0)
+@@ -820,9 +820,11 @@ int usb_string(struct usb_device *dev, int index, char *buf, size_t size)
+ 
+ 	if (dev->state == USB_STATE_SUSPENDED)
+ 		return -EHOSTUNREACH;
+-	if (size <= 0 || !buf || !index)
++	if (size <= 0 || !buf)
+ 		return -EINVAL;
+ 	buf[0] = 0;
++	if (index <= 0 || index >= 256)
++		return -EINVAL;
+ 	tbuf = kmalloc(256, GFP_NOIO);
+ 	if (!tbuf)
+ 		return -ENOMEM;
+@@ -1243,8 +1245,7 @@ void usb_disable_device(struct usb_device *dev, int skip_ep0)
  			dev->actconfig->interface[i] = NULL;
  		}
  
@@ -40089,6 +40533,52 @@ index 75b113a5b25c..f3816a5c861e 100644
  	hidg->write_pending = 0;
  	spin_unlock_irqrestore(&hidg->write_spinlock, flags);
  
+diff --git a/drivers/usb/gadget/udc/dummy_hcd.c b/drivers/usb/gadget/udc/dummy_hcd.c
+index baf72f95f0f1..213b52508621 100644
+--- a/drivers/usb/gadget/udc/dummy_hcd.c
++++ b/drivers/usb/gadget/udc/dummy_hcd.c
+@@ -979,8 +979,18 @@ static int dummy_udc_start(struct usb_gadget *g,
+ 	struct dummy_hcd	*dum_hcd = gadget_to_dummy_hcd(g);
+ 	struct dummy		*dum = dum_hcd->dum;
+ 
+-	if (driver->max_speed == USB_SPEED_UNKNOWN)
++	switch (g->speed) {
++	/* All the speeds we support */
++	case USB_SPEED_LOW:
++	case USB_SPEED_FULL:
++	case USB_SPEED_HIGH:
++	case USB_SPEED_SUPER:
++		break;
++	default:
++		dev_err(dummy_dev(dum_hcd), "Unsupported driver max speed %d\n",
++				driver->max_speed);
+ 		return -EINVAL;
++	}
+ 
+ 	/*
+ 	 * SLAVE side init ... the layer above hardware, which
+@@ -1784,9 +1794,10 @@ static void dummy_timer(struct timer_list *t)
+ 		/* Bus speed is 500000 bytes/ms, so use a little less */
+ 		total = 490000;
+ 		break;
+-	default:
++	default:	/* Can't happen */
+ 		dev_err(dummy_dev(dum_hcd), "bogus device speed\n");
+-		return;
++		total = 0;
++		break;
+ 	}
+ 
+ 	/* FIXME if HZ != 1000 this will probably misbehave ... */
+@@ -1828,7 +1839,7 @@ static void dummy_timer(struct timer_list *t)
+ 
+ 		/* Used up this frame's bandwidth? */
+ 		if (total <= 0)
+-			break;
++			continue;
+ 
+ 		/* find the gadget's ep for this request (if configured) */
+ 		address = usb_pipeendpoint (urb->pipe);
 diff --git a/drivers/usb/gadget/udc/net2272.c b/drivers/usb/gadget/udc/net2272.c
 index b77f3126580e..c2011cd7df8c 100644
 --- a/drivers/usb/gadget/udc/net2272.c
@@ -40303,6 +40793,18 @@ index a6efb9a72939..5f7734c729b1 100644
  		err = usb251xb_get_ofdata(hub,
  					  (struct usb251xb_data *)of_id->data);
  		if (err) {
+diff --git a/drivers/usb/misc/yurex.c b/drivers/usb/misc/yurex.c
+index 6d9fd5f64903..7b306aa22d25 100644
+--- a/drivers/usb/misc/yurex.c
++++ b/drivers/usb/misc/yurex.c
+@@ -314,6 +314,7 @@ static void yurex_disconnect(struct usb_interface *interface)
+ 	usb_deregister_dev(interface, &yurex_class);
+ 
+ 	/* prevent more I/O from starting */
++	usb_poison_urb(dev->urb);
+ 	mutex_lock(&dev->io_mutex);
+ 	dev->interface = NULL;
+ 	mutex_unlock(&dev->io_mutex);
 diff --git a/drivers/usb/mtu3/Kconfig b/drivers/usb/mtu3/Kconfig
 index 40bbf1f53337..fe58904f350b 100644
 --- a/drivers/usb/mtu3/Kconfig
@@ -40499,6 +41001,46 @@ index aef15497ff31..83869065b802 100644
  	{ USB_DEVICE(INOVIA_VENDOR_ID, INOVIA_SEW858) },
  	{ USB_DEVICE(VIATELECOM_VENDOR_ID, VIATELECOM_PRODUCT_CDS7) },
  	{ USB_DEVICE_AND_INTERFACE_INFO(WETELECOM_VENDOR_ID, WETELECOM_PRODUCT_WMD200, 0xff, 0xff, 0xff) },
+diff --git a/drivers/usb/storage/realtek_cr.c b/drivers/usb/storage/realtek_cr.c
+index 31b024441938..cc794e25a0b6 100644
+--- a/drivers/usb/storage/realtek_cr.c
++++ b/drivers/usb/storage/realtek_cr.c
+@@ -763,18 +763,16 @@ static void rts51x_suspend_timer_fn(struct timer_list *t)
+ 		break;
+ 	case RTS51X_STAT_IDLE:
+ 	case RTS51X_STAT_SS:
+-		usb_stor_dbg(us, "RTS51X_STAT_SS, intf->pm_usage_cnt:%d, power.usage:%d\n",
+-			     atomic_read(&us->pusb_intf->pm_usage_cnt),
++		usb_stor_dbg(us, "RTS51X_STAT_SS, power.usage:%d\n",
+ 			     atomic_read(&us->pusb_intf->dev.power.usage_count));
+ 
+-		if (atomic_read(&us->pusb_intf->pm_usage_cnt) > 0) {
++		if (atomic_read(&us->pusb_intf->dev.power.usage_count) > 0) {
+ 			usb_stor_dbg(us, "Ready to enter SS state\n");
+ 			rts51x_set_stat(chip, RTS51X_STAT_SS);
+ 			/* ignore mass storage interface's children */
+ 			pm_suspend_ignore_children(&us->pusb_intf->dev, true);
+ 			usb_autopm_put_interface_async(us->pusb_intf);
+-			usb_stor_dbg(us, "RTS51X_STAT_SS 01, intf->pm_usage_cnt:%d, power.usage:%d\n",
+-				     atomic_read(&us->pusb_intf->pm_usage_cnt),
++			usb_stor_dbg(us, "RTS51X_STAT_SS 01, power.usage:%d\n",
+ 				     atomic_read(&us->pusb_intf->dev.power.usage_count));
+ 		}
+ 		break;
+@@ -807,11 +805,10 @@ static void rts51x_invoke_transport(struct scsi_cmnd *srb, struct us_data *us)
+ 	int ret;
+ 
+ 	if (working_scsi(srb)) {
+-		usb_stor_dbg(us, "working scsi, intf->pm_usage_cnt:%d, power.usage:%d\n",
+-			     atomic_read(&us->pusb_intf->pm_usage_cnt),
++		usb_stor_dbg(us, "working scsi, power.usage:%d\n",
+ 			     atomic_read(&us->pusb_intf->dev.power.usage_count));
+ 
+-		if (atomic_read(&us->pusb_intf->pm_usage_cnt) <= 0) {
++		if (atomic_read(&us->pusb_intf->dev.power.usage_count) <= 0) {
+ 			ret = usb_autopm_get_interface(us->pusb_intf);
+ 			usb_stor_dbg(us, "working scsi, ret=%d\n", ret);
+ 		}
 diff --git a/drivers/usb/typec/tcpm/tcpm.c b/drivers/usb/typec/tcpm/tcpm.c
 index f1c39a3c7534..d34e945e5d09 100644
 --- a/drivers/usb/typec/tcpm/tcpm.c
@@ -40631,6 +41173,48 @@ index 1c0033ad8738..e1109b15636d 100644
  		if (ret)
  			return ret;
  	}
+diff --git a/drivers/usb/usbip/stub_rx.c b/drivers/usb/usbip/stub_rx.c
+index 97b09a42a10c..dbfb2f24d71e 100644
+--- a/drivers/usb/usbip/stub_rx.c
++++ b/drivers/usb/usbip/stub_rx.c
+@@ -361,16 +361,10 @@ static int get_pipe(struct stub_device *sdev, struct usbip_header *pdu)
+ 	}
+ 
+ 	if (usb_endpoint_xfer_isoc(epd)) {
+-		/* validate packet size and number of packets */
+-		unsigned int maxp, packets, bytes;
+-
+-		maxp = usb_endpoint_maxp(epd);
+-		maxp *= usb_endpoint_maxp_mult(epd);
+-		bytes = pdu->u.cmd_submit.transfer_buffer_length;
+-		packets = DIV_ROUND_UP(bytes, maxp);
+-
++		/* validate number of packets */
+ 		if (pdu->u.cmd_submit.number_of_packets < 0 ||
+-		    pdu->u.cmd_submit.number_of_packets > packets) {
++		    pdu->u.cmd_submit.number_of_packets >
++		    USBIP_MAX_ISO_PACKETS) {
+ 			dev_err(&sdev->udev->dev,
+ 				"CMD_SUBMIT: isoc invalid num packets %d\n",
+ 				pdu->u.cmd_submit.number_of_packets);
+diff --git a/drivers/usb/usbip/usbip_common.h b/drivers/usb/usbip/usbip_common.h
+index bf8afe9b5883..8be857a4fa13 100644
+--- a/drivers/usb/usbip/usbip_common.h
++++ b/drivers/usb/usbip/usbip_common.h
+@@ -121,6 +121,13 @@ extern struct device_attribute dev_attr_usbip_debug;
+ #define USBIP_DIR_OUT	0x00
+ #define USBIP_DIR_IN	0x01
+ 
++/*
++ * Arbitrary limit for the maximum number of isochronous packets in an URB,
++ * compare for example the uhci_submit_isochronous function in
++ * drivers/usb/host/uhci-q.c
++ */
++#define USBIP_MAX_ISO_PACKETS 1024
++
+ /**
+  * struct usbip_header_basic - data pertinent to every request
+  * @command: the usbip request type
 diff --git a/drivers/vfio/vfio_iommu_type1.c b/drivers/vfio/vfio_iommu_type1.c
 index 73652e21efec..d0f731c9920a 100644
 --- a/drivers/vfio/vfio_iommu_type1.c
@@ -99590,6 +100174,29 @@ index a0b07c331255..a38b65b97be0 100644
  	}
  
  	if (!num)
+diff --git a/drivers/w1/masters/ds2490.c b/drivers/w1/masters/ds2490.c
+index 0f4ecfcdb549..a9fb77585272 100644
+--- a/drivers/w1/masters/ds2490.c
++++ b/drivers/w1/masters/ds2490.c
+@@ -1016,15 +1016,15 @@ static int ds_probe(struct usb_interface *intf,
+ 	/* alternative 3, 1ms interrupt (greatly speeds search), 64 byte bulk */
+ 	alt = 3;
+ 	err = usb_set_interface(dev->udev,
+-		intf->altsetting[alt].desc.bInterfaceNumber, alt);
++		intf->cur_altsetting->desc.bInterfaceNumber, alt);
+ 	if (err) {
+ 		dev_err(&dev->udev->dev, "Failed to set alternative setting %d "
+ 			"for %d interface: err=%d.\n", alt,
+-			intf->altsetting[alt].desc.bInterfaceNumber, err);
++			intf->cur_altsetting->desc.bInterfaceNumber, err);
+ 		goto err_out_clear;
+ 	}
+ 
+-	iface_desc = &intf->altsetting[alt];
++	iface_desc = intf->cur_altsetting;
+ 	if (iface_desc->desc.bNumEndpoints != NUM_EP-1) {
+ 		pr_info("Num endpoints=%d. It is not DS9490R.\n",
+ 			iface_desc->desc.bNumEndpoints);
 diff --git a/drivers/xen/gntdev-dmabuf.c b/drivers/xen/gntdev-dmabuf.c
 index cba6b586bfbd..d97fcfc5e558 100644
 --- a/drivers/xen/gntdev-dmabuf.c
@@ -106589,6 +107196,26 @@ index 000000000000..1b80d7ee5493
 +
 +#endif /* __KERNEL */
 +#endif /* _THINKPAD_EC_H */
+diff --git a/include/linux/usb.h b/include/linux/usb.h
+index 5e49e82c4368..ff010d1fd1c7 100644
+--- a/include/linux/usb.h
++++ b/include/linux/usb.h
+@@ -200,7 +200,6 @@ usb_find_last_int_out_endpoint(struct usb_host_interface *alt,
+  * @dev: driver model's view of this device
+  * @usb_dev: if an interface is bound to the USB major, this will point
+  *	to the sysfs representation for that device.
+- * @pm_usage_cnt: PM usage counter for this interface
+  * @reset_ws: Used for scheduling resets from atomic context.
+  * @resetting_device: USB core reset the device, so use alt setting 0 as
+  *	current; needs bandwidth alloc after reset.
+@@ -257,7 +256,6 @@ struct usb_interface {
+ 
+ 	struct device dev;		/* interface specific device info */
+ 	struct device *usb_dev;
+-	atomic_t pm_usage_cnt;		/* usage counter for autosuspend */
+ 	struct work_struct reset_ws;	/* for resets in atomic context */
+ };
+ #define	to_usb_interface(d) container_of(d, struct usb_interface, dev)
 diff --git a/include/linux/virtio_ring.h b/include/linux/virtio_ring.h
 index fab02133a919..3dc70adfe5f5 100644
 --- a/include/linux/virtio_ring.h
@@ -117529,6 +118156,48 @@ index 3f35ba1d8fde..6ff722398a95 100644
  	struct root_domain	*rd;
  };
  
+diff --git a/kernel/seccomp.c b/kernel/seccomp.c
+index e815781ed751..181e72718434 100644
+--- a/kernel/seccomp.c
++++ b/kernel/seccomp.c
+@@ -500,7 +500,10 @@ seccomp_prepare_user_filter(const char __user *user_filter)
+  *
+  * Caller must be holding current->sighand->siglock lock.
+  *
+- * Returns 0 on success, -ve on error.
++ * Returns 0 on success, -ve on error, or
++ *   - in TSYNC mode: the pid of a thread which was either not in the correct
++ *     seccomp mode or did not have an ancestral seccomp filter
++ *   - in NEW_LISTENER mode: the fd of the new listener
+  */
+ static long seccomp_attach_filter(unsigned int flags,
+ 				  struct seccomp_filter *filter)
+@@ -1256,6 +1259,16 @@ static long seccomp_set_mode_filter(unsigned int flags,
+ 	if (flags & ~SECCOMP_FILTER_FLAG_MASK)
+ 		return -EINVAL;
+ 
++	/*
++	 * In the successful case, NEW_LISTENER returns the new listener fd.
++	 * But in the failure case, TSYNC returns the thread that died. If you
++	 * combine these two flags, there's no way to tell whether something
++	 * succeeded or failed. So, let's disallow this combination.
++	 */
++	if ((flags & SECCOMP_FILTER_FLAG_TSYNC) &&
++	    (flags & SECCOMP_FILTER_FLAG_NEW_LISTENER))
++		return -EINVAL;
++
+ 	/* Prepare the new filter before holding any locks. */
+ 	prepared = seccomp_prepare_user_filter(filter);
+ 	if (IS_ERR(prepared))
+@@ -1302,7 +1315,7 @@ static long seccomp_set_mode_filter(unsigned int flags,
+ 		mutex_unlock(&current->signal->cred_guard_mutex);
+ out_put_fd:
+ 	if (flags & SECCOMP_FILTER_FLAG_NEW_LISTENER) {
+-		if (ret < 0) {
++		if (ret) {
+ 			listener_f->private_data = NULL;
+ 			fput(listener_f);
+ 			put_unused_fd(listener);
 diff --git a/kernel/skip_list.c b/kernel/skip_list.c
 new file mode 100644
 index 000000000000..bf5c6e97e139
@@ -122500,6 +123169,19 @@ index 0ae6899edac0..37a69df17cab 100644
  	}
  
  	if (np->rxopt.all)
+diff --git a/net/mac80211/debugfs_netdev.c b/net/mac80211/debugfs_netdev.c
+index cff0fb3578c9..deb3faf08337 100644
+--- a/net/mac80211/debugfs_netdev.c
++++ b/net/mac80211/debugfs_netdev.c
+@@ -841,7 +841,7 @@ void ieee80211_debugfs_rename_netdev(struct ieee80211_sub_if_data *sdata)
+ 
+ 	dir = sdata->vif.debugfs_dir;
+ 
+-	if (!dir)
++	if (IS_ERR_OR_NULL(dir))
+ 		return;
+ 
+ 	sprintf(buf, "netdev:%s", sdata->name);
 diff --git a/net/mac80211/driver-ops.h b/net/mac80211/driver-ops.h
 index 3e0d5922a440..a9c1d6e3cdae 100644
 --- a/net/mac80211/driver-ops.h
@@ -126574,7 +127256,7 @@ index a4ee7656d9ee..fb65ad31e86c 100644
  	SND_PCI_QUIRK(0x152d, 0x0833, "OLPC XO-1.5", CXT_FIXUP_OLPC_XO),
  	SND_PCI_QUIRK(0x17aa, 0x20f2, "Lenovo T400", CXT_PINCFG_LENOVO_TP410),
 diff --git a/sound/pci/hda/patch_realtek.c b/sound/pci/hda/patch_realtek.c
-index 1ffa36e987b4..a9f69c3a3e0b 100644
+index 1ffa36e987b4..5ce28b4f0218 100644
 --- a/sound/pci/hda/patch_realtek.c
 +++ b/sound/pci/hda/patch_realtek.c
 @@ -118,6 +118,7 @@ struct alc_spec {
@@ -126798,7 +127480,16 @@ index 1ffa36e987b4..a9f69c3a3e0b 100644
  	}
  }
  
-@@ -5509,6 +5520,25 @@ static void alc_fixup_headset_jack(struct hda_codec *codec,
+@@ -5437,6 +5448,8 @@ static void alc274_fixup_bind_dacs(struct hda_codec *codec,
+ 		return;
+ 
+ 	spec->gen.preferred_dacs = preferred_pairs;
++	spec->gen.auto_mute_via_amp = 1;
++	codec->power_save_node = 0;
+ }
+ 
+ /* The DAC of NID 0x3 will introduce click/pop noise on headphones, so invalidate it */
+@@ -5509,6 +5522,25 @@ static void alc_fixup_headset_jack(struct hda_codec *codec,
  	}
  }
  
@@ -126824,7 +127515,7 @@ index 1ffa36e987b4..a9f69c3a3e0b 100644
  static void alc_fixup_disable_mic_vref(struct hda_codec *codec,
  				  const struct hda_fixup *fix, int action)
  {
-@@ -5641,6 +5671,7 @@ enum {
+@@ -5641,6 +5673,7 @@ enum {
  	ALC233_FIXUP_ASUS_MIC_NO_PRESENCE,
  	ALC233_FIXUP_EAPD_COEF_AND_MIC_NO_PRESENCE,
  	ALC233_FIXUP_LENOVO_MULTI_CODECS,
@@ -126832,7 +127523,7 @@ index 1ffa36e987b4..a9f69c3a3e0b 100644
  	ALC294_FIXUP_LENOVO_MIC_LOCATION,
  	ALC225_FIXUP_DELL_WYSE_MIC_NO_PRESENCE,
  	ALC700_FIXUP_INTEL_REFERENCE,
-@@ -5658,9 +5689,17 @@ enum {
+@@ -5658,9 +5691,17 @@ enum {
  	ALC294_FIXUP_ASUS_MIC,
  	ALC294_FIXUP_ASUS_HEADSET_MIC,
  	ALC294_FIXUP_ASUS_SPK,
@@ -126851,7 +127542,7 @@ index 1ffa36e987b4..a9f69c3a3e0b 100644
  };
  
  static const struct hda_fixup alc269_fixups[] = {
-@@ -6461,6 +6500,16 @@ static const struct hda_fixup alc269_fixups[] = {
+@@ -6461,6 +6502,16 @@ static const struct hda_fixup alc269_fixups[] = {
  		.type = HDA_FIXUP_FUNC,
  		.v.func = alc233_alc662_fixup_lenovo_dual_codecs,
  	},
@@ -126868,7 +127559,7 @@ index 1ffa36e987b4..a9f69c3a3e0b 100644
  	[ALC294_FIXUP_LENOVO_MIC_LOCATION] = {
  		.type = HDA_FIXUP_PINS,
  		.v.pins = (const struct hda_pintbl[]) {
-@@ -6603,6 +6652,12 @@ static const struct hda_fixup alc269_fixups[] = {
+@@ -6603,6 +6654,12 @@ static const struct hda_fixup alc269_fixups[] = {
  		.chained = true,
  		.chain_id = ALC294_FIXUP_ASUS_HEADSET_MIC
  	},
@@ -126881,7 +127572,7 @@ index 1ffa36e987b4..a9f69c3a3e0b 100644
  	[ALC225_FIXUP_HEADSET_JACK] = {
  		.type = HDA_FIXUP_FUNC,
  		.v.func = alc_fixup_headset_jack,
-@@ -6627,6 +6682,64 @@ static const struct hda_fixup alc269_fixups[] = {
+@@ -6627,6 +6684,64 @@ static const struct hda_fixup alc269_fixups[] = {
  		.chained = true,
  		.chain_id = ALC285_FIXUP_LENOVO_HEADPHONE_NOISE
  	},
@@ -126946,7 +127637,7 @@ index 1ffa36e987b4..a9f69c3a3e0b 100644
  };
  
  static const struct snd_pci_quirk alc269_fixup_tbl[] = {
-@@ -6643,9 +6756,15 @@ static const struct snd_pci_quirk alc269_fixup_tbl[] = {
+@@ -6643,9 +6758,15 @@ static const struct snd_pci_quirk alc269_fixup_tbl[] = {
  	SND_PCI_QUIRK(0x1025, 0x079b, "Acer Aspire V5-573G", ALC282_FIXUP_ASPIRE_V5_PINS),
  	SND_PCI_QUIRK(0x1025, 0x102b, "Acer Aspire C24-860", ALC286_FIXUP_ACER_AIO_MIC_NO_PRESENCE),
  	SND_PCI_QUIRK(0x1025, 0x106d, "Acer Cloudbook 14", ALC283_FIXUP_CHROME_BOOK),
@@ -126965,7 +127656,7 @@ index 1ffa36e987b4..a9f69c3a3e0b 100644
  	SND_PCI_QUIRK(0x1028, 0x0470, "Dell M101z", ALC269_FIXUP_DELL_M101Z),
  	SND_PCI_QUIRK(0x1028, 0x054b, "Dell XPS one 2710", ALC275_FIXUP_DELL_XPS),
  	SND_PCI_QUIRK(0x1028, 0x05bd, "Dell Latitude E6440", ALC292_FIXUP_DELL_E7X),
-@@ -6677,6 +6796,7 @@ static const struct snd_pci_quirk alc269_fixup_tbl[] = {
+@@ -6677,6 +6798,7 @@ static const struct snd_pci_quirk alc269_fixup_tbl[] = {
  	SND_PCI_QUIRK(0x1028, 0x0704, "Dell XPS 13 9350", ALC256_FIXUP_DELL_XPS_13_HEADPHONE_NOISE),
  	SND_PCI_QUIRK(0x1028, 0x0706, "Dell Inspiron 7559", ALC256_FIXUP_DELL_INSPIRON_7559_SUBWOOFER),
  	SND_PCI_QUIRK(0x1028, 0x0725, "Dell Inspiron 3162", ALC255_FIXUP_DELL_SPK_NOISE),
@@ -126973,7 +127664,7 @@ index 1ffa36e987b4..a9f69c3a3e0b 100644
  	SND_PCI_QUIRK(0x1028, 0x075b, "Dell XPS 13 9360", ALC256_FIXUP_DELL_XPS_13_HEADPHONE_NOISE),
  	SND_PCI_QUIRK(0x1028, 0x075c, "Dell XPS 27 7760", ALC298_FIXUP_SPK_VOLUME),
  	SND_PCI_QUIRK(0x1028, 0x075d, "Dell AIO", ALC298_FIXUP_SPK_VOLUME),
-@@ -6689,6 +6809,8 @@ static const struct snd_pci_quirk alc269_fixup_tbl[] = {
+@@ -6689,6 +6811,8 @@ static const struct snd_pci_quirk alc269_fixup_tbl[] = {
  	SND_PCI_QUIRK(0x1028, 0x0871, "Dell Precision 3630", ALC255_FIXUP_DELL_HEADSET_MIC),
  	SND_PCI_QUIRK(0x1028, 0x0872, "Dell Precision 3630", ALC255_FIXUP_DELL_HEADSET_MIC),
  	SND_PCI_QUIRK(0x1028, 0x0873, "Dell Precision 3930", ALC255_FIXUP_DUMMY_LINEOUT_VERB),
@@ -126982,7 +127673,7 @@ index 1ffa36e987b4..a9f69c3a3e0b 100644
  	SND_PCI_QUIRK(0x1028, 0x0935, "Dell", ALC274_FIXUP_DELL_AIO_LINEOUT_VERB),
  	SND_PCI_QUIRK(0x1028, 0x164a, "Dell", ALC293_FIXUP_DELL1_MIC_NO_PRESENCE),
  	SND_PCI_QUIRK(0x1028, 0x164b, "Dell", ALC293_FIXUP_DELL1_MIC_NO_PRESENCE),
-@@ -6751,11 +6873,13 @@ static const struct snd_pci_quirk alc269_fixup_tbl[] = {
+@@ -6751,11 +6875,13 @@ static const struct snd_pci_quirk alc269_fixup_tbl[] = {
  	SND_PCI_QUIRK(0x103c, 0x2336, "HP", ALC269_FIXUP_HP_MUTE_LED_MIC1),
  	SND_PCI_QUIRK(0x103c, 0x2337, "HP", ALC269_FIXUP_HP_MUTE_LED_MIC1),
  	SND_PCI_QUIRK(0x103c, 0x221c, "HP EliteBook 755 G2", ALC280_FIXUP_HP_HEADSET_MIC),
@@ -126998,7 +127689,7 @@ index 1ffa36e987b4..a9f69c3a3e0b 100644
  	SND_PCI_QUIRK(0x103c, 0x83b9, "HP Spectre x360", ALC269_FIXUP_HP_MUTE_LED_MIC3),
  	SND_PCI_QUIRK(0x1043, 0x103e, "ASUS X540SA", ALC256_FIXUP_ASUS_MIC),
  	SND_PCI_QUIRK(0x1043, 0x103f, "ASUS TX300", ALC282_FIXUP_ASUS_TX300),
-@@ -6771,7 +6895,6 @@ static const struct snd_pci_quirk alc269_fixup_tbl[] = {
+@@ -6771,7 +6897,6 @@ static const struct snd_pci_quirk alc269_fixup_tbl[] = {
  	SND_PCI_QUIRK(0x1043, 0x12e0, "ASUS X541SA", ALC256_FIXUP_ASUS_MIC),
  	SND_PCI_QUIRK(0x1043, 0x13b0, "ASUS Z550SA", ALC256_FIXUP_ASUS_MIC),
  	SND_PCI_QUIRK(0x1043, 0x1427, "Asus Zenbook UX31E", ALC269VB_FIXUP_ASUS_ZENBOOK),
@@ -127006,7 +127697,7 @@ index 1ffa36e987b4..a9f69c3a3e0b 100644
  	SND_PCI_QUIRK(0x1043, 0x1517, "Asus Zenbook UX31A", ALC269VB_FIXUP_ASUS_ZENBOOK_UX31A),
  	SND_PCI_QUIRK(0x1043, 0x16e3, "ASUS UX50", ALC269_FIXUP_STEREO_DMIC),
  	SND_PCI_QUIRK(0x1043, 0x1a13, "Asus G73Jw", ALC269_FIXUP_ASUS_G73JW),
-@@ -7036,7 +7159,9 @@ static const struct hda_model_fixup alc269_fixup_models[] = {
+@@ -7036,7 +7161,9 @@ static const struct hda_model_fixup alc269_fixup_models[] = {
  	{.id = ALC255_FIXUP_DUMMY_LINEOUT_VERB, .name = "alc255-dummy-lineout"},
  	{.id = ALC255_FIXUP_DELL_HEADSET_MIC, .name = "alc255-dell-headset"},
  	{.id = ALC295_FIXUP_HP_X360, .name = "alc295-hp-x360"},
@@ -127017,16 +127708,20 @@ index 1ffa36e987b4..a9f69c3a3e0b 100644
  	{}
  };
  #define ALC225_STANDARD_PINS \
-@@ -7139,6 +7264,8 @@ static const struct snd_hda_pin_quirk alc269_pin_fixup_tbl[] = {
+@@ -7139,6 +7266,12 @@ static const struct snd_hda_pin_quirk alc269_pin_fixup_tbl[] = {
  		{0x12, 0x90a60140},
  		{0x14, 0x90170150},
  		{0x21, 0x02211020}),
 +	SND_HDA_PIN_QUIRK(0x10ec0236, 0x1028, "Dell", ALC255_FIXUP_DELL1_MIC_NO_PRESENCE,
 +		{0x21, 0x02211020}),
++	SND_HDA_PIN_QUIRK(0x10ec0236, 0x1028, "Dell", ALC255_FIXUP_DELL1_MIC_NO_PRESENCE,
++		{0x12, 0x40000000},
++		{0x14, 0x90170110},
++		{0x21, 0x02211020}),
  	SND_HDA_PIN_QUIRK(0x10ec0255, 0x1028, "Dell", ALC255_FIXUP_DELL2_MIC_NO_PRESENCE,
  		{0x14, 0x90170110},
  		{0x21, 0x02211020}),
-@@ -7249,6 +7376,10 @@ static const struct snd_hda_pin_quirk alc269_pin_fixup_tbl[] = {
+@@ -7249,6 +7382,10 @@ static const struct snd_hda_pin_quirk alc269_pin_fixup_tbl[] = {
  		{0x21, 0x0221101f}),
  	SND_HDA_PIN_QUIRK(0x10ec0256, 0x1028, "Dell", ALC255_FIXUP_DELL1_MIC_NO_PRESENCE,
  		ALC256_STANDARD_PINS),
@@ -127037,7 +127732,7 @@ index 1ffa36e987b4..a9f69c3a3e0b 100644
  	SND_HDA_PIN_QUIRK(0x10ec0256, 0x1043, "ASUS", ALC256_FIXUP_ASUS_MIC,
  		{0x14, 0x90170110},
  		{0x1b, 0x90a70130},
-@@ -7257,6 +7388,18 @@ static const struct snd_hda_pin_quirk alc269_pin_fixup_tbl[] = {
+@@ -7257,6 +7394,18 @@ static const struct snd_hda_pin_quirk alc269_pin_fixup_tbl[] = {
  		{0x14, 0x90170110},
  		{0x1b, 0x90a70130},
  		{0x21, 0x03211020}),
@@ -127056,17 +127751,24 @@ index 1ffa36e987b4..a9f69c3a3e0b 100644
  	SND_HDA_PIN_QUIRK(0x10ec0274, 0x1028, "Dell", ALC274_FIXUP_DELL_AIO_LINEOUT_VERB,
  		{0x12, 0xb7a60130},
  		{0x13, 0xb8a61140},
-@@ -7388,6 +7531,10 @@ static const struct snd_hda_pin_quirk alc269_pin_fixup_tbl[] = {
- 		{0x14, 0x90170110},
- 		{0x1b, 0x90a70130},
- 		{0x21, 0x04211020}),
-+	SND_HDA_PIN_QUIRK(0x10ec0294, 0x1043, "ASUS", ALC294_FIXUP_ASUS_SPK,
-+		{0x12, 0x90a60130},
-+		{0x17, 0x90170110},
-+		{0x21, 0x03211020}),
+@@ -7391,6 +7540,17 @@ static const struct snd_hda_pin_quirk alc269_pin_fixup_tbl[] = {
  	SND_HDA_PIN_QUIRK(0x10ec0294, 0x1043, "ASUS", ALC294_FIXUP_ASUS_SPK,
  		{0x12, 0x90a60130},
  		{0x17, 0x90170110},
++		{0x21, 0x03211020}),
++	SND_HDA_PIN_QUIRK(0x10ec0294, 0x1043, "ASUS", ALC294_FIXUP_ASUS_SPK,
++		{0x12, 0x90a60130},
++		{0x17, 0x90170110},
++		{0x21, 0x04211020}),
++	SND_HDA_PIN_QUIRK(0x10ec0295, 0x1043, "ASUS", ALC294_FIXUP_ASUS_SPK,
++		{0x12, 0x90a60130},
++		{0x17, 0x90170110},
++		{0x21, 0x03211020}),
++	SND_HDA_PIN_QUIRK(0x10ec0295, 0x1028, "Dell", ALC269_FIXUP_DELL1_MIC_NO_PRESENCE,
++		{0x14, 0x90170110},
+ 		{0x21, 0x04211020}),
+ 	SND_HDA_PIN_QUIRK(0x10ec0295, 0x1028, "Dell", ALC269_FIXUP_DELL1_MIC_NO_PRESENCE,
+ 		ALC295_STANDARD_PINS,
 diff --git a/sound/pci/maestro3.c b/sound/pci/maestro3.c
 index 62962178a9d7..87e486740da0 100644
 --- a/sound/pci/maestro3.c
@@ -129351,10 +130053,64 @@ index d4cfb6a7a086..4b7e107865bf 100755
 +
  exit $ret
 diff --git a/tools/testing/selftests/seccomp/seccomp_bpf.c b/tools/testing/selftests/seccomp/seccomp_bpf.c
-index 7e632b465ab4..6d7a81306f8a 100644
+index 7e632b465ab4..1c2509104924 100644
 --- a/tools/testing/selftests/seccomp/seccomp_bpf.c
 +++ b/tools/testing/selftests/seccomp/seccomp_bpf.c
-@@ -2971,6 +2971,12 @@ TEST(get_metadata)
+@@ -2166,11 +2166,14 @@ TEST(detect_seccomp_filter_flags)
+ 				 SECCOMP_FILTER_FLAG_LOG,
+ 				 SECCOMP_FILTER_FLAG_SPEC_ALLOW,
+ 				 SECCOMP_FILTER_FLAG_NEW_LISTENER };
+-	unsigned int flag, all_flags;
++	unsigned int exclusive[] = {
++				SECCOMP_FILTER_FLAG_TSYNC,
++				SECCOMP_FILTER_FLAG_NEW_LISTENER };
++	unsigned int flag, all_flags, exclusive_mask;
+ 	int i;
+ 	long ret;
+ 
+-	/* Test detection of known-good filter flags */
++	/* Test detection of individual known-good filter flags */
+ 	for (i = 0, all_flags = 0; i < ARRAY_SIZE(flags); i++) {
+ 		int bits = 0;
+ 
+@@ -2197,16 +2200,29 @@ TEST(detect_seccomp_filter_flags)
+ 		all_flags |= flag;
+ 	}
+ 
+-	/* Test detection of all known-good filter flags */
+-	ret = seccomp(SECCOMP_SET_MODE_FILTER, all_flags, NULL);
+-	EXPECT_EQ(-1, ret);
+-	EXPECT_EQ(EFAULT, errno) {
+-		TH_LOG("Failed to detect that all known-good filter flags (0x%X) are supported!",
+-		       all_flags);
++	/*
++	 * Test detection of all known-good filter flags combined. But
++	 * for the exclusive flags we need to mask them out and try them
++	 * individually for the "all flags" testing.
++	 */
++	exclusive_mask = 0;
++	for (i = 0; i < ARRAY_SIZE(exclusive); i++)
++		exclusive_mask |= exclusive[i];
++	for (i = 0; i < ARRAY_SIZE(exclusive); i++) {
++		flag = all_flags & ~exclusive_mask;
++		flag |= exclusive[i];
++
++		ret = seccomp(SECCOMP_SET_MODE_FILTER, flag, NULL);
++		EXPECT_EQ(-1, ret);
++		EXPECT_EQ(EFAULT, errno) {
++			TH_LOG("Failed to detect that all known-good filter flags (0x%X) are supported!",
++			       flag);
++		}
+ 	}
+ 
+-	/* Test detection of an unknown filter flag */
++	/* Test detection of an unknown filter flags, without exclusives. */
+ 	flag = -1;
++	flag &= ~exclusive_mask;
+ 	ret = seccomp(SECCOMP_SET_MODE_FILTER, flag, NULL);
+ 	EXPECT_EQ(-1, ret);
+ 	EXPECT_EQ(EINVAL, errno) {
+@@ -2971,6 +2987,12 @@ TEST(get_metadata)
  	struct seccomp_metadata md;
  	long ret;
  
