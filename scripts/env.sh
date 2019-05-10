@@ -35,18 +35,11 @@ build_deps=(
     'devscripts'
     'fakeroot'
     'gcc'
-    'pbuilder'
     'gzip'
     'pigz'
     'xz-utils'
     'schedtool'
 )
-
-pbuilder_releases=("${releases_debian[@]}")
-pbuilder_arches=('amd64' 'i386')
-pbuilder_mirror="$mirror_debian"
-pbuilder_chroots="/var/cache/pbuilder"
-pbuilder_results="$dir_base/debs"
 
 # Common routine to get correct release version for Debian / Ubuntu
 function get_release_version {
