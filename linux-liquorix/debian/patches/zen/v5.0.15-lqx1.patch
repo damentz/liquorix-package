@@ -1363,7 +1363,7 @@ index 356156f5c52d..ba8927c0d45c 100644
  In general file descriptors can be migrated among processes by means
  of fork() and the SCM_RIGHTS facility of unix domain socket.  These
 diff --git a/Makefile b/Makefile
-index d5713e7b1e50..d41633c47051 100644
+index d5713e7b1e50..b9c4a2b2eece 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -1,9 +1,9 @@
@@ -1373,7 +1373,7 @@ index d5713e7b1e50..d41633c47051 100644
 -SUBLEVEL = 0
 -EXTRAVERSION =
 -NAME = Shy Crocodile
-+SUBLEVEL = 14
++SUBLEVEL = 15
 +EXTRAVERSION = -lqx1
 +NAME = High Five
  
@@ -3186,49 +3186,123 @@ index b461d62023f2..567c24f3d224 100644
  
  	return 0;
 diff --git a/arch/arm64/include/asm/futex.h b/arch/arm64/include/asm/futex.h
-index cccb83ad7fa8..c7e1a7837706 100644
+index cccb83ad7fa8..6fb2214333a2 100644
 --- a/arch/arm64/include/asm/futex.h
 +++ b/arch/arm64/include/asm/futex.h
-@@ -30,8 +30,8 @@ do {									\
+@@ -23,26 +23,34 @@
+ 
+ #include <asm/errno.h>
+ 
++#define FUTEX_MAX_LOOPS	128 /* What's the largest number you can think of? */
++
+ #define __futex_atomic_op(insn, ret, oldval, uaddr, tmp, oparg)		\
+ do {									\
++	unsigned int loops = FUTEX_MAX_LOOPS;				\
++									\
+ 	uaccess_enable();						\
+ 	asm volatile(							\
  "	prfm	pstl1strm, %2\n"					\
  "1:	ldxr	%w1, %2\n"						\
  	insn "\n"							\
 -"2:	stlxr	%w3, %w0, %2\n"						\
 -"	cbnz	%w3, 1b\n"						\
+-"	dmb	ish\n"							\
 +"2:	stlxr	%w0, %w3, %2\n"						\
-+"	cbnz	%w0, 1b\n"						\
- "	dmb	ish\n"							\
++"	cbz	%w0, 3f\n"						\
++"	sub	%w4, %w4, %w0\n"					\
++"	cbnz	%w4, 1b\n"						\
++"	mov	%w0, %w7\n"						\
  "3:\n"									\
++"	dmb	ish\n"							\
  "	.pushsection .fixup,\"ax\"\n"					\
-@@ -57,23 +57,23 @@ arch_futex_atomic_op_inuser(int op, int oparg, int *oval, u32 __user *_uaddr)
+ "	.align	2\n"							\
+-"4:	mov	%w0, %w5\n"						\
++"4:	mov	%w0, %w6\n"						\
+ "	b	3b\n"							\
+ "	.popsection\n"							\
+ 	_ASM_EXTABLE(1b, 4b)						\
+ 	_ASM_EXTABLE(2b, 4b)						\
+-	: "=&r" (ret), "=&r" (oldval), "+Q" (*uaddr), "=&r" (tmp)	\
+-	: "r" (oparg), "Ir" (-EFAULT)					\
++	: "=&r" (ret), "=&r" (oldval), "+Q" (*uaddr), "=&r" (tmp),	\
++	  "+r" (loops)							\
++	: "r" (oparg), "Ir" (-EFAULT), "Ir" (-EAGAIN)			\
+ 	: "memory");							\
+ 	uaccess_disable();						\
+ } while (0)
+@@ -57,23 +65,23 @@ arch_futex_atomic_op_inuser(int op, int oparg, int *oval, u32 __user *_uaddr)
  
  	switch (op) {
  	case FUTEX_OP_SET:
 -		__futex_atomic_op("mov	%w0, %w4",
-+		__futex_atomic_op("mov	%w3, %w4",
++		__futex_atomic_op("mov	%w3, %w5",
  				  ret, oldval, uaddr, tmp, oparg);
  		break;
  	case FUTEX_OP_ADD:
 -		__futex_atomic_op("add	%w0, %w1, %w4",
-+		__futex_atomic_op("add	%w3, %w1, %w4",
++		__futex_atomic_op("add	%w3, %w1, %w5",
  				  ret, oldval, uaddr, tmp, oparg);
  		break;
  	case FUTEX_OP_OR:
 -		__futex_atomic_op("orr	%w0, %w1, %w4",
-+		__futex_atomic_op("orr	%w3, %w1, %w4",
++		__futex_atomic_op("orr	%w3, %w1, %w5",
  				  ret, oldval, uaddr, tmp, oparg);
  		break;
  	case FUTEX_OP_ANDN:
 -		__futex_atomic_op("and	%w0, %w1, %w4",
-+		__futex_atomic_op("and	%w3, %w1, %w4",
++		__futex_atomic_op("and	%w3, %w1, %w5",
  				  ret, oldval, uaddr, tmp, ~oparg);
  		break;
  	case FUTEX_OP_XOR:
 -		__futex_atomic_op("eor	%w0, %w1, %w4",
-+		__futex_atomic_op("eor	%w3, %w1, %w4",
++		__futex_atomic_op("eor	%w3, %w1, %w5",
  				  ret, oldval, uaddr, tmp, oparg);
  		break;
  	default:
+@@ -93,6 +101,7 @@ futex_atomic_cmpxchg_inatomic(u32 *uval, u32 __user *_uaddr,
+ 			      u32 oldval, u32 newval)
+ {
+ 	int ret = 0;
++	unsigned int loops = FUTEX_MAX_LOOPS;
+ 	u32 val, tmp;
+ 	u32 __user *uaddr;
+ 
+@@ -104,20 +113,24 @@ futex_atomic_cmpxchg_inatomic(u32 *uval, u32 __user *_uaddr,
+ 	asm volatile("// futex_atomic_cmpxchg_inatomic\n"
+ "	prfm	pstl1strm, %2\n"
+ "1:	ldxr	%w1, %2\n"
+-"	sub	%w3, %w1, %w4\n"
+-"	cbnz	%w3, 3f\n"
+-"2:	stlxr	%w3, %w5, %2\n"
+-"	cbnz	%w3, 1b\n"
+-"	dmb	ish\n"
++"	sub	%w3, %w1, %w5\n"
++"	cbnz	%w3, 4f\n"
++"2:	stlxr	%w3, %w6, %2\n"
++"	cbz	%w3, 3f\n"
++"	sub	%w4, %w4, %w3\n"
++"	cbnz	%w4, 1b\n"
++"	mov	%w0, %w8\n"
+ "3:\n"
++"	dmb	ish\n"
++"4:\n"
+ "	.pushsection .fixup,\"ax\"\n"
+-"4:	mov	%w0, %w6\n"
+-"	b	3b\n"
++"5:	mov	%w0, %w7\n"
++"	b	4b\n"
+ "	.popsection\n"
+-	_ASM_EXTABLE(1b, 4b)
+-	_ASM_EXTABLE(2b, 4b)
+-	: "+r" (ret), "=&r" (val), "+Q" (*uaddr), "=&r" (tmp)
+-	: "r" (oldval), "r" (newval), "Ir" (-EFAULT)
++	_ASM_EXTABLE(1b, 5b)
++	_ASM_EXTABLE(2b, 5b)
++	: "+r" (ret), "=&r" (val), "+Q" (*uaddr), "=&r" (tmp), "+r" (loops)
++	: "r" (oldval), "r" (newval), "Ir" (-EFAULT), "Ir" (-EAGAIN)
+ 	: "memory");
+ 	uaccess_disable();
+ 
 diff --git a/arch/arm64/include/asm/hardirq.h b/arch/arm64/include/asm/hardirq.h
 index 1473fc2f7ab7..89691c86640a 100644
 --- a/arch/arm64/include/asm/hardirq.h
@@ -13465,6 +13539,21 @@ index 847f54f76789..2f948328cabb 100644
  
  	skcipher_request_complete(req, err);
  }
+diff --git a/drivers/acpi/acpi_lpss.c b/drivers/acpi/acpi_lpss.c
+index 5f94c35d165f..a2d8c03b1e24 100644
+--- a/drivers/acpi/acpi_lpss.c
++++ b/drivers/acpi/acpi_lpss.c
+@@ -1142,8 +1142,8 @@ static struct dev_pm_domain acpi_lpss_pm_domain = {
+ 		.thaw_noirq = acpi_subsys_thaw_noirq,
+ 		.poweroff = acpi_subsys_suspend,
+ 		.poweroff_late = acpi_lpss_suspend_late,
+-		.poweroff_noirq = acpi_subsys_suspend_noirq,
+-		.restore_noirq = acpi_subsys_resume_noirq,
++		.poweroff_noirq = acpi_lpss_suspend_noirq,
++		.restore_noirq = acpi_lpss_resume_noirq,
+ 		.restore_early = acpi_lpss_resume_early,
+ #endif
+ 		.runtime_suspend = acpi_lpss_runtime_suspend,
 diff --git a/drivers/acpi/acpi_video.c b/drivers/acpi/acpi_video.c
 index f0b52266b3ac..d73afb562ad9 100644
 --- a/drivers/acpi/acpi_video.c
@@ -14959,6 +15048,44 @@ index b432651f8236..307d82166f48 100644
  	while (count) {
  		int i, len;
  
+diff --git a/drivers/bluetooth/hci_bcm.c b/drivers/bluetooth/hci_bcm.c
+index ddbe518c3e5b..b5d31d583d60 100644
+--- a/drivers/bluetooth/hci_bcm.c
++++ b/drivers/bluetooth/hci_bcm.c
+@@ -228,9 +228,15 @@ static int bcm_gpio_set_power(struct bcm_device *dev, bool powered)
+ 	int err;
+ 
+ 	if (powered && !dev->res_enabled) {
+-		err = regulator_bulk_enable(BCM_NUM_SUPPLIES, dev->supplies);
+-		if (err)
+-			return err;
++		/* Intel Macs use bcm_apple_get_resources() and don't
++		 * have regulator supplies configured.
++		 */
++		if (dev->supplies[0].supply) {
++			err = regulator_bulk_enable(BCM_NUM_SUPPLIES,
++						    dev->supplies);
++			if (err)
++				return err;
++		}
+ 
+ 		/* LPO clock needs to be 32.768 kHz */
+ 		err = clk_set_rate(dev->lpo_clk, 32768);
+@@ -259,7 +265,13 @@ static int bcm_gpio_set_power(struct bcm_device *dev, bool powered)
+ 	if (!powered && dev->res_enabled) {
+ 		clk_disable_unprepare(dev->txco_clk);
+ 		clk_disable_unprepare(dev->lpo_clk);
+-		regulator_bulk_disable(BCM_NUM_SUPPLIES, dev->supplies);
++
++		/* Intel Macs use bcm_apple_get_resources() and don't
++		 * have regulator supplies configured.
++		 */
++		if (dev->supplies[0].supply)
++			regulator_bulk_disable(BCM_NUM_SUPPLIES,
++					       dev->supplies);
+ 	}
+ 
+ 	/* wait for device to power on and come out of reset */
 diff --git a/drivers/bluetooth/hci_h4.c b/drivers/bluetooth/hci_h4.c
 index fb97a3bf069b..5d97d77627c1 100644
 --- a/drivers/bluetooth/hci_h4.c
@@ -16605,6 +16732,56 @@ index d62fd374d5c7..c72258a44ba4 100644
  
  	acpi_cpufreq_driver.set_boost = set_boost;
  	acpi_cpufreq_driver.boost_enabled = boost_state(0);
+diff --git a/drivers/cpufreq/armada-37xx-cpufreq.c b/drivers/cpufreq/armada-37xx-cpufreq.c
+index 75491fc841a6..0df16eb1eb3c 100644
+--- a/drivers/cpufreq/armada-37xx-cpufreq.c
++++ b/drivers/cpufreq/armada-37xx-cpufreq.c
+@@ -359,11 +359,11 @@ static int __init armada37xx_cpufreq_driver_init(void)
+ 	struct armada_37xx_dvfs *dvfs;
+ 	struct platform_device *pdev;
+ 	unsigned long freq;
+-	unsigned int cur_frequency;
++	unsigned int cur_frequency, base_frequency;
+ 	struct regmap *nb_pm_base, *avs_base;
+ 	struct device *cpu_dev;
+ 	int load_lvl, ret;
+-	struct clk *clk;
++	struct clk *clk, *parent;
+ 
+ 	nb_pm_base =
+ 		syscon_regmap_lookup_by_compatible("marvell,armada-3700-nb-pm");
+@@ -399,6 +399,22 @@ static int __init armada37xx_cpufreq_driver_init(void)
+ 		return PTR_ERR(clk);
+ 	}
+ 
++	parent = clk_get_parent(clk);
++	if (IS_ERR(parent)) {
++		dev_err(cpu_dev, "Cannot get parent clock for CPU0\n");
++		clk_put(clk);
++		return PTR_ERR(parent);
++	}
++
++	/* Get parent CPU frequency */
++	base_frequency =  clk_get_rate(parent);
++
++	if (!base_frequency) {
++		dev_err(cpu_dev, "Failed to get parent clock rate for CPU\n");
++		clk_put(clk);
++		return -EINVAL;
++	}
++
+ 	/* Get nominal (current) CPU frequency */
+ 	cur_frequency = clk_get_rate(clk);
+ 	if (!cur_frequency) {
+@@ -431,7 +447,7 @@ static int __init armada37xx_cpufreq_driver_init(void)
+ 	for (load_lvl = ARMADA_37XX_DVFS_LOAD_0; load_lvl < LOAD_LEVEL_NR;
+ 	     load_lvl++) {
+ 		unsigned long u_volt = avs_map[dvfs->avs[load_lvl]] * 1000;
+-		freq = cur_frequency / dvfs->divider[load_lvl];
++		freq = base_frequency / dvfs->divider[load_lvl];
+ 		ret = dev_pm_opp_add(cpu_dev, freq, u_volt);
+ 		if (ret)
+ 			goto remove_opp;
 diff --git a/drivers/cpufreq/cpufreq.c b/drivers/cpufreq/cpufreq.c
 index e35a886e00bc..ef0e33e21b98 100644
 --- a/drivers/cpufreq/cpufreq.c
@@ -20907,6 +21084,22 @@ index 8426b7970c14..edc52d75e6bd 100644
  	spin_unlock(&gth->gth_lock);
  }
  
+diff --git a/drivers/hwtracing/intel_th/pci.c b/drivers/hwtracing/intel_th/pci.c
+index 1cf6290d6435..70f2cb90adc5 100644
+--- a/drivers/hwtracing/intel_th/pci.c
++++ b/drivers/hwtracing/intel_th/pci.c
+@@ -165,6 +165,11 @@ static const struct pci_device_id intel_th_pci_id_table[] = {
+ 		PCI_DEVICE(PCI_VENDOR_ID_INTEL, 0x34a6),
+ 		.driver_data = (kernel_ulong_t)&intel_th_2x,
+ 	},
++	{
++		/* Comet Lake */
++		PCI_DEVICE(PCI_VENDOR_ID_INTEL, 0x02a6),
++		.driver_data = (kernel_ulong_t)&intel_th_2x,
++	},
+ 	{ 0 },
+ };
+ 
 diff --git a/drivers/hwtracing/stm/core.c b/drivers/hwtracing/stm/core.c
 index 93ce3aa740a9..c7ba8acfd4d5 100644
 --- a/drivers/hwtracing/stm/core.c
@@ -21219,10 +21412,22 @@ index 6cb7ad608bcd..0f01cdba9d2c 100644
  		return NULL;
  
 diff --git a/drivers/i3c/master.c b/drivers/i3c/master.c
-index 2dc628d4f1ae..1412abcff010 100644
+index 2dc628d4f1ae..5f4bd52121fe 100644
 --- a/drivers/i3c/master.c
 +++ b/drivers/i3c/master.c
-@@ -1980,7 +1980,6 @@ of_i3c_master_add_i3c_boardinfo(struct i3c_master_controller *master,
+@@ -385,8 +385,9 @@ static void i3c_bus_set_addr_slot_status(struct i3c_bus *bus, u16 addr,
+ 		return;
+ 
+ 	ptr = bus->addrslots + (bitpos / BITS_PER_LONG);
+-	*ptr &= ~(I3C_ADDR_SLOT_STATUS_MASK << (bitpos % BITS_PER_LONG));
+-	*ptr |= status << (bitpos % BITS_PER_LONG);
++	*ptr &= ~((unsigned long)I3C_ADDR_SLOT_STATUS_MASK <<
++						(bitpos % BITS_PER_LONG));
++	*ptr |= (unsigned long)status << (bitpos % BITS_PER_LONG);
+ }
+ 
+ static bool i3c_bus_dev_addr_is_avail(struct i3c_bus *bus, u8 addr)
+@@ -1980,7 +1981,6 @@ of_i3c_master_add_i3c_boardinfo(struct i3c_master_controller *master,
  {
  	struct i3c_dev_boardinfo *boardinfo;
  	struct device *dev = &master->dev;
@@ -21230,7 +21435,7 @@ index 2dc628d4f1ae..1412abcff010 100644
  	enum i3c_addr_slot_status addrstatus;
  	u32 init_dyn_addr = 0;
  
-@@ -2012,8 +2011,8 @@ of_i3c_master_add_i3c_boardinfo(struct i3c_master_controller *master,
+@@ -2012,8 +2012,8 @@ of_i3c_master_add_i3c_boardinfo(struct i3c_master_controller *master,
  
  	boardinfo->pid = ((u64)reg[1] << 32) | reg[2];
  
@@ -21401,6 +21606,18 @@ index c30c002f1fef..4735f8a1ca9d 100644
  }
  
  static int pm8xxx_read_channel_rsv(struct pm8xxx_xoadc *adc,
+diff --git a/drivers/iio/adc/qcom-spmi-adc5.c b/drivers/iio/adc/qcom-spmi-adc5.c
+index 6a866cc187f7..21fdcde77883 100644
+--- a/drivers/iio/adc/qcom-spmi-adc5.c
++++ b/drivers/iio/adc/qcom-spmi-adc5.c
+@@ -664,6 +664,7 @@ static const struct of_device_id adc5_match_table[] = {
+ 	},
+ 	{ }
+ };
++MODULE_DEVICE_TABLE(of, adc5_match_table);
+ 
+ static int adc5_get_dt_data(struct adc5_chip *adc, struct device_node *node)
+ {
 diff --git a/drivers/iio/chemical/bme680.h b/drivers/iio/chemical/bme680.h
 index 0ae89b87e2d6..4edc5d21cb9f 100644
 --- a/drivers/iio/chemical/bme680.h
@@ -38203,6 +38420,2215 @@ index dfba4921b265..5bf61431434b 100644
  		fc_rport_enter_delete(rdata, RPORT_EV_STOP);
  		mutex_unlock(&rdata->rp_mutex);
  		kref_put(&rdata->kref, fc_rport_destroy);
+diff --git a/drivers/scsi/lpfc/lpfc_attr.c b/drivers/scsi/lpfc/lpfc_attr.c
+index 4bae72cbf3f6..45b26a8eb61e 100644
+--- a/drivers/scsi/lpfc/lpfc_attr.c
++++ b/drivers/scsi/lpfc/lpfc_attr.c
+@@ -117,7 +117,7 @@ static ssize_t
+ lpfc_drvr_version_show(struct device *dev, struct device_attribute *attr,
+ 		       char *buf)
+ {
+-	return snprintf(buf, PAGE_SIZE, LPFC_MODULE_DESC "\n");
++	return scnprintf(buf, PAGE_SIZE, LPFC_MODULE_DESC "\n");
+ }
+ 
+ /**
+@@ -137,9 +137,9 @@ lpfc_enable_fip_show(struct device *dev, struct device_attribute *attr,
+ 	struct lpfc_hba   *phba = vport->phba;
+ 
+ 	if (phba->hba_flag & HBA_FIP_SUPPORT)
+-		return snprintf(buf, PAGE_SIZE, "1\n");
++		return scnprintf(buf, PAGE_SIZE, "1\n");
+ 	else
+-		return snprintf(buf, PAGE_SIZE, "0\n");
++		return scnprintf(buf, PAGE_SIZE, "0\n");
+ }
+ 
+ static ssize_t
+@@ -517,14 +517,15 @@ lpfc_bg_info_show(struct device *dev, struct device_attribute *attr,
+ 	struct lpfc_vport *vport = (struct lpfc_vport *) shost->hostdata;
+ 	struct lpfc_hba   *phba = vport->phba;
+ 
+-	if (phba->cfg_enable_bg)
++	if (phba->cfg_enable_bg) {
+ 		if (phba->sli3_options & LPFC_SLI3_BG_ENABLED)
+-			return snprintf(buf, PAGE_SIZE, "BlockGuard Enabled\n");
++			return scnprintf(buf, PAGE_SIZE,
++					"BlockGuard Enabled\n");
+ 		else
+-			return snprintf(buf, PAGE_SIZE,
++			return scnprintf(buf, PAGE_SIZE,
+ 					"BlockGuard Not Supported\n");
+-	else
+-			return snprintf(buf, PAGE_SIZE,
++	} else
++		return scnprintf(buf, PAGE_SIZE,
+ 					"BlockGuard Disabled\n");
+ }
+ 
+@@ -536,7 +537,7 @@ lpfc_bg_guard_err_show(struct device *dev, struct device_attribute *attr,
+ 	struct lpfc_vport *vport = (struct lpfc_vport *) shost->hostdata;
+ 	struct lpfc_hba   *phba = vport->phba;
+ 
+-	return snprintf(buf, PAGE_SIZE, "%llu\n",
++	return scnprintf(buf, PAGE_SIZE, "%llu\n",
+ 			(unsigned long long)phba->bg_guard_err_cnt);
+ }
+ 
+@@ -548,7 +549,7 @@ lpfc_bg_apptag_err_show(struct device *dev, struct device_attribute *attr,
+ 	struct lpfc_vport *vport = (struct lpfc_vport *) shost->hostdata;
+ 	struct lpfc_hba   *phba = vport->phba;
+ 
+-	return snprintf(buf, PAGE_SIZE, "%llu\n",
++	return scnprintf(buf, PAGE_SIZE, "%llu\n",
+ 			(unsigned long long)phba->bg_apptag_err_cnt);
+ }
+ 
+@@ -560,7 +561,7 @@ lpfc_bg_reftag_err_show(struct device *dev, struct device_attribute *attr,
+ 	struct lpfc_vport *vport = (struct lpfc_vport *) shost->hostdata;
+ 	struct lpfc_hba   *phba = vport->phba;
+ 
+-	return snprintf(buf, PAGE_SIZE, "%llu\n",
++	return scnprintf(buf, PAGE_SIZE, "%llu\n",
+ 			(unsigned long long)phba->bg_reftag_err_cnt);
+ }
+ 
+@@ -578,7 +579,7 @@ lpfc_info_show(struct device *dev, struct device_attribute *attr,
+ {
+ 	struct Scsi_Host *host = class_to_shost(dev);
+ 
+-	return snprintf(buf, PAGE_SIZE, "%s\n",lpfc_info(host));
++	return scnprintf(buf, PAGE_SIZE, "%s\n", lpfc_info(host));
+ }
+ 
+ /**
+@@ -597,7 +598,7 @@ lpfc_serialnum_show(struct device *dev, struct device_attribute *attr,
+ 	struct lpfc_vport *vport = (struct lpfc_vport *) shost->hostdata;
+ 	struct lpfc_hba   *phba = vport->phba;
+ 
+-	return snprintf(buf, PAGE_SIZE, "%s\n",phba->SerialNumber);
++	return scnprintf(buf, PAGE_SIZE, "%s\n", phba->SerialNumber);
+ }
+ 
+ /**
+@@ -619,7 +620,7 @@ lpfc_temp_sensor_show(struct device *dev, struct device_attribute *attr,
+ 	struct Scsi_Host *shost = class_to_shost(dev);
+ 	struct lpfc_vport *vport = (struct lpfc_vport *) shost->hostdata;
+ 	struct lpfc_hba   *phba = vport->phba;
+-	return snprintf(buf, PAGE_SIZE, "%d\n",phba->temp_sensor_support);
++	return scnprintf(buf, PAGE_SIZE, "%d\n", phba->temp_sensor_support);
+ }
+ 
+ /**
+@@ -638,7 +639,7 @@ lpfc_modeldesc_show(struct device *dev, struct device_attribute *attr,
+ 	struct lpfc_vport *vport = (struct lpfc_vport *) shost->hostdata;
+ 	struct lpfc_hba   *phba = vport->phba;
+ 
+-	return snprintf(buf, PAGE_SIZE, "%s\n",phba->ModelDesc);
++	return scnprintf(buf, PAGE_SIZE, "%s\n", phba->ModelDesc);
+ }
+ 
+ /**
+@@ -657,7 +658,7 @@ lpfc_modelname_show(struct device *dev, struct device_attribute *attr,
+ 	struct lpfc_vport *vport = (struct lpfc_vport *) shost->hostdata;
+ 	struct lpfc_hba   *phba = vport->phba;
+ 
+-	return snprintf(buf, PAGE_SIZE, "%s\n",phba->ModelName);
++	return scnprintf(buf, PAGE_SIZE, "%s\n", phba->ModelName);
+ }
+ 
+ /**
+@@ -676,7 +677,7 @@ lpfc_programtype_show(struct device *dev, struct device_attribute *attr,
+ 	struct lpfc_vport *vport = (struct lpfc_vport *) shost->hostdata;
+ 	struct lpfc_hba   *phba = vport->phba;
+ 
+-	return snprintf(buf, PAGE_SIZE, "%s\n",phba->ProgramType);
++	return scnprintf(buf, PAGE_SIZE, "%s\n", phba->ProgramType);
+ }
+ 
+ /**
+@@ -694,7 +695,7 @@ lpfc_mlomgmt_show(struct device *dev, struct device_attribute *attr, char *buf)
+ 	struct lpfc_vport *vport = (struct lpfc_vport *)shost->hostdata;
+ 	struct lpfc_hba   *phba = vport->phba;
+ 
+-	return snprintf(buf, PAGE_SIZE, "%d\n",
++	return scnprintf(buf, PAGE_SIZE, "%d\n",
+ 		(phba->sli.sli_flag & LPFC_MENLO_MAINT));
+ }
+ 
+@@ -714,7 +715,7 @@ lpfc_vportnum_show(struct device *dev, struct device_attribute *attr,
+ 	struct lpfc_vport *vport = (struct lpfc_vport *) shost->hostdata;
+ 	struct lpfc_hba   *phba = vport->phba;
+ 
+-	return snprintf(buf, PAGE_SIZE, "%s\n",phba->Port);
++	return scnprintf(buf, PAGE_SIZE, "%s\n", phba->Port);
+ }
+ 
+ /**
+@@ -742,10 +743,10 @@ lpfc_fwrev_show(struct device *dev, struct device_attribute *attr,
+ 	sli_family = phba->sli4_hba.pc_sli4_params.sli_family;
+ 
+ 	if (phba->sli_rev < LPFC_SLI_REV4)
+-		len = snprintf(buf, PAGE_SIZE, "%s, sli-%d\n",
++		len = scnprintf(buf, PAGE_SIZE, "%s, sli-%d\n",
+ 			       fwrev, phba->sli_rev);
+ 	else
+-		len = snprintf(buf, PAGE_SIZE, "%s, sli-%d:%d:%x\n",
++		len = scnprintf(buf, PAGE_SIZE, "%s, sli-%d:%d:%x\n",
+ 			       fwrev, phba->sli_rev, if_type, sli_family);
+ 
+ 	return len;
+@@ -769,7 +770,7 @@ lpfc_hdw_show(struct device *dev, struct device_attribute *attr, char *buf)
+ 	lpfc_vpd_t *vp = &phba->vpd;
+ 
+ 	lpfc_jedec_to_ascii(vp->rev.biuRev, hdw);
+-	return snprintf(buf, PAGE_SIZE, "%s\n", hdw);
++	return scnprintf(buf, PAGE_SIZE, "%s\n", hdw);
+ }
+ 
+ /**
+@@ -790,10 +791,11 @@ lpfc_option_rom_version_show(struct device *dev, struct device_attribute *attr,
+ 	char fwrev[FW_REV_STR_SIZE];
+ 
+ 	if (phba->sli_rev < LPFC_SLI_REV4)
+-		return snprintf(buf, PAGE_SIZE, "%s\n", phba->OptionROMVersion);
++		return scnprintf(buf, PAGE_SIZE, "%s\n",
++				phba->OptionROMVersion);
+ 
+ 	lpfc_decode_firmware_rev(phba, fwrev, 1);
+-	return snprintf(buf, PAGE_SIZE, "%s\n", fwrev);
++	return scnprintf(buf, PAGE_SIZE, "%s\n", fwrev);
+ }
+ 
+ /**
+@@ -824,20 +826,20 @@ lpfc_link_state_show(struct device *dev, struct device_attribute *attr,
+ 	case LPFC_LINK_DOWN:
+ 	case LPFC_HBA_ERROR:
+ 		if (phba->hba_flag & LINK_DISABLED)
+-			len += snprintf(buf + len, PAGE_SIZE-len,
++			len += scnprintf(buf + len, PAGE_SIZE-len,
+ 				"Link Down - User disabled\n");
+ 		else
+-			len += snprintf(buf + len, PAGE_SIZE-len,
++			len += scnprintf(buf + len, PAGE_SIZE-len,
+ 				"Link Down\n");
+ 		break;
+ 	case LPFC_LINK_UP:
+ 	case LPFC_CLEAR_LA:
+ 	case LPFC_HBA_READY:
+-		len += snprintf(buf + len, PAGE_SIZE-len, "Link Up - ");
++		len += scnprintf(buf + len, PAGE_SIZE-len, "Link Up - ");
+ 
+ 		switch (vport->port_state) {
+ 		case LPFC_LOCAL_CFG_LINK:
+-			len += snprintf(buf + len, PAGE_SIZE-len,
++			len += scnprintf(buf + len, PAGE_SIZE-len,
+ 					"Configuring Link\n");
+ 			break;
+ 		case LPFC_FDISC:
+@@ -847,38 +849,40 @@ lpfc_link_state_show(struct device *dev, struct device_attribute *attr,
+ 		case LPFC_NS_QRY:
+ 		case LPFC_BUILD_DISC_LIST:
+ 		case LPFC_DISC_AUTH:
+-			len += snprintf(buf + len, PAGE_SIZE - len,
++			len += scnprintf(buf + len, PAGE_SIZE - len,
+ 					"Discovery\n");
+ 			break;
+ 		case LPFC_VPORT_READY:
+-			len += snprintf(buf + len, PAGE_SIZE - len, "Ready\n");
++			len += scnprintf(buf + len, PAGE_SIZE - len,
++					"Ready\n");
+ 			break;
+ 
+ 		case LPFC_VPORT_FAILED:
+-			len += snprintf(buf + len, PAGE_SIZE - len, "Failed\n");
++			len += scnprintf(buf + len, PAGE_SIZE - len,
++					"Failed\n");
+ 			break;
+ 
+ 		case LPFC_VPORT_UNKNOWN:
+-			len += snprintf(buf + len, PAGE_SIZE - len,
++			len += scnprintf(buf + len, PAGE_SIZE - len,
+ 					"Unknown\n");
+ 			break;
+ 		}
+ 		if (phba->sli.sli_flag & LPFC_MENLO_MAINT)
+-			len += snprintf(buf + len, PAGE_SIZE-len,
++			len += scnprintf(buf + len, PAGE_SIZE-len,
+ 					"   Menlo Maint Mode\n");
+ 		else if (phba->fc_topology == LPFC_TOPOLOGY_LOOP) {
+ 			if (vport->fc_flag & FC_PUBLIC_LOOP)
+-				len += snprintf(buf + len, PAGE_SIZE-len,
++				len += scnprintf(buf + len, PAGE_SIZE-len,
+ 						"   Public Loop\n");
+ 			else
+-				len += snprintf(buf + len, PAGE_SIZE-len,
++				len += scnprintf(buf + len, PAGE_SIZE-len,
+ 						"   Private Loop\n");
+ 		} else {
+ 			if (vport->fc_flag & FC_FABRIC)
+-				len += snprintf(buf + len, PAGE_SIZE-len,
++				len += scnprintf(buf + len, PAGE_SIZE-len,
+ 						"   Fabric\n");
+ 			else
+-				len += snprintf(buf + len, PAGE_SIZE-len,
++				len += scnprintf(buf + len, PAGE_SIZE-len,
+ 						"   Point-2-Point\n");
+ 		}
+ 	}
+@@ -890,28 +894,28 @@ lpfc_link_state_show(struct device *dev, struct device_attribute *attr,
+ 		struct lpfc_trunk_link link = phba->trunk_link;
+ 
+ 		if (bf_get(lpfc_conf_trunk_port0, &phba->sli4_hba))
+-			len += snprintf(buf + len, PAGE_SIZE - len,
++			len += scnprintf(buf + len, PAGE_SIZE - len,
+ 				"Trunk port 0: Link %s %s\n",
+ 				(link.link0.state == LPFC_LINK_UP) ?
+ 				 "Up" : "Down. ",
+ 				trunk_errmsg[link.link0.fault]);
+ 
+ 		if (bf_get(lpfc_conf_trunk_port1, &phba->sli4_hba))
+-			len += snprintf(buf + len, PAGE_SIZE - len,
++			len += scnprintf(buf + len, PAGE_SIZE - len,
+ 				"Trunk port 1: Link %s %s\n",
+ 				(link.link1.state == LPFC_LINK_UP) ?
+ 				 "Up" : "Down. ",
+ 				trunk_errmsg[link.link1.fault]);
+ 
+ 		if (bf_get(lpfc_conf_trunk_port2, &phba->sli4_hba))
+-			len += snprintf(buf + len, PAGE_SIZE - len,
++			len += scnprintf(buf + len, PAGE_SIZE - len,
+ 				"Trunk port 2: Link %s %s\n",
+ 				(link.link2.state == LPFC_LINK_UP) ?
+ 				 "Up" : "Down. ",
+ 				trunk_errmsg[link.link2.fault]);
+ 
+ 		if (bf_get(lpfc_conf_trunk_port3, &phba->sli4_hba))
+-			len += snprintf(buf + len, PAGE_SIZE - len,
++			len += scnprintf(buf + len, PAGE_SIZE - len,
+ 				"Trunk port 3: Link %s %s\n",
+ 				(link.link3.state == LPFC_LINK_UP) ?
+ 				 "Up" : "Down. ",
+@@ -939,15 +943,15 @@ lpfc_sli4_protocol_show(struct device *dev, struct device_attribute *attr,
+ 	struct lpfc_hba *phba = vport->phba;
+ 
+ 	if (phba->sli_rev < LPFC_SLI_REV4)
+-		return snprintf(buf, PAGE_SIZE, "fc\n");
++		return scnprintf(buf, PAGE_SIZE, "fc\n");
+ 
+ 	if (phba->sli4_hba.lnk_info.lnk_dv == LPFC_LNK_DAT_VAL) {
+ 		if (phba->sli4_hba.lnk_info.lnk_tp == LPFC_LNK_TYPE_GE)
+-			return snprintf(buf, PAGE_SIZE, "fcoe\n");
++			return scnprintf(buf, PAGE_SIZE, "fcoe\n");
+ 		if (phba->sli4_hba.lnk_info.lnk_tp == LPFC_LNK_TYPE_FC)
+-			return snprintf(buf, PAGE_SIZE, "fc\n");
++			return scnprintf(buf, PAGE_SIZE, "fc\n");
+ 	}
+-	return snprintf(buf, PAGE_SIZE, "unknown\n");
++	return scnprintf(buf, PAGE_SIZE, "unknown\n");
+ }
+ 
+ /**
+@@ -967,7 +971,7 @@ lpfc_oas_supported_show(struct device *dev, struct device_attribute *attr,
+ 	struct lpfc_vport *vport = (struct lpfc_vport *)shost->hostdata;
+ 	struct lpfc_hba *phba = vport->phba;
+ 
+-	return snprintf(buf, PAGE_SIZE, "%d\n",
++	return scnprintf(buf, PAGE_SIZE, "%d\n",
+ 			phba->sli4_hba.pc_sli4_params.oas_supported);
+ }
+ 
+@@ -1025,7 +1029,7 @@ lpfc_num_discovered_ports_show(struct device *dev,
+ 	struct Scsi_Host  *shost = class_to_shost(dev);
+ 	struct lpfc_vport *vport = (struct lpfc_vport *) shost->hostdata;
+ 
+-	return snprintf(buf, PAGE_SIZE, "%d\n",
++	return scnprintf(buf, PAGE_SIZE, "%d\n",
+ 			vport->fc_map_cnt + vport->fc_unmap_cnt);
+ }
+ 
+@@ -1539,7 +1543,7 @@ lpfc_nport_evt_cnt_show(struct device *dev, struct device_attribute *attr,
+ 	struct lpfc_vport *vport = (struct lpfc_vport *) shost->hostdata;
+ 	struct lpfc_hba   *phba = vport->phba;
+ 
+-	return snprintf(buf, PAGE_SIZE, "%d\n", phba->nport_event_cnt);
++	return scnprintf(buf, PAGE_SIZE, "%d\n", phba->nport_event_cnt);
+ }
+ 
+ int
+@@ -1628,7 +1632,7 @@ lpfc_board_mode_show(struct device *dev, struct device_attribute *attr,
+ 	else
+ 		state = "online";
+ 
+-	return snprintf(buf, PAGE_SIZE, "%s\n", state);
++	return scnprintf(buf, PAGE_SIZE, "%s\n", state);
+ }
+ 
+ /**
+@@ -1854,8 +1858,8 @@ lpfc_max_rpi_show(struct device *dev, struct device_attribute *attr,
+ 	uint32_t cnt;
+ 
+ 	if (lpfc_get_hba_info(phba, NULL, NULL, &cnt, NULL, NULL, NULL))
+-		return snprintf(buf, PAGE_SIZE, "%d\n", cnt);
+-	return snprintf(buf, PAGE_SIZE, "Unknown\n");
++		return scnprintf(buf, PAGE_SIZE, "%d\n", cnt);
++	return scnprintf(buf, PAGE_SIZE, "Unknown\n");
+ }
+ 
+ /**
+@@ -1882,8 +1886,8 @@ lpfc_used_rpi_show(struct device *dev, struct device_attribute *attr,
+ 	uint32_t cnt, acnt;
+ 
+ 	if (lpfc_get_hba_info(phba, NULL, NULL, &cnt, &acnt, NULL, NULL))
+-		return snprintf(buf, PAGE_SIZE, "%d\n", (cnt - acnt));
+-	return snprintf(buf, PAGE_SIZE, "Unknown\n");
++		return scnprintf(buf, PAGE_SIZE, "%d\n", (cnt - acnt));
++	return scnprintf(buf, PAGE_SIZE, "Unknown\n");
+ }
+ 
+ /**
+@@ -1910,8 +1914,8 @@ lpfc_max_xri_show(struct device *dev, struct device_attribute *attr,
+ 	uint32_t cnt;
+ 
+ 	if (lpfc_get_hba_info(phba, &cnt, NULL, NULL, NULL, NULL, NULL))
+-		return snprintf(buf, PAGE_SIZE, "%d\n", cnt);
+-	return snprintf(buf, PAGE_SIZE, "Unknown\n");
++		return scnprintf(buf, PAGE_SIZE, "%d\n", cnt);
++	return scnprintf(buf, PAGE_SIZE, "Unknown\n");
+ }
+ 
+ /**
+@@ -1938,8 +1942,8 @@ lpfc_used_xri_show(struct device *dev, struct device_attribute *attr,
+ 	uint32_t cnt, acnt;
+ 
+ 	if (lpfc_get_hba_info(phba, &cnt, &acnt, NULL, NULL, NULL, NULL))
+-		return snprintf(buf, PAGE_SIZE, "%d\n", (cnt - acnt));
+-	return snprintf(buf, PAGE_SIZE, "Unknown\n");
++		return scnprintf(buf, PAGE_SIZE, "%d\n", (cnt - acnt));
++	return scnprintf(buf, PAGE_SIZE, "Unknown\n");
+ }
+ 
+ /**
+@@ -1966,8 +1970,8 @@ lpfc_max_vpi_show(struct device *dev, struct device_attribute *attr,
+ 	uint32_t cnt;
+ 
+ 	if (lpfc_get_hba_info(phba, NULL, NULL, NULL, NULL, &cnt, NULL))
+-		return snprintf(buf, PAGE_SIZE, "%d\n", cnt);
+-	return snprintf(buf, PAGE_SIZE, "Unknown\n");
++		return scnprintf(buf, PAGE_SIZE, "%d\n", cnt);
++	return scnprintf(buf, PAGE_SIZE, "Unknown\n");
+ }
+ 
+ /**
+@@ -1994,8 +1998,8 @@ lpfc_used_vpi_show(struct device *dev, struct device_attribute *attr,
+ 	uint32_t cnt, acnt;
+ 
+ 	if (lpfc_get_hba_info(phba, NULL, NULL, NULL, NULL, &cnt, &acnt))
+-		return snprintf(buf, PAGE_SIZE, "%d\n", (cnt - acnt));
+-	return snprintf(buf, PAGE_SIZE, "Unknown\n");
++		return scnprintf(buf, PAGE_SIZE, "%d\n", (cnt - acnt));
++	return scnprintf(buf, PAGE_SIZE, "Unknown\n");
+ }
+ 
+ /**
+@@ -2020,10 +2024,10 @@ lpfc_npiv_info_show(struct device *dev, struct device_attribute *attr,
+ 	struct lpfc_hba   *phba = vport->phba;
+ 
+ 	if (!(phba->max_vpi))
+-		return snprintf(buf, PAGE_SIZE, "NPIV Not Supported\n");
++		return scnprintf(buf, PAGE_SIZE, "NPIV Not Supported\n");
+ 	if (vport->port_type == LPFC_PHYSICAL_PORT)
+-		return snprintf(buf, PAGE_SIZE, "NPIV Physical\n");
+-	return snprintf(buf, PAGE_SIZE, "NPIV Virtual (VPI %d)\n", vport->vpi);
++		return scnprintf(buf, PAGE_SIZE, "NPIV Physical\n");
++	return scnprintf(buf, PAGE_SIZE, "NPIV Virtual (VPI %d)\n", vport->vpi);
+ }
+ 
+ /**
+@@ -2045,7 +2049,7 @@ lpfc_poll_show(struct device *dev, struct device_attribute *attr,
+ 	struct lpfc_vport *vport = (struct lpfc_vport *) shost->hostdata;
+ 	struct lpfc_hba   *phba = vport->phba;
+ 
+-	return snprintf(buf, PAGE_SIZE, "%#x\n", phba->cfg_poll);
++	return scnprintf(buf, PAGE_SIZE, "%#x\n", phba->cfg_poll);
+ }
+ 
+ /**
+@@ -2149,7 +2153,7 @@ lpfc_fips_level_show(struct device *dev,  struct device_attribute *attr,
+ 	struct lpfc_vport *vport = (struct lpfc_vport *) shost->hostdata;
+ 	struct lpfc_hba   *phba = vport->phba;
+ 
+-	return snprintf(buf, PAGE_SIZE, "%d\n", phba->fips_level);
++	return scnprintf(buf, PAGE_SIZE, "%d\n", phba->fips_level);
+ }
+ 
+ /**
+@@ -2168,7 +2172,7 @@ lpfc_fips_rev_show(struct device *dev,  struct device_attribute *attr,
+ 	struct lpfc_vport *vport = (struct lpfc_vport *) shost->hostdata;
+ 	struct lpfc_hba   *phba = vport->phba;
+ 
+-	return snprintf(buf, PAGE_SIZE, "%d\n", phba->fips_spec_rev);
++	return scnprintf(buf, PAGE_SIZE, "%d\n", phba->fips_spec_rev);
+ }
+ 
+ /**
+@@ -2187,7 +2191,7 @@ lpfc_dss_show(struct device *dev, struct device_attribute *attr,
+ 	struct lpfc_vport *vport = (struct lpfc_vport *) shost->hostdata;
+ 	struct lpfc_hba   *phba = vport->phba;
+ 
+-	return snprintf(buf, PAGE_SIZE, "%s - %sOperational\n",
++	return scnprintf(buf, PAGE_SIZE, "%s - %sOperational\n",
+ 			(phba->cfg_enable_dss) ? "Enabled" : "Disabled",
+ 			(phba->sli3_options & LPFC_SLI3_DSS_ENABLED) ?
+ 				"" : "Not ");
+@@ -2216,7 +2220,7 @@ lpfc_sriov_hw_max_virtfn_show(struct device *dev,
+ 	uint16_t max_nr_virtfn;
+ 
+ 	max_nr_virtfn = lpfc_sli_sriov_nr_virtfn_get(phba);
+-	return snprintf(buf, PAGE_SIZE, "%d\n", max_nr_virtfn);
++	return scnprintf(buf, PAGE_SIZE, "%d\n", max_nr_virtfn);
+ }
+ 
+ static inline bool lpfc_rangecheck(uint val, uint min, uint max)
+@@ -2276,7 +2280,7 @@ lpfc_##attr##_show(struct device *dev, struct device_attribute *attr, \
+ 	struct Scsi_Host  *shost = class_to_shost(dev);\
+ 	struct lpfc_vport *vport = (struct lpfc_vport *) shost->hostdata;\
+ 	struct lpfc_hba   *phba = vport->phba;\
+-	return snprintf(buf, PAGE_SIZE, "%d\n",\
++	return scnprintf(buf, PAGE_SIZE, "%d\n",\
+ 			phba->cfg_##attr);\
+ }
+ 
+@@ -2304,7 +2308,7 @@ lpfc_##attr##_show(struct device *dev, struct device_attribute *attr, \
+ 	struct lpfc_hba   *phba = vport->phba;\
+ 	uint val = 0;\
+ 	val = phba->cfg_##attr;\
+-	return snprintf(buf, PAGE_SIZE, "%#x\n",\
++	return scnprintf(buf, PAGE_SIZE, "%#x\n",\
+ 			phba->cfg_##attr);\
+ }
+ 
+@@ -2440,7 +2444,7 @@ lpfc_##attr##_show(struct device *dev, struct device_attribute *attr, \
+ { \
+ 	struct Scsi_Host  *shost = class_to_shost(dev);\
+ 	struct lpfc_vport *vport = (struct lpfc_vport *) shost->hostdata;\
+-	return snprintf(buf, PAGE_SIZE, "%d\n", vport->cfg_##attr);\
++	return scnprintf(buf, PAGE_SIZE, "%d\n", vport->cfg_##attr);\
+ }
+ 
+ /**
+@@ -2465,7 +2469,7 @@ lpfc_##attr##_show(struct device *dev, struct device_attribute *attr, \
+ { \
+ 	struct Scsi_Host  *shost = class_to_shost(dev);\
+ 	struct lpfc_vport *vport = (struct lpfc_vport *) shost->hostdata;\
+-	return snprintf(buf, PAGE_SIZE, "%#x\n", vport->cfg_##attr);\
++	return scnprintf(buf, PAGE_SIZE, "%#x\n", vport->cfg_##attr);\
+ }
+ 
+ /**
+@@ -2736,7 +2740,7 @@ lpfc_soft_wwpn_show(struct device *dev, struct device_attribute *attr,
+ 	struct lpfc_vport *vport = (struct lpfc_vport *) shost->hostdata;
+ 	struct lpfc_hba   *phba = vport->phba;
+ 
+-	return snprintf(buf, PAGE_SIZE, "0x%llx\n",
++	return scnprintf(buf, PAGE_SIZE, "0x%llx\n",
+ 			(unsigned long long)phba->cfg_soft_wwpn);
+ }
+ 
+@@ -2833,7 +2837,7 @@ lpfc_soft_wwnn_show(struct device *dev, struct device_attribute *attr,
+ {
+ 	struct Scsi_Host *shost = class_to_shost(dev);
+ 	struct lpfc_hba *phba = ((struct lpfc_vport *)shost->hostdata)->phba;
+-	return snprintf(buf, PAGE_SIZE, "0x%llx\n",
++	return scnprintf(buf, PAGE_SIZE, "0x%llx\n",
+ 			(unsigned long long)phba->cfg_soft_wwnn);
+ }
+ 
+@@ -2899,7 +2903,7 @@ lpfc_oas_tgt_show(struct device *dev, struct device_attribute *attr,
+ 	struct Scsi_Host *shost = class_to_shost(dev);
+ 	struct lpfc_hba *phba = ((struct lpfc_vport *)shost->hostdata)->phba;
+ 
+-	return snprintf(buf, PAGE_SIZE, "0x%llx\n",
++	return scnprintf(buf, PAGE_SIZE, "0x%llx\n",
+ 			wwn_to_u64(phba->cfg_oas_tgt_wwpn));
+ }
+ 
+@@ -2967,7 +2971,7 @@ lpfc_oas_priority_show(struct device *dev, struct device_attribute *attr,
+ 	struct Scsi_Host *shost = class_to_shost(dev);
+ 	struct lpfc_hba *phba = ((struct lpfc_vport *)shost->hostdata)->phba;
+ 
+-	return snprintf(buf, PAGE_SIZE, "%d\n", phba->cfg_oas_priority);
++	return scnprintf(buf, PAGE_SIZE, "%d\n", phba->cfg_oas_priority);
+ }
+ 
+ /**
+@@ -3030,7 +3034,7 @@ lpfc_oas_vpt_show(struct device *dev, struct device_attribute *attr,
+ 	struct Scsi_Host *shost = class_to_shost(dev);
+ 	struct lpfc_hba *phba = ((struct lpfc_vport *)shost->hostdata)->phba;
+ 
+-	return snprintf(buf, PAGE_SIZE, "0x%llx\n",
++	return scnprintf(buf, PAGE_SIZE, "0x%llx\n",
+ 			wwn_to_u64(phba->cfg_oas_vpt_wwpn));
+ }
+ 
+@@ -3101,7 +3105,7 @@ lpfc_oas_lun_state_show(struct device *dev, struct device_attribute *attr,
+ 	struct Scsi_Host *shost = class_to_shost(dev);
+ 	struct lpfc_hba *phba = ((struct lpfc_vport *)shost->hostdata)->phba;
+ 
+-	return snprintf(buf, PAGE_SIZE, "%d\n", phba->cfg_oas_lun_state);
++	return scnprintf(buf, PAGE_SIZE, "%d\n", phba->cfg_oas_lun_state);
+ }
+ 
+ /**
+@@ -3165,7 +3169,7 @@ lpfc_oas_lun_status_show(struct device *dev, struct device_attribute *attr,
+ 	if (!(phba->cfg_oas_flags & OAS_LUN_VALID))
+ 		return -EFAULT;
+ 
+-	return snprintf(buf, PAGE_SIZE, "%d\n", phba->cfg_oas_lun_status);
++	return scnprintf(buf, PAGE_SIZE, "%d\n", phba->cfg_oas_lun_status);
+ }
+ static DEVICE_ATTR(lpfc_xlane_lun_status, S_IRUGO,
+ 		   lpfc_oas_lun_status_show, NULL);
+@@ -3317,7 +3321,7 @@ lpfc_oas_lun_show(struct device *dev, struct device_attribute *attr,
+ 	if (oas_lun != NOT_OAS_ENABLED_LUN)
+ 		phba->cfg_oas_flags |= OAS_LUN_VALID;
+ 
+-	len += snprintf(buf + len, PAGE_SIZE-len, "0x%llx", oas_lun);
++	len += scnprintf(buf + len, PAGE_SIZE-len, "0x%llx", oas_lun);
+ 
+ 	return len;
+ }
+@@ -3451,7 +3455,7 @@ lpfc_iocb_hw_show(struct device *dev, struct device_attribute *attr, char *buf)
+ 	struct Scsi_Host  *shost = class_to_shost(dev);
+ 	struct lpfc_hba   *phba = ((struct lpfc_vport *) shost->hostdata)->phba;
+ 
+-	return snprintf(buf, PAGE_SIZE, "%d\n", phba->iocb_max);
++	return scnprintf(buf, PAGE_SIZE, "%d\n", phba->iocb_max);
+ }
+ 
+ static DEVICE_ATTR(iocb_hw, S_IRUGO,
+@@ -3463,7 +3467,7 @@ lpfc_txq_hw_show(struct device *dev, struct device_attribute *attr, char *buf)
+ 	struct lpfc_hba   *phba = ((struct lpfc_vport *) shost->hostdata)->phba;
+ 	struct lpfc_sli_ring *pring = lpfc_phba_elsring(phba);
+ 
+-	return snprintf(buf, PAGE_SIZE, "%d\n",
++	return scnprintf(buf, PAGE_SIZE, "%d\n",
+ 			pring ? pring->txq_max : 0);
+ }
+ 
+@@ -3477,7 +3481,7 @@ lpfc_txcmplq_hw_show(struct device *dev, struct device_attribute *attr,
+ 	struct lpfc_hba   *phba = ((struct lpfc_vport *) shost->hostdata)->phba;
+ 	struct lpfc_sli_ring *pring = lpfc_phba_elsring(phba);
+ 
+-	return snprintf(buf, PAGE_SIZE, "%d\n",
++	return scnprintf(buf, PAGE_SIZE, "%d\n",
+ 			pring ? pring->txcmplq_max : 0);
+ }
+ 
+@@ -3513,7 +3517,7 @@ lpfc_nodev_tmo_show(struct device *dev, struct device_attribute *attr,
+ 	struct Scsi_Host  *shost = class_to_shost(dev);
+ 	struct lpfc_vport *vport = (struct lpfc_vport *) shost->hostdata;
+ 
+-	return snprintf(buf, PAGE_SIZE, "%d\n",	vport->cfg_devloss_tmo);
++	return scnprintf(buf, PAGE_SIZE, "%d\n",	vport->cfg_devloss_tmo);
+ }
+ 
+ /**
+@@ -5016,19 +5020,19 @@ lpfc_fcp_cpu_map_show(struct device *dev, struct device_attribute *attr,
+ 
+ 	switch (phba->cfg_fcp_cpu_map) {
+ 	case 0:
+-		len += snprintf(buf + len, PAGE_SIZE-len,
++		len += scnprintf(buf + len, PAGE_SIZE-len,
+ 				"fcp_cpu_map: No mapping (%d)\n",
+ 				phba->cfg_fcp_cpu_map);
+ 		return len;
+ 	case 1:
+-		len += snprintf(buf + len, PAGE_SIZE-len,
++		len += scnprintf(buf + len, PAGE_SIZE-len,
+ 				"fcp_cpu_map: HBA centric mapping (%d): "
+ 				"%d online CPUs\n",
+ 				phba->cfg_fcp_cpu_map,
+ 				phba->sli4_hba.num_online_cpu);
+ 		break;
+ 	case 2:
+-		len += snprintf(buf + len, PAGE_SIZE-len,
++		len += scnprintf(buf + len, PAGE_SIZE-len,
+ 				"fcp_cpu_map: Driver centric mapping (%d): "
+ 				"%d online CPUs\n",
+ 				phba->cfg_fcp_cpu_map,
+@@ -5041,14 +5045,14 @@ lpfc_fcp_cpu_map_show(struct device *dev, struct device_attribute *attr,
+ 
+ 		/* margin should fit in this and the truncated message */
+ 		if (cpup->irq == LPFC_VECTOR_MAP_EMPTY)
+-			len += snprintf(buf + len, PAGE_SIZE-len,
++			len += scnprintf(buf + len, PAGE_SIZE-len,
+ 					"CPU %02d io_chan %02d "
+ 					"physid %d coreid %d\n",
+ 					phba->sli4_hba.curr_disp_cpu,
+ 					cpup->channel_id, cpup->phys_id,
+ 					cpup->core_id);
+ 		else
+-			len += snprintf(buf + len, PAGE_SIZE-len,
++			len += scnprintf(buf + len, PAGE_SIZE-len,
+ 					"CPU %02d io_chan %02d "
+ 					"physid %d coreid %d IRQ %d\n",
+ 					phba->sli4_hba.curr_disp_cpu,
+@@ -5061,7 +5065,7 @@ lpfc_fcp_cpu_map_show(struct device *dev, struct device_attribute *attr,
+ 		if (phba->sli4_hba.curr_disp_cpu <
+ 				phba->sli4_hba.num_present_cpu &&
+ 				(len >= (PAGE_SIZE - 64))) {
+-			len += snprintf(buf + len, PAGE_SIZE-len, "more...\n");
++			len += scnprintf(buf + len, PAGE_SIZE-len, "more...\n");
+ 			break;
+ 		}
+ 	}
+@@ -5586,10 +5590,10 @@ lpfc_sg_seg_cnt_show(struct device *dev, struct device_attribute *attr,
+ 	struct lpfc_hba   *phba = vport->phba;
+ 	int len;
+ 
+-	len = snprintf(buf, PAGE_SIZE, "SGL sz: %d  total SGEs: %d\n",
++	len = scnprintf(buf, PAGE_SIZE, "SGL sz: %d  total SGEs: %d\n",
+ 		       phba->cfg_sg_dma_buf_size, phba->cfg_total_seg_cnt);
+ 
+-	len += snprintf(buf + len, PAGE_SIZE, "Cfg: %d  SCSI: %d  NVME: %d\n",
++	len += scnprintf(buf + len, PAGE_SIZE, "Cfg: %d  SCSI: %d  NVME: %d\n",
+ 			phba->cfg_sg_seg_cnt, phba->cfg_scsi_seg_cnt,
+ 			phba->cfg_nvme_seg_cnt);
+ 	return len;
+@@ -6586,7 +6590,7 @@ lpfc_show_rport_##field (struct device *dev,				\
+ {									\
+ 	struct fc_rport *rport = transport_class_to_rport(dev);		\
+ 	struct lpfc_rport_data *rdata = rport->hostdata;		\
+-	return snprintf(buf, sz, format_string,				\
++	return scnprintf(buf, sz, format_string,			\
+ 		(rdata->target) ? cast rdata->target->field : 0);	\
+ }
+ 
+diff --git a/drivers/scsi/lpfc/lpfc_ct.c b/drivers/scsi/lpfc/lpfc_ct.c
+index 552da8bf43e4..221f8fd87d24 100644
+--- a/drivers/scsi/lpfc/lpfc_ct.c
++++ b/drivers/scsi/lpfc/lpfc_ct.c
+@@ -1430,7 +1430,7 @@ lpfc_vport_symbolic_port_name(struct lpfc_vport *vport, char *symbol,
+ 	 * Name object.  NPIV is not in play so this integer
+ 	 * value is sufficient and unique per FC-ID.
+ 	 */
+-	n = snprintf(symbol, size, "%d", vport->phba->brd_no);
++	n = scnprintf(symbol, size, "%d", vport->phba->brd_no);
+ 	return n;
+ }
+ 
+@@ -1444,26 +1444,26 @@ lpfc_vport_symbolic_node_name(struct lpfc_vport *vport, char *symbol,
+ 
+ 	lpfc_decode_firmware_rev(vport->phba, fwrev, 0);
+ 
+-	n = snprintf(symbol, size, "Emulex %s", vport->phba->ModelName);
++	n = scnprintf(symbol, size, "Emulex %s", vport->phba->ModelName);
+ 	if (size < n)
+ 		return n;
+ 
+-	n += snprintf(symbol + n, size - n, " FV%s", fwrev);
++	n += scnprintf(symbol + n, size - n, " FV%s", fwrev);
+ 	if (size < n)
+ 		return n;
+ 
+-	n += snprintf(symbol + n, size - n, " DV%s.",
++	n += scnprintf(symbol + n, size - n, " DV%s.",
+ 		      lpfc_release_version);
+ 	if (size < n)
+ 		return n;
+ 
+-	n += snprintf(symbol + n, size - n, " HN:%s.",
++	n += scnprintf(symbol + n, size - n, " HN:%s.",
+ 		      init_utsname()->nodename);
+ 	if (size < n)
+ 		return n;
+ 
+ 	/* Note :- OS name is "Linux" */
+-	n += snprintf(symbol + n, size - n, " OS:%s\n",
++	n += scnprintf(symbol + n, size - n, " OS:%s\n",
+ 		      init_utsname()->sysname);
+ 	return n;
+ }
+diff --git a/drivers/scsi/lpfc/lpfc_debugfs.c b/drivers/scsi/lpfc/lpfc_debugfs.c
+index a58f0b3f03a9..361521dd5bd8 100644
+--- a/drivers/scsi/lpfc/lpfc_debugfs.c
++++ b/drivers/scsi/lpfc/lpfc_debugfs.c
+@@ -170,7 +170,7 @@ lpfc_debugfs_disc_trc_data(struct lpfc_vport *vport, char *buf, int size)
+ 		snprintf(buffer,
+ 			LPFC_DEBUG_TRC_ENTRY_SIZE, "%010d:%010d ms:%s\n",
+ 			dtp->seq_cnt, ms, dtp->fmt);
+-		len +=  snprintf(buf+len, size-len, buffer,
++		len +=  scnprintf(buf+len, size-len, buffer,
+ 			dtp->data1, dtp->data2, dtp->data3);
+ 	}
+ 	for (i = 0; i < index; i++) {
+@@ -181,7 +181,7 @@ lpfc_debugfs_disc_trc_data(struct lpfc_vport *vport, char *buf, int size)
+ 		snprintf(buffer,
+ 			LPFC_DEBUG_TRC_ENTRY_SIZE, "%010d:%010d ms:%s\n",
+ 			dtp->seq_cnt, ms, dtp->fmt);
+-		len +=  snprintf(buf+len, size-len, buffer,
++		len +=  scnprintf(buf+len, size-len, buffer,
+ 			dtp->data1, dtp->data2, dtp->data3);
+ 	}
+ 
+@@ -236,7 +236,7 @@ lpfc_debugfs_slow_ring_trc_data(struct lpfc_hba *phba, char *buf, int size)
+ 		snprintf(buffer,
+ 			LPFC_DEBUG_TRC_ENTRY_SIZE, "%010d:%010d ms:%s\n",
+ 			dtp->seq_cnt, ms, dtp->fmt);
+-		len +=  snprintf(buf+len, size-len, buffer,
++		len +=  scnprintf(buf+len, size-len, buffer,
+ 			dtp->data1, dtp->data2, dtp->data3);
+ 	}
+ 	for (i = 0; i < index; i++) {
+@@ -247,7 +247,7 @@ lpfc_debugfs_slow_ring_trc_data(struct lpfc_hba *phba, char *buf, int size)
+ 		snprintf(buffer,
+ 			LPFC_DEBUG_TRC_ENTRY_SIZE, "%010d:%010d ms:%s\n",
+ 			dtp->seq_cnt, ms, dtp->fmt);
+-		len +=  snprintf(buf+len, size-len, buffer,
++		len +=  scnprintf(buf+len, size-len, buffer,
+ 			dtp->data1, dtp->data2, dtp->data3);
+ 	}
+ 
+@@ -307,7 +307,7 @@ lpfc_debugfs_hbqinfo_data(struct lpfc_hba *phba, char *buf, int size)
+ 
+ 	i = lpfc_debugfs_last_hbq;
+ 
+-	len +=  snprintf(buf+len, size-len, "HBQ %d Info\n", i);
++	len +=  scnprintf(buf+len, size-len, "HBQ %d Info\n", i);
+ 
+ 	hbqs =  &phba->hbqs[i];
+ 	posted = 0;
+@@ -315,21 +315,21 @@ lpfc_debugfs_hbqinfo_data(struct lpfc_hba *phba, char *buf, int size)
+ 		posted++;
+ 
+ 	hip =  lpfc_hbq_defs[i];
+-	len +=  snprintf(buf+len, size-len,
++	len +=  scnprintf(buf+len, size-len,
+ 		"idx:%d prof:%d rn:%d bufcnt:%d icnt:%d acnt:%d posted %d\n",
+ 		hip->hbq_index, hip->profile, hip->rn,
+ 		hip->buffer_count, hip->init_count, hip->add_count, posted);
+ 
+ 	raw_index = phba->hbq_get[i];
+ 	getidx = le32_to_cpu(raw_index);
+-	len +=  snprintf(buf+len, size-len,
++	len +=  scnprintf(buf+len, size-len,
+ 		"entries:%d bufcnt:%d Put:%d nPut:%d localGet:%d hbaGet:%d\n",
+ 		hbqs->entry_count, hbqs->buffer_count, hbqs->hbqPutIdx,
+ 		hbqs->next_hbqPutIdx, hbqs->local_hbqGetIdx, getidx);
+ 
+ 	hbqe = (struct lpfc_hbq_entry *) phba->hbqs[i].hbq_virt;
+ 	for (j=0; j<hbqs->entry_count; j++) {
+-		len +=  snprintf(buf+len, size-len,
++		len +=  scnprintf(buf+len, size-len,
+ 			"%03d: %08x %04x %05x ", j,
+ 			le32_to_cpu(hbqe->bde.addrLow),
+ 			le32_to_cpu(hbqe->bde.tus.w),
+@@ -341,14 +341,16 @@ lpfc_debugfs_hbqinfo_data(struct lpfc_hba *phba, char *buf, int size)
+ 		low = hbqs->hbqPutIdx - posted;
+ 		if (low >= 0) {
+ 			if ((j >= hbqs->hbqPutIdx) || (j < low)) {
+-				len +=  snprintf(buf+len, size-len, "Unused\n");
++				len +=  scnprintf(buf + len, size - len,
++						"Unused\n");
+ 				goto skipit;
+ 			}
+ 		}
+ 		else {
+ 			if ((j >= hbqs->hbqPutIdx) &&
+ 				(j < (hbqs->entry_count+low))) {
+-				len +=  snprintf(buf+len, size-len, "Unused\n");
++				len +=  scnprintf(buf + len, size - len,
++						"Unused\n");
+ 				goto skipit;
+ 			}
+ 		}
+@@ -358,7 +360,7 @@ lpfc_debugfs_hbqinfo_data(struct lpfc_hba *phba, char *buf, int size)
+ 			hbq_buf = container_of(d_buf, struct hbq_dmabuf, dbuf);
+ 			phys = ((uint64_t)hbq_buf->dbuf.phys & 0xffffffff);
+ 			if (phys == le32_to_cpu(hbqe->bde.addrLow)) {
+-				len +=  snprintf(buf+len, size-len,
++				len +=  scnprintf(buf+len, size-len,
+ 					"Buf%d: %p %06x\n", i,
+ 					hbq_buf->dbuf.virt, hbq_buf->tag);
+ 				found = 1;
+@@ -367,7 +369,7 @@ lpfc_debugfs_hbqinfo_data(struct lpfc_hba *phba, char *buf, int size)
+ 			i++;
+ 		}
+ 		if (!found) {
+-			len +=  snprintf(buf+len, size-len, "No DMAinfo?\n");
++			len +=  scnprintf(buf+len, size-len, "No DMAinfo?\n");
+ 		}
+ skipit:
+ 		hbqe++;
+@@ -413,7 +415,7 @@ lpfc_debugfs_dumpHBASlim_data(struct lpfc_hba *phba, char *buf, int size)
+ 	off = 0;
+ 	spin_lock_irq(&phba->hbalock);
+ 
+-	len +=  snprintf(buf+len, size-len, "HBA SLIM\n");
++	len +=  scnprintf(buf+len, size-len, "HBA SLIM\n");
+ 	lpfc_memcpy_from_slim(buffer,
+ 		phba->MBslimaddr + lpfc_debugfs_last_hba_slim_off, 1024);
+ 
+@@ -427,7 +429,7 @@ lpfc_debugfs_dumpHBASlim_data(struct lpfc_hba *phba, char *buf, int size)
+ 
+ 	i = 1024;
+ 	while (i > 0) {
+-		len +=  snprintf(buf+len, size-len,
++		len +=  scnprintf(buf+len, size-len,
+ 		"%08x: %08x %08x %08x %08x %08x %08x %08x %08x\n",
+ 		off, *ptr, *(ptr+1), *(ptr+2), *(ptr+3), *(ptr+4),
+ 		*(ptr+5), *(ptr+6), *(ptr+7));
+@@ -471,11 +473,11 @@ lpfc_debugfs_dumpHostSlim_data(struct lpfc_hba *phba, char *buf, int size)
+ 	off = 0;
+ 	spin_lock_irq(&phba->hbalock);
+ 
+-	len +=  snprintf(buf+len, size-len, "SLIM Mailbox\n");
++	len +=  scnprintf(buf+len, size-len, "SLIM Mailbox\n");
+ 	ptr = (uint32_t *)phba->slim2p.virt;
+ 	i = sizeof(MAILBOX_t);
+ 	while (i > 0) {
+-		len +=  snprintf(buf+len, size-len,
++		len +=  scnprintf(buf+len, size-len,
+ 		"%08x: %08x %08x %08x %08x %08x %08x %08x %08x\n",
+ 		off, *ptr, *(ptr+1), *(ptr+2), *(ptr+3), *(ptr+4),
+ 		*(ptr+5), *(ptr+6), *(ptr+7));
+@@ -484,11 +486,11 @@ lpfc_debugfs_dumpHostSlim_data(struct lpfc_hba *phba, char *buf, int size)
+ 		off += (8 * sizeof(uint32_t));
+ 	}
+ 
+-	len +=  snprintf(buf+len, size-len, "SLIM PCB\n");
++	len +=  scnprintf(buf+len, size-len, "SLIM PCB\n");
+ 	ptr = (uint32_t *)phba->pcb;
+ 	i = sizeof(PCB_t);
+ 	while (i > 0) {
+-		len +=  snprintf(buf+len, size-len,
++		len +=  scnprintf(buf+len, size-len,
+ 		"%08x: %08x %08x %08x %08x %08x %08x %08x %08x\n",
+ 		off, *ptr, *(ptr+1), *(ptr+2), *(ptr+3), *(ptr+4),
+ 		*(ptr+5), *(ptr+6), *(ptr+7));
+@@ -501,7 +503,7 @@ lpfc_debugfs_dumpHostSlim_data(struct lpfc_hba *phba, char *buf, int size)
+ 		for (i = 0; i < 4; i++) {
+ 			pgpp = &phba->port_gp[i];
+ 			pring = &psli->sli3_ring[i];
+-			len +=  snprintf(buf+len, size-len,
++			len +=  scnprintf(buf+len, size-len,
+ 					 "Ring %d: CMD GetInx:%d "
+ 					 "(Max:%d Next:%d "
+ 					 "Local:%d flg:x%x)  "
+@@ -518,7 +520,7 @@ lpfc_debugfs_dumpHostSlim_data(struct lpfc_hba *phba, char *buf, int size)
+ 		word1 = readl(phba->CAregaddr);
+ 		word2 = readl(phba->HSregaddr);
+ 		word3 = readl(phba->HCregaddr);
+-		len +=  snprintf(buf+len, size-len, "HA:%08x CA:%08x HS:%08x "
++		len +=  scnprintf(buf+len, size-len, "HA:%08x CA:%08x HS:%08x "
+ 				 "HC:%08x\n", word0, word1, word2, word3);
+ 	}
+ 	spin_unlock_irq(&phba->hbalock);
+@@ -556,12 +558,12 @@ lpfc_debugfs_nodelist_data(struct lpfc_vport *vport, char *buf, int size)
+ 	cnt = (LPFC_NODELIST_SIZE / LPFC_NODELIST_ENTRY_SIZE);
+ 	outio = 0;
+ 
+-	len += snprintf(buf+len, size-len, "\nFCP Nodelist Entries ...\n");
++	len += scnprintf(buf+len, size-len, "\nFCP Nodelist Entries ...\n");
+ 	spin_lock_irq(shost->host_lock);
+ 	list_for_each_entry(ndlp, &vport->fc_nodes, nlp_listp) {
+ 		iocnt = 0;
+ 		if (!cnt) {
+-			len +=  snprintf(buf+len, size-len,
++			len +=  scnprintf(buf+len, size-len,
+ 				"Missing Nodelist Entries\n");
+ 			break;
+ 		}
+@@ -599,63 +601,63 @@ lpfc_debugfs_nodelist_data(struct lpfc_vport *vport, char *buf, int size)
+ 		default:
+ 			statep = "UNKNOWN";
+ 		}
+-		len += snprintf(buf+len, size-len, "%s DID:x%06x ",
++		len += scnprintf(buf+len, size-len, "%s DID:x%06x ",
+ 				statep, ndlp->nlp_DID);
+-		len += snprintf(buf+len, size-len,
++		len += scnprintf(buf+len, size-len,
+ 				"WWPN x%llx ",
+ 				wwn_to_u64(ndlp->nlp_portname.u.wwn));
+-		len += snprintf(buf+len, size-len,
++		len += scnprintf(buf+len, size-len,
+ 				"WWNN x%llx ",
+ 				wwn_to_u64(ndlp->nlp_nodename.u.wwn));
+ 		if (ndlp->nlp_flag & NLP_RPI_REGISTERED)
+-			len += snprintf(buf+len, size-len, "RPI:%03d ",
++			len += scnprintf(buf+len, size-len, "RPI:%03d ",
+ 					ndlp->nlp_rpi);
+ 		else
+-			len += snprintf(buf+len, size-len, "RPI:none ");
+-		len +=  snprintf(buf+len, size-len, "flag:x%08x ",
++			len += scnprintf(buf+len, size-len, "RPI:none ");
++		len +=  scnprintf(buf+len, size-len, "flag:x%08x ",
+ 			ndlp->nlp_flag);
+ 		if (!ndlp->nlp_type)
+-			len += snprintf(buf+len, size-len, "UNKNOWN_TYPE ");
++			len += scnprintf(buf+len, size-len, "UNKNOWN_TYPE ");
+ 		if (ndlp->nlp_type & NLP_FC_NODE)
+-			len += snprintf(buf+len, size-len, "FC_NODE ");
++			len += scnprintf(buf+len, size-len, "FC_NODE ");
+ 		if (ndlp->nlp_type & NLP_FABRIC) {
+-			len += snprintf(buf+len, size-len, "FABRIC ");
++			len += scnprintf(buf+len, size-len, "FABRIC ");
+ 			iocnt = 0;
+ 		}
+ 		if (ndlp->nlp_type & NLP_FCP_TARGET)
+-			len += snprintf(buf+len, size-len, "FCP_TGT sid:%d ",
++			len += scnprintf(buf+len, size-len, "FCP_TGT sid:%d ",
+ 				ndlp->nlp_sid);
+ 		if (ndlp->nlp_type & NLP_FCP_INITIATOR)
+-			len += snprintf(buf+len, size-len, "FCP_INITIATOR ");
++			len += scnprintf(buf+len, size-len, "FCP_INITIATOR ");
+ 		if (ndlp->nlp_type & NLP_NVME_TARGET)
+-			len += snprintf(buf + len,
++			len += scnprintf(buf + len,
+ 					size - len, "NVME_TGT sid:%d ",
+ 					NLP_NO_SID);
+ 		if (ndlp->nlp_type & NLP_NVME_INITIATOR)
+-			len += snprintf(buf + len,
++			len += scnprintf(buf + len,
+ 					size - len, "NVME_INITIATOR ");
+-		len += snprintf(buf+len, size-len, "usgmap:%x ",
++		len += scnprintf(buf+len, size-len, "usgmap:%x ",
+ 			ndlp->nlp_usg_map);
+-		len += snprintf(buf+len, size-len, "refcnt:%x",
++		len += scnprintf(buf+len, size-len, "refcnt:%x",
+ 			kref_read(&ndlp->kref));
+ 		if (iocnt) {
+ 			i = atomic_read(&ndlp->cmd_pending);
+-			len += snprintf(buf + len, size - len,
++			len += scnprintf(buf + len, size - len,
+ 					" OutIO:x%x Qdepth x%x",
+ 					i, ndlp->cmd_qdepth);
+ 			outio += i;
+ 		}
+-		len += snprintf(buf + len, size - len, "defer:%x ",
++		len += scnprintf(buf + len, size - len, "defer:%x ",
+ 			ndlp->nlp_defer_did);
+-		len +=  snprintf(buf+len, size-len, "\n");
++		len +=  scnprintf(buf+len, size-len, "\n");
+ 	}
+ 	spin_unlock_irq(shost->host_lock);
+ 
+-	len += snprintf(buf + len, size - len,
++	len += scnprintf(buf + len, size - len,
+ 			"\nOutstanding IO x%x\n",  outio);
+ 
+ 	if (phba->nvmet_support && phba->targetport && (vport == phba->pport)) {
+-		len += snprintf(buf + len, size - len,
++		len += scnprintf(buf + len, size - len,
+ 				"\nNVME Targetport Entry ...\n");
+ 
+ 		/* Port state is only one of two values for now. */
+@@ -663,18 +665,18 @@ lpfc_debugfs_nodelist_data(struct lpfc_vport *vport, char *buf, int size)
+ 			statep = "REGISTERED";
+ 		else
+ 			statep = "INIT";
+-		len += snprintf(buf + len, size - len,
++		len += scnprintf(buf + len, size - len,
+ 				"TGT WWNN x%llx WWPN x%llx State %s\n",
+ 				wwn_to_u64(vport->fc_nodename.u.wwn),
+ 				wwn_to_u64(vport->fc_portname.u.wwn),
+ 				statep);
+-		len += snprintf(buf + len, size - len,
++		len += scnprintf(buf + len, size - len,
+ 				"    Targetport DID x%06x\n",
+ 				phba->targetport->port_id);
+ 		goto out_exit;
+ 	}
+ 
+-	len += snprintf(buf + len, size - len,
++	len += scnprintf(buf + len, size - len,
+ 				"\nNVME Lport/Rport Entries ...\n");
+ 
+ 	localport = vport->localport;
+@@ -689,11 +691,11 @@ lpfc_debugfs_nodelist_data(struct lpfc_vport *vport, char *buf, int size)
+ 	else
+ 		statep = "UNKNOWN ";
+ 
+-	len += snprintf(buf + len, size - len,
++	len += scnprintf(buf + len, size - len,
+ 			"Lport DID x%06x PortState %s\n",
+ 			localport->port_id, statep);
+ 
+-	len += snprintf(buf + len, size - len, "\tRport List:\n");
++	len += scnprintf(buf + len, size - len, "\tRport List:\n");
+ 	list_for_each_entry(ndlp, &vport->fc_nodes, nlp_listp) {
+ 		/* local short-hand pointer. */
+ 		spin_lock(&phba->hbalock);
+@@ -720,32 +722,32 @@ lpfc_debugfs_nodelist_data(struct lpfc_vport *vport, char *buf, int size)
+ 		}
+ 
+ 		/* Tab in to show lport ownership. */
+-		len += snprintf(buf + len, size - len,
++		len += scnprintf(buf + len, size - len,
+ 				"\t%s Port ID:x%06x ",
+ 				statep, nrport->port_id);
+-		len += snprintf(buf + len, size - len, "WWPN x%llx ",
++		len += scnprintf(buf + len, size - len, "WWPN x%llx ",
+ 				nrport->port_name);
+-		len += snprintf(buf + len, size - len, "WWNN x%llx ",
++		len += scnprintf(buf + len, size - len, "WWNN x%llx ",
+ 				nrport->node_name);
+ 
+ 		/* An NVME rport can have multiple roles. */
+ 		if (nrport->port_role & FC_PORT_ROLE_NVME_INITIATOR)
+-			len +=  snprintf(buf + len, size - len,
++			len +=  scnprintf(buf + len, size - len,
+ 					 "INITIATOR ");
+ 		if (nrport->port_role & FC_PORT_ROLE_NVME_TARGET)
+-			len +=  snprintf(buf + len, size - len,
++			len +=  scnprintf(buf + len, size - len,
+ 					 "TARGET ");
+ 		if (nrport->port_role & FC_PORT_ROLE_NVME_DISCOVERY)
+-			len +=  snprintf(buf + len, size - len,
++			len +=  scnprintf(buf + len, size - len,
+ 					 "DISCSRVC ");
+ 		if (nrport->port_role & ~(FC_PORT_ROLE_NVME_INITIATOR |
+ 					  FC_PORT_ROLE_NVME_TARGET |
+ 					  FC_PORT_ROLE_NVME_DISCOVERY))
+-			len +=  snprintf(buf + len, size - len,
++			len +=  scnprintf(buf + len, size - len,
+ 					 "UNKNOWN ROLE x%x",
+ 					 nrport->port_role);
+ 		/* Terminate the string. */
+-		len +=  snprintf(buf + len, size - len, "\n");
++		len +=  scnprintf(buf + len, size - len, "\n");
+ 	}
+ 
+ 	spin_unlock_irq(shost->host_lock);
+@@ -784,35 +786,35 @@ lpfc_debugfs_nvmestat_data(struct lpfc_vport *vport, char *buf, int size)
+ 		if (!phba->targetport)
+ 			return len;
+ 		tgtp = (struct lpfc_nvmet_tgtport *)phba->targetport->private;
+-		len += snprintf(buf + len, size - len,
++		len += scnprintf(buf + len, size - len,
+ 				"\nNVME Targetport Statistics\n");
+ 
+-		len += snprintf(buf + len, size - len,
++		len += scnprintf(buf + len, size - len,
+ 				"LS: Rcv %08x Drop %08x Abort %08x\n",
+ 				atomic_read(&tgtp->rcv_ls_req_in),
+ 				atomic_read(&tgtp->rcv_ls_req_drop),
+ 				atomic_read(&tgtp->xmt_ls_abort));
+ 		if (atomic_read(&tgtp->rcv_ls_req_in) !=
+ 		    atomic_read(&tgtp->rcv_ls_req_out)) {
+-			len += snprintf(buf + len, size - len,
++			len += scnprintf(buf + len, size - len,
+ 					"Rcv LS: in %08x != out %08x\n",
+ 					atomic_read(&tgtp->rcv_ls_req_in),
+ 					atomic_read(&tgtp->rcv_ls_req_out));
+ 		}
+ 
+-		len += snprintf(buf + len, size - len,
++		len += scnprintf(buf + len, size - len,
+ 				"LS: Xmt %08x Drop %08x Cmpl %08x\n",
+ 				atomic_read(&tgtp->xmt_ls_rsp),
+ 				atomic_read(&tgtp->xmt_ls_drop),
+ 				atomic_read(&tgtp->xmt_ls_rsp_cmpl));
+ 
+-		len += snprintf(buf + len, size - len,
++		len += scnprintf(buf + len, size - len,
+ 				"LS: RSP Abort %08x xb %08x Err %08x\n",
+ 				atomic_read(&tgtp->xmt_ls_rsp_aborted),
+ 				atomic_read(&tgtp->xmt_ls_rsp_xb_set),
+ 				atomic_read(&tgtp->xmt_ls_rsp_error));
+ 
+-		len += snprintf(buf + len, size - len,
++		len += scnprintf(buf + len, size - len,
+ 				"FCP: Rcv %08x Defer %08x Release %08x "
+ 				"Drop %08x\n",
+ 				atomic_read(&tgtp->rcv_fcp_cmd_in),
+@@ -822,13 +824,13 @@ lpfc_debugfs_nvmestat_data(struct lpfc_vport *vport, char *buf, int size)
+ 
+ 		if (atomic_read(&tgtp->rcv_fcp_cmd_in) !=
+ 		    atomic_read(&tgtp->rcv_fcp_cmd_out)) {
+-			len += snprintf(buf + len, size - len,
++			len += scnprintf(buf + len, size - len,
+ 					"Rcv FCP: in %08x != out %08x\n",
+ 					atomic_read(&tgtp->rcv_fcp_cmd_in),
+ 					atomic_read(&tgtp->rcv_fcp_cmd_out));
+ 		}
+ 
+-		len += snprintf(buf + len, size - len,
++		len += scnprintf(buf + len, size - len,
+ 				"FCP Rsp: read %08x readrsp %08x "
+ 				"write %08x rsp %08x\n",
+ 				atomic_read(&tgtp->xmt_fcp_read),
+@@ -836,31 +838,31 @@ lpfc_debugfs_nvmestat_data(struct lpfc_vport *vport, char *buf, int size)
+ 				atomic_read(&tgtp->xmt_fcp_write),
+ 				atomic_read(&tgtp->xmt_fcp_rsp));
+ 
+-		len += snprintf(buf + len, size - len,
++		len += scnprintf(buf + len, size - len,
+ 				"FCP Rsp Cmpl: %08x err %08x drop %08x\n",
+ 				atomic_read(&tgtp->xmt_fcp_rsp_cmpl),
+ 				atomic_read(&tgtp->xmt_fcp_rsp_error),
+ 				atomic_read(&tgtp->xmt_fcp_rsp_drop));
+ 
+-		len += snprintf(buf + len, size - len,
++		len += scnprintf(buf + len, size - len,
+ 				"FCP Rsp Abort: %08x xb %08x xricqe  %08x\n",
+ 				atomic_read(&tgtp->xmt_fcp_rsp_aborted),
+ 				atomic_read(&tgtp->xmt_fcp_rsp_xb_set),
+ 				atomic_read(&tgtp->xmt_fcp_xri_abort_cqe));
+ 
+-		len += snprintf(buf + len, size - len,
++		len += scnprintf(buf + len, size - len,
+ 				"ABORT: Xmt %08x Cmpl %08x\n",
+ 				atomic_read(&tgtp->xmt_fcp_abort),
+ 				atomic_read(&tgtp->xmt_fcp_abort_cmpl));
+ 
+-		len += snprintf(buf + len, size - len,
++		len += scnprintf(buf + len, size - len,
+ 				"ABORT: Sol %08x  Usol %08x Err %08x Cmpl %08x",
+ 				atomic_read(&tgtp->xmt_abort_sol),
+ 				atomic_read(&tgtp->xmt_abort_unsol),
+ 				atomic_read(&tgtp->xmt_abort_rsp),
+ 				atomic_read(&tgtp->xmt_abort_rsp_error));
+ 
+-		len +=  snprintf(buf + len, size - len, "\n");
++		len +=  scnprintf(buf + len, size - len, "\n");
+ 
+ 		cnt = 0;
+ 		spin_lock(&phba->sli4_hba.abts_nvme_buf_list_lock);
+@@ -871,7 +873,7 @@ lpfc_debugfs_nvmestat_data(struct lpfc_vport *vport, char *buf, int size)
+ 		}
+ 		spin_unlock(&phba->sli4_hba.abts_nvme_buf_list_lock);
+ 		if (cnt) {
+-			len += snprintf(buf + len, size - len,
++			len += scnprintf(buf + len, size - len,
+ 					"ABORT: %d ctx entries\n", cnt);
+ 			spin_lock(&phba->sli4_hba.abts_nvme_buf_list_lock);
+ 			list_for_each_entry_safe(ctxp, next_ctxp,
+@@ -879,7 +881,7 @@ lpfc_debugfs_nvmestat_data(struct lpfc_vport *vport, char *buf, int size)
+ 				    list) {
+ 				if (len >= (size - LPFC_DEBUG_OUT_LINE_SZ))
+ 					break;
+-				len += snprintf(buf + len, size - len,
++				len += scnprintf(buf + len, size - len,
+ 						"Entry: oxid %x state %x "
+ 						"flag %x\n",
+ 						ctxp->oxid, ctxp->state,
+@@ -893,7 +895,7 @@ lpfc_debugfs_nvmestat_data(struct lpfc_vport *vport, char *buf, int size)
+ 		tot += atomic_read(&tgtp->xmt_fcp_release);
+ 		tot = atomic_read(&tgtp->rcv_fcp_cmd_in) - tot;
+ 
+-		len += snprintf(buf + len, size - len,
++		len += scnprintf(buf + len, size - len,
+ 				"IO_CTX: %08x  WAIT: cur %08x tot %08x\n"
+ 				"CTX Outstanding %08llx\n",
+ 				phba->sli4_hba.nvmet_xri_cnt,
+@@ -911,10 +913,10 @@ lpfc_debugfs_nvmestat_data(struct lpfc_vport *vport, char *buf, int size)
+ 		if (!lport)
+ 			return len;
+ 
+-		len += snprintf(buf + len, size - len,
++		len += scnprintf(buf + len, size - len,
+ 				"\nNVME Lport Statistics\n");
+ 
+-		len += snprintf(buf + len, size - len,
++		len += scnprintf(buf + len, size - len,
+ 				"LS: Xmt %016x Cmpl %016x\n",
+ 				atomic_read(&lport->fc4NvmeLsRequests),
+ 				atomic_read(&lport->fc4NvmeLsCmpls));
+@@ -938,20 +940,20 @@ lpfc_debugfs_nvmestat_data(struct lpfc_vport *vport, char *buf, int size)
+ 			if (i >= 32)
+ 				continue;
+ 
+-			len += snprintf(buf + len, PAGE_SIZE - len,
++			len += scnprintf(buf + len, PAGE_SIZE - len,
+ 					"FCP (%d): Rd %016llx Wr %016llx "
+ 					"IO %016llx ",
+ 					i, data1, data2, data3);
+-			len += snprintf(buf + len, PAGE_SIZE - len,
++			len += scnprintf(buf + len, PAGE_SIZE - len,
+ 					"Cmpl %016llx OutIO %016llx\n",
+ 					tot, ((data1 + data2 + data3) - tot));
+ 		}
+-		len += snprintf(buf + len, PAGE_SIZE - len,
++		len += scnprintf(buf + len, PAGE_SIZE - len,
+ 				"Total FCP Cmpl %016llx Issue %016llx "
+ 				"OutIO %016llx\n",
+ 				totin, totout, totout - totin);
+ 
+-		len += snprintf(buf + len, size - len,
++		len += scnprintf(buf + len, size - len,
+ 				"LS Xmt Err: Abrt %08x Err %08x  "
+ 				"Cmpl Err: xb %08x Err %08x\n",
+ 				atomic_read(&lport->xmt_ls_abort),
+@@ -959,7 +961,7 @@ lpfc_debugfs_nvmestat_data(struct lpfc_vport *vport, char *buf, int size)
+ 				atomic_read(&lport->cmpl_ls_xb),
+ 				atomic_read(&lport->cmpl_ls_err));
+ 
+-		len += snprintf(buf + len, size - len,
++		len += scnprintf(buf + len, size - len,
+ 				"FCP Xmt Err: noxri %06x nondlp %06x "
+ 				"qdepth %06x wqerr %06x err %06x Abrt %06x\n",
+ 				atomic_read(&lport->xmt_fcp_noxri),
+@@ -969,7 +971,7 @@ lpfc_debugfs_nvmestat_data(struct lpfc_vport *vport, char *buf, int size)
+ 				atomic_read(&lport->xmt_fcp_err),
+ 				atomic_read(&lport->xmt_fcp_abort));
+ 
+-		len += snprintf(buf + len, size - len,
++		len += scnprintf(buf + len, size - len,
+ 				"FCP Cmpl Err: xb %08x Err %08x\n",
+ 				atomic_read(&lport->cmpl_fcp_xb),
+ 				atomic_read(&lport->cmpl_fcp_err));
+@@ -1001,58 +1003,58 @@ lpfc_debugfs_nvmektime_data(struct lpfc_vport *vport, char *buf, int size)
+ 
+ 	if (phba->nvmet_support == 0) {
+ 		/* NVME Initiator */
+-		len += snprintf(buf + len, PAGE_SIZE - len,
++		len += scnprintf(buf + len, PAGE_SIZE - len,
+ 				"ktime %s: Total Samples: %lld\n",
+ 				(phba->ktime_on ?  "Enabled" : "Disabled"),
+ 				phba->ktime_data_samples);
+ 		if (phba->ktime_data_samples == 0)
+ 			return len;
+ 
+-		len += snprintf(
++		len += scnprintf(
+ 			buf + len, PAGE_SIZE - len,
+ 			"Segment 1: Last NVME Cmd cmpl "
+ 			"done -to- Start of next NVME cnd (in driver)\n");
+-		len += snprintf(
++		len += scnprintf(
+ 			buf + len, PAGE_SIZE - len,
+ 			"avg:%08lld min:%08lld max %08lld\n",
+ 			div_u64(phba->ktime_seg1_total,
+ 				phba->ktime_data_samples),
+ 			phba->ktime_seg1_min,
+ 			phba->ktime_seg1_max);
+-		len += snprintf(
++		len += scnprintf(
+ 			buf + len, PAGE_SIZE - len,
+ 			"Segment 2: Driver start of NVME cmd "
+ 			"-to- Firmware WQ doorbell\n");
+-		len += snprintf(
++		len += scnprintf(
+ 			buf + len, PAGE_SIZE - len,
+ 			"avg:%08lld min:%08lld max %08lld\n",
+ 			div_u64(phba->ktime_seg2_total,
+ 				phba->ktime_data_samples),
+ 			phba->ktime_seg2_min,
+ 			phba->ktime_seg2_max);
+-		len += snprintf(
++		len += scnprintf(
+ 			buf + len, PAGE_SIZE - len,
+ 			"Segment 3: Firmware WQ doorbell -to- "
+ 			"MSI-X ISR cmpl\n");
+-		len += snprintf(
++		len += scnprintf(
+ 			buf + len, PAGE_SIZE - len,
+ 			"avg:%08lld min:%08lld max %08lld\n",
+ 			div_u64(phba->ktime_seg3_total,
+ 				phba->ktime_data_samples),
+ 			phba->ktime_seg3_min,
+ 			phba->ktime_seg3_max);
+-		len += snprintf(
++		len += scnprintf(
+ 			buf + len, PAGE_SIZE - len,
+ 			"Segment 4: MSI-X ISR cmpl -to- "
+ 			"NVME cmpl done\n");
+-		len += snprintf(
++		len += scnprintf(
+ 			buf + len, PAGE_SIZE - len,
+ 			"avg:%08lld min:%08lld max %08lld\n",
+ 			div_u64(phba->ktime_seg4_total,
+ 				phba->ktime_data_samples),
+ 			phba->ktime_seg4_min,
+ 			phba->ktime_seg4_max);
+-		len += snprintf(
++		len += scnprintf(
+ 			buf + len, PAGE_SIZE - len,
+ 			"Total IO avg time: %08lld\n",
+ 			div_u64(phba->ktime_seg1_total +
+@@ -1064,7 +1066,7 @@ lpfc_debugfs_nvmektime_data(struct lpfc_vport *vport, char *buf, int size)
+ 	}
+ 
+ 	/* NVME Target */
+-	len += snprintf(buf + len, PAGE_SIZE-len,
++	len += scnprintf(buf + len, PAGE_SIZE-len,
+ 			"ktime %s: Total Samples: %lld %lld\n",
+ 			(phba->ktime_on ? "Enabled" : "Disabled"),
+ 			phba->ktime_data_samples,
+@@ -1072,46 +1074,46 @@ lpfc_debugfs_nvmektime_data(struct lpfc_vport *vport, char *buf, int size)
+ 	if (phba->ktime_data_samples == 0)
+ 		return len;
+ 
+-	len += snprintf(buf + len, PAGE_SIZE-len,
++	len += scnprintf(buf + len, PAGE_SIZE-len,
+ 			"Segment 1: MSI-X ISR Rcv cmd -to- "
+ 			"cmd pass to NVME Layer\n");
+-	len += snprintf(buf + len, PAGE_SIZE-len,
++	len += scnprintf(buf + len, PAGE_SIZE-len,
+ 			"avg:%08lld min:%08lld max %08lld\n",
+ 			div_u64(phba->ktime_seg1_total,
+ 				phba->ktime_data_samples),
+ 			phba->ktime_seg1_min,
+ 			phba->ktime_seg1_max);
+-	len += snprintf(buf + len, PAGE_SIZE-len,
++	len += scnprintf(buf + len, PAGE_SIZE-len,
+ 			"Segment 2: cmd pass to NVME Layer- "
+ 			"-to- Driver rcv cmd OP (action)\n");
+-	len += snprintf(buf + len, PAGE_SIZE-len,
++	len += scnprintf(buf + len, PAGE_SIZE-len,
+ 			"avg:%08lld min:%08lld max %08lld\n",
+ 			div_u64(phba->ktime_seg2_total,
+ 				phba->ktime_data_samples),
+ 			phba->ktime_seg2_min,
+ 			phba->ktime_seg2_max);
+-	len += snprintf(buf + len, PAGE_SIZE-len,
++	len += scnprintf(buf + len, PAGE_SIZE-len,
+ 			"Segment 3: Driver rcv cmd OP -to- "
+ 			"Firmware WQ doorbell: cmd\n");
+-	len += snprintf(buf + len, PAGE_SIZE-len,
++	len += scnprintf(buf + len, PAGE_SIZE-len,
+ 			"avg:%08lld min:%08lld max %08lld\n",
+ 			div_u64(phba->ktime_seg3_total,
+ 				phba->ktime_data_samples),
+ 			phba->ktime_seg3_min,
+ 			phba->ktime_seg3_max);
+-	len += snprintf(buf + len, PAGE_SIZE-len,
++	len += scnprintf(buf + len, PAGE_SIZE-len,
+ 			"Segment 4: Firmware WQ doorbell: cmd "
+ 			"-to- MSI-X ISR for cmd cmpl\n");
+-	len += snprintf(buf + len, PAGE_SIZE-len,
++	len += scnprintf(buf + len, PAGE_SIZE-len,
+ 			"avg:%08lld min:%08lld max %08lld\n",
+ 			div_u64(phba->ktime_seg4_total,
+ 				phba->ktime_data_samples),
+ 			phba->ktime_seg4_min,
+ 			phba->ktime_seg4_max);
+-	len += snprintf(buf + len, PAGE_SIZE-len,
++	len += scnprintf(buf + len, PAGE_SIZE-len,
+ 			"Segment 5: MSI-X ISR for cmd cmpl "
+ 			"-to- NVME layer passed cmd done\n");
+-	len += snprintf(buf + len, PAGE_SIZE-len,
++	len += scnprintf(buf + len, PAGE_SIZE-len,
+ 			"avg:%08lld min:%08lld max %08lld\n",
+ 			div_u64(phba->ktime_seg5_total,
+ 				phba->ktime_data_samples),
+@@ -1119,10 +1121,10 @@ lpfc_debugfs_nvmektime_data(struct lpfc_vport *vport, char *buf, int size)
+ 			phba->ktime_seg5_max);
+ 
+ 	if (phba->ktime_status_samples == 0) {
+-		len += snprintf(buf + len, PAGE_SIZE-len,
++		len += scnprintf(buf + len, PAGE_SIZE-len,
+ 				"Total: cmd received by MSI-X ISR "
+ 				"-to- cmd completed on wire\n");
+-		len += snprintf(buf + len, PAGE_SIZE-len,
++		len += scnprintf(buf + len, PAGE_SIZE-len,
+ 				"avg:%08lld min:%08lld "
+ 				"max %08lld\n",
+ 				div_u64(phba->ktime_seg10_total,
+@@ -1132,46 +1134,46 @@ lpfc_debugfs_nvmektime_data(struct lpfc_vport *vport, char *buf, int size)
+ 		return len;
+ 	}
+ 
+-	len += snprintf(buf + len, PAGE_SIZE-len,
++	len += scnprintf(buf + len, PAGE_SIZE-len,
+ 			"Segment 6: NVME layer passed cmd done "
+ 			"-to- Driver rcv rsp status OP\n");
+-	len += snprintf(buf + len, PAGE_SIZE-len,
++	len += scnprintf(buf + len, PAGE_SIZE-len,
+ 			"avg:%08lld min:%08lld max %08lld\n",
+ 			div_u64(phba->ktime_seg6_total,
+ 				phba->ktime_status_samples),
+ 			phba->ktime_seg6_min,
+ 			phba->ktime_seg6_max);
+-	len += snprintf(buf + len, PAGE_SIZE-len,
++	len += scnprintf(buf + len, PAGE_SIZE-len,
+ 			"Segment 7: Driver rcv rsp status OP "
+ 			"-to- Firmware WQ doorbell: status\n");
+-	len += snprintf(buf + len, PAGE_SIZE-len,
++	len += scnprintf(buf + len, PAGE_SIZE-len,
+ 			"avg:%08lld min:%08lld max %08lld\n",
+ 			div_u64(phba->ktime_seg7_total,
+ 				phba->ktime_status_samples),
+ 			phba->ktime_seg7_min,
+ 			phba->ktime_seg7_max);
+-	len += snprintf(buf + len, PAGE_SIZE-len,
++	len += scnprintf(buf + len, PAGE_SIZE-len,
+ 			"Segment 8: Firmware WQ doorbell: status"
+ 			" -to- MSI-X ISR for status cmpl\n");
+-	len += snprintf(buf + len, PAGE_SIZE-len,
++	len += scnprintf(buf + len, PAGE_SIZE-len,
+ 			"avg:%08lld min:%08lld max %08lld\n",
+ 			div_u64(phba->ktime_seg8_total,
+ 				phba->ktime_status_samples),
+ 			phba->ktime_seg8_min,
+ 			phba->ktime_seg8_max);
+-	len += snprintf(buf + len, PAGE_SIZE-len,
++	len += scnprintf(buf + len, PAGE_SIZE-len,
+ 			"Segment 9: MSI-X ISR for status cmpl  "
+ 			"-to- NVME layer passed status done\n");
+-	len += snprintf(buf + len, PAGE_SIZE-len,
++	len += scnprintf(buf + len, PAGE_SIZE-len,
+ 			"avg:%08lld min:%08lld max %08lld\n",
+ 			div_u64(phba->ktime_seg9_total,
+ 				phba->ktime_status_samples),
+ 			phba->ktime_seg9_min,
+ 			phba->ktime_seg9_max);
+-	len += snprintf(buf + len, PAGE_SIZE-len,
++	len += scnprintf(buf + len, PAGE_SIZE-len,
+ 			"Total: cmd received by MSI-X ISR -to- "
+ 			"cmd completed on wire\n");
+-	len += snprintf(buf + len, PAGE_SIZE-len,
++	len += scnprintf(buf + len, PAGE_SIZE-len,
+ 			"avg:%08lld min:%08lld max %08lld\n",
+ 			div_u64(phba->ktime_seg10_total,
+ 				phba->ktime_status_samples),
+@@ -1206,7 +1208,7 @@ lpfc_debugfs_nvmeio_trc_data(struct lpfc_hba *phba, char *buf, int size)
+ 		(phba->nvmeio_trc_size - 1);
+ 	skip = phba->nvmeio_trc_output_idx;
+ 
+-	len += snprintf(buf + len, size - len,
++	len += scnprintf(buf + len, size - len,
+ 			"%s IO Trace %s: next_idx %d skip %d size %d\n",
+ 			(phba->nvmet_support ? "NVME" : "NVMET"),
+ 			(state ? "Enabled" : "Disabled"),
+@@ -1228,18 +1230,18 @@ lpfc_debugfs_nvmeio_trc_data(struct lpfc_hba *phba, char *buf, int size)
+ 		if (!dtp->fmt)
+ 			continue;
+ 
+-		len +=  snprintf(buf + len, size - len, dtp->fmt,
++		len +=  scnprintf(buf + len, size - len, dtp->fmt,
+ 			dtp->data1, dtp->data2, dtp->data3);
+ 
+ 		if (phba->nvmeio_trc_output_idx >= phba->nvmeio_trc_size) {
+ 			phba->nvmeio_trc_output_idx = 0;
+-			len += snprintf(buf + len, size - len,
++			len += scnprintf(buf + len, size - len,
+ 					"Trace Complete\n");
+ 			goto out;
+ 		}
+ 
+ 		if (len >= (size - LPFC_DEBUG_OUT_LINE_SZ)) {
+-			len += snprintf(buf + len, size - len,
++			len += scnprintf(buf + len, size - len,
+ 					"Trace Continue (%d of %d)\n",
+ 					phba->nvmeio_trc_output_idx,
+ 					phba->nvmeio_trc_size);
+@@ -1257,18 +1259,18 @@ lpfc_debugfs_nvmeio_trc_data(struct lpfc_hba *phba, char *buf, int size)
+ 		if (!dtp->fmt)
+ 			continue;
+ 
+-		len +=  snprintf(buf + len, size - len, dtp->fmt,
++		len +=  scnprintf(buf + len, size - len, dtp->fmt,
+ 			dtp->data1, dtp->data2, dtp->data3);
+ 
+ 		if (phba->nvmeio_trc_output_idx >= phba->nvmeio_trc_size) {
+ 			phba->nvmeio_trc_output_idx = 0;
+-			len += snprintf(buf + len, size - len,
++			len += scnprintf(buf + len, size - len,
+ 					"Trace Complete\n");
+ 			goto out;
+ 		}
+ 
+ 		if (len >= (size - LPFC_DEBUG_OUT_LINE_SZ)) {
+-			len += snprintf(buf + len, size - len,
++			len += scnprintf(buf + len, size - len,
+ 					"Trace Continue (%d of %d)\n",
+ 					phba->nvmeio_trc_output_idx,
+ 					phba->nvmeio_trc_size);
+@@ -1276,7 +1278,7 @@ lpfc_debugfs_nvmeio_trc_data(struct lpfc_hba *phba, char *buf, int size)
+ 		}
+ 	}
+ 
+-	len += snprintf(buf + len, size - len,
++	len += scnprintf(buf + len, size - len,
+ 			"Trace Done\n");
+ out:
+ 	return len;
+@@ -1308,39 +1310,39 @@ lpfc_debugfs_cpucheck_data(struct lpfc_vport *vport, char *buf, int size)
+ 
+ 	if (phba->nvmet_support == 0) {
+ 		/* NVME Initiator */
+-		len += snprintf(buf + len, PAGE_SIZE - len,
++		len += scnprintf(buf + len, PAGE_SIZE - len,
+ 				"CPUcheck %s\n",
+ 				(phba->cpucheck_on & LPFC_CHECK_NVME_IO ?
+ 					"Enabled" : "Disabled"));
+ 		for (i = 0; i < phba->sli4_hba.num_present_cpu; i++) {
+ 			if (i >= LPFC_CHECK_CPU_CNT)
+ 				break;
+-			len += snprintf(buf + len, PAGE_SIZE - len,
++			len += scnprintf(buf + len, PAGE_SIZE - len,
+ 					"%02d: xmit x%08x cmpl x%08x\n",
+ 					i, phba->cpucheck_xmt_io[i],
+ 					phba->cpucheck_cmpl_io[i]);
+ 			tot_xmt += phba->cpucheck_xmt_io[i];
+ 			tot_cmpl += phba->cpucheck_cmpl_io[i];
+ 		}
+-		len += snprintf(buf + len, PAGE_SIZE - len,
++		len += scnprintf(buf + len, PAGE_SIZE - len,
+ 				"tot:xmit x%08x cmpl x%08x\n",
+ 				tot_xmt, tot_cmpl);
+ 		return len;
+ 	}
+ 
+ 	/* NVME Target */
+-	len += snprintf(buf + len, PAGE_SIZE - len,
++	len += scnprintf(buf + len, PAGE_SIZE - len,
+ 			"CPUcheck %s ",
+ 			(phba->cpucheck_on & LPFC_CHECK_NVMET_IO ?
+ 				"IO Enabled - " : "IO Disabled - "));
+-	len += snprintf(buf + len, PAGE_SIZE - len,
++	len += scnprintf(buf + len, PAGE_SIZE - len,
+ 			"%s\n",
+ 			(phba->cpucheck_on & LPFC_CHECK_NVMET_RCV ?
+ 				"Rcv Enabled\n" : "Rcv Disabled\n"));
+ 	for (i = 0; i < phba->sli4_hba.num_present_cpu; i++) {
+ 		if (i >= LPFC_CHECK_CPU_CNT)
+ 			break;
+-		len += snprintf(buf + len, PAGE_SIZE - len,
++		len += scnprintf(buf + len, PAGE_SIZE - len,
+ 				"%02d: xmit x%08x ccmpl x%08x "
+ 				"cmpl x%08x rcv x%08x\n",
+ 				i, phba->cpucheck_xmt_io[i],
+@@ -1352,7 +1354,7 @@ lpfc_debugfs_cpucheck_data(struct lpfc_vport *vport, char *buf, int size)
+ 		tot_cmpl += phba->cpucheck_cmpl_io[i];
+ 		tot_ccmpl += phba->cpucheck_ccmpl_io[i];
+ 	}
+-	len += snprintf(buf + len, PAGE_SIZE - len,
++	len += scnprintf(buf + len, PAGE_SIZE - len,
+ 			"tot:xmit x%08x ccmpl x%08x cmpl x%08x rcv x%08x\n",
+ 			tot_xmt, tot_ccmpl, tot_cmpl, tot_rcv);
+ 	return len;
+@@ -1797,28 +1799,29 @@ lpfc_debugfs_dif_err_read(struct file *file, char __user *buf,
+ 	int cnt = 0;
+ 
+ 	if (dent == phba->debug_writeGuard)
+-		cnt = snprintf(cbuf, 32, "%u\n", phba->lpfc_injerr_wgrd_cnt);
++		cnt = scnprintf(cbuf, 32, "%u\n", phba->lpfc_injerr_wgrd_cnt);
+ 	else if (dent == phba->debug_writeApp)
+-		cnt = snprintf(cbuf, 32, "%u\n", phba->lpfc_injerr_wapp_cnt);
++		cnt = scnprintf(cbuf, 32, "%u\n", phba->lpfc_injerr_wapp_cnt);
+ 	else if (dent == phba->debug_writeRef)
+-		cnt = snprintf(cbuf, 32, "%u\n", phba->lpfc_injerr_wref_cnt);
++		cnt = scnprintf(cbuf, 32, "%u\n", phba->lpfc_injerr_wref_cnt);
+ 	else if (dent == phba->debug_readGuard)
+-		cnt = snprintf(cbuf, 32, "%u\n", phba->lpfc_injerr_rgrd_cnt);
++		cnt = scnprintf(cbuf, 32, "%u\n", phba->lpfc_injerr_rgrd_cnt);
+ 	else if (dent == phba->debug_readApp)
+-		cnt = snprintf(cbuf, 32, "%u\n", phba->lpfc_injerr_rapp_cnt);
++		cnt = scnprintf(cbuf, 32, "%u\n", phba->lpfc_injerr_rapp_cnt);
+ 	else if (dent == phba->debug_readRef)
+-		cnt = snprintf(cbuf, 32, "%u\n", phba->lpfc_injerr_rref_cnt);
++		cnt = scnprintf(cbuf, 32, "%u\n", phba->lpfc_injerr_rref_cnt);
+ 	else if (dent == phba->debug_InjErrNPortID)
+-		cnt = snprintf(cbuf, 32, "0x%06x\n", phba->lpfc_injerr_nportid);
++		cnt = scnprintf(cbuf, 32, "0x%06x\n",
++				phba->lpfc_injerr_nportid);
+ 	else if (dent == phba->debug_InjErrWWPN) {
+ 		memcpy(&tmp, &phba->lpfc_injerr_wwpn, sizeof(struct lpfc_name));
+ 		tmp = cpu_to_be64(tmp);
+-		cnt = snprintf(cbuf, 32, "0x%016llx\n", tmp);
++		cnt = scnprintf(cbuf, 32, "0x%016llx\n", tmp);
+ 	} else if (dent == phba->debug_InjErrLBA) {
+ 		if (phba->lpfc_injerr_lba == (sector_t)(-1))
+-			cnt = snprintf(cbuf, 32, "off\n");
++			cnt = scnprintf(cbuf, 32, "off\n");
+ 		else
+-			cnt = snprintf(cbuf, 32, "0x%llx\n",
++			cnt = scnprintf(cbuf, 32, "0x%llx\n",
+ 				 (uint64_t) phba->lpfc_injerr_lba);
+ 	} else
+ 		lpfc_printf_log(phba, KERN_ERR, LOG_INIT,
+@@ -2624,17 +2627,17 @@ lpfc_idiag_pcicfg_read(struct file *file, char __user *buf, size_t nbytes,
+ 	switch (count) {
+ 	case SIZE_U8: /* byte (8 bits) */
+ 		pci_read_config_byte(pdev, where, &u8val);
+-		len += snprintf(pbuffer+len, LPFC_PCI_CFG_SIZE-len,
++		len += scnprintf(pbuffer+len, LPFC_PCI_CFG_SIZE-len,
+ 				"%03x: %02x\n", where, u8val);
+ 		break;
+ 	case SIZE_U16: /* word (16 bits) */
+ 		pci_read_config_word(pdev, where, &u16val);
+-		len += snprintf(pbuffer+len, LPFC_PCI_CFG_SIZE-len,
++		len += scnprintf(pbuffer+len, LPFC_PCI_CFG_SIZE-len,
+ 				"%03x: %04x\n", where, u16val);
+ 		break;
+ 	case SIZE_U32: /* double word (32 bits) */
+ 		pci_read_config_dword(pdev, where, &u32val);
+-		len += snprintf(pbuffer+len, LPFC_PCI_CFG_SIZE-len,
++		len += scnprintf(pbuffer+len, LPFC_PCI_CFG_SIZE-len,
+ 				"%03x: %08x\n", where, u32val);
+ 		break;
+ 	case LPFC_PCI_CFG_BROWSE: /* browse all */
+@@ -2654,25 +2657,25 @@ lpfc_idiag_pcicfg_read(struct file *file, char __user *buf, size_t nbytes,
+ 	offset = offset_label;
+ 
+ 	/* Read PCI config space */
+-	len += snprintf(pbuffer+len, LPFC_PCI_CFG_SIZE-len,
++	len += scnprintf(pbuffer+len, LPFC_PCI_CFG_SIZE-len,
+ 			"%03x: ", offset_label);
+ 	while (index > 0) {
+ 		pci_read_config_dword(pdev, offset, &u32val);
+-		len += snprintf(pbuffer+len, LPFC_PCI_CFG_SIZE-len,
++		len += scnprintf(pbuffer+len, LPFC_PCI_CFG_SIZE-len,
+ 				"%08x ", u32val);
+ 		offset += sizeof(uint32_t);
+ 		if (offset >= LPFC_PCI_CFG_SIZE) {
+-			len += snprintf(pbuffer+len,
++			len += scnprintf(pbuffer+len,
+ 					LPFC_PCI_CFG_SIZE-len, "\n");
+ 			break;
+ 		}
+ 		index -= sizeof(uint32_t);
+ 		if (!index)
+-			len += snprintf(pbuffer+len, LPFC_PCI_CFG_SIZE-len,
++			len += scnprintf(pbuffer+len, LPFC_PCI_CFG_SIZE-len,
+ 					"\n");
+ 		else if (!(index % (8 * sizeof(uint32_t)))) {
+ 			offset_label += (8 * sizeof(uint32_t));
+-			len += snprintf(pbuffer+len, LPFC_PCI_CFG_SIZE-len,
++			len += scnprintf(pbuffer+len, LPFC_PCI_CFG_SIZE-len,
+ 					"\n%03x: ", offset_label);
+ 		}
+ 	}
+@@ -2943,7 +2946,7 @@ lpfc_idiag_baracc_read(struct file *file, char __user *buf, size_t nbytes,
+ 	if (acc_range == SINGLE_WORD) {
+ 		offset_run = offset;
+ 		u32val = readl(mem_mapped_bar + offset_run);
+-		len += snprintf(pbuffer+len, LPFC_PCI_BAR_RD_BUF_SIZE-len,
++		len += scnprintf(pbuffer+len, LPFC_PCI_BAR_RD_BUF_SIZE-len,
+ 				"%05x: %08x\n", offset_run, u32val);
+ 	} else
+ 		goto baracc_browse;
+@@ -2957,35 +2960,35 @@ lpfc_idiag_baracc_read(struct file *file, char __user *buf, size_t nbytes,
+ 	offset_run = offset_label;
+ 
+ 	/* Read PCI bar memory mapped space */
+-	len += snprintf(pbuffer+len, LPFC_PCI_BAR_RD_BUF_SIZE-len,
++	len += scnprintf(pbuffer+len, LPFC_PCI_BAR_RD_BUF_SIZE-len,
+ 			"%05x: ", offset_label);
+ 	index = LPFC_PCI_BAR_RD_SIZE;
+ 	while (index > 0) {
+ 		u32val = readl(mem_mapped_bar + offset_run);
+-		len += snprintf(pbuffer+len, LPFC_PCI_BAR_RD_BUF_SIZE-len,
++		len += scnprintf(pbuffer+len, LPFC_PCI_BAR_RD_BUF_SIZE-len,
+ 				"%08x ", u32val);
+ 		offset_run += sizeof(uint32_t);
+ 		if (acc_range == LPFC_PCI_BAR_BROWSE) {
+ 			if (offset_run >= bar_size) {
+-				len += snprintf(pbuffer+len,
++				len += scnprintf(pbuffer+len,
+ 					LPFC_PCI_BAR_RD_BUF_SIZE-len, "\n");
+ 				break;
+ 			}
+ 		} else {
+ 			if (offset_run >= offset +
+ 			    (acc_range * sizeof(uint32_t))) {
+-				len += snprintf(pbuffer+len,
++				len += scnprintf(pbuffer+len,
+ 					LPFC_PCI_BAR_RD_BUF_SIZE-len, "\n");
+ 				break;
+ 			}
+ 		}
+ 		index -= sizeof(uint32_t);
+ 		if (!index)
+-			len += snprintf(pbuffer+len,
++			len += scnprintf(pbuffer+len,
+ 					LPFC_PCI_BAR_RD_BUF_SIZE-len, "\n");
+ 		else if (!(index % (8 * sizeof(uint32_t)))) {
+ 			offset_label += (8 * sizeof(uint32_t));
+-			len += snprintf(pbuffer+len,
++			len += scnprintf(pbuffer+len,
+ 					LPFC_PCI_BAR_RD_BUF_SIZE-len,
+ 					"\n%05x: ", offset_label);
+ 		}
+@@ -3158,19 +3161,19 @@ __lpfc_idiag_print_wq(struct lpfc_queue *qp, char *wqtype,
+ 	if (!qp)
+ 		return len;
+ 
+-	len += snprintf(pbuffer + len, LPFC_QUE_INFO_GET_BUF_SIZE - len,
++	len += scnprintf(pbuffer + len, LPFC_QUE_INFO_GET_BUF_SIZE - len,
+ 			"\t\t%s WQ info: ", wqtype);
+-	len += snprintf(pbuffer + len, LPFC_QUE_INFO_GET_BUF_SIZE - len,
++	len += scnprintf(pbuffer + len, LPFC_QUE_INFO_GET_BUF_SIZE - len,
+ 			"AssocCQID[%04d]: WQ-STAT[oflow:x%x posted:x%llx]\n",
+ 			qp->assoc_qid, qp->q_cnt_1,
+ 			(unsigned long long)qp->q_cnt_4);
+-	len += snprintf(pbuffer + len, LPFC_QUE_INFO_GET_BUF_SIZE - len,
++	len += scnprintf(pbuffer + len, LPFC_QUE_INFO_GET_BUF_SIZE - len,
+ 			"\t\tWQID[%02d], QE-CNT[%04d], QE-SZ[%04d], "
+ 			"HST-IDX[%04d], PRT-IDX[%04d], PST[%03d]",
+ 			qp->queue_id, qp->entry_count,
+ 			qp->entry_size, qp->host_index,
+ 			qp->hba_index, qp->entry_repost);
+-	len +=  snprintf(pbuffer + len,
++	len +=  scnprintf(pbuffer + len,
+ 			LPFC_QUE_INFO_GET_BUF_SIZE - len, "\n");
+ 	return len;
+ }
+@@ -3208,21 +3211,21 @@ __lpfc_idiag_print_cq(struct lpfc_queue *qp, char *cqtype,
+ 	if (!qp)
+ 		return len;
+ 
+-	len += snprintf(pbuffer + len, LPFC_QUE_INFO_GET_BUF_SIZE - len,
++	len += scnprintf(pbuffer + len, LPFC_QUE_INFO_GET_BUF_SIZE - len,
+ 			"\t%s CQ info: ", cqtype);
+-	len += snprintf(pbuffer + len, LPFC_QUE_INFO_GET_BUF_SIZE - len,
++	len += scnprintf(pbuffer + len, LPFC_QUE_INFO_GET_BUF_SIZE - len,
+ 			"AssocEQID[%02d]: CQ STAT[max:x%x relw:x%x "
+ 			"xabt:x%x wq:x%llx]\n",
+ 			qp->assoc_qid, qp->q_cnt_1, qp->q_cnt_2,
+ 			qp->q_cnt_3, (unsigned long long)qp->q_cnt_4);
+-	len += snprintf(pbuffer + len, LPFC_QUE_INFO_GET_BUF_SIZE - len,
++	len += scnprintf(pbuffer + len, LPFC_QUE_INFO_GET_BUF_SIZE - len,
+ 			"\tCQID[%02d], QE-CNT[%04d], QE-SZ[%04d], "
+ 			"HST-IDX[%04d], PRT-IDX[%04d], PST[%03d]",
+ 			qp->queue_id, qp->entry_count,
+ 			qp->entry_size, qp->host_index,
+ 			qp->hba_index, qp->entry_repost);
+ 
+-	len +=  snprintf(pbuffer + len, LPFC_QUE_INFO_GET_BUF_SIZE - len, "\n");
++	len +=  scnprintf(pbuffer + len, LPFC_QUE_INFO_GET_BUF_SIZE - len, "\n");
+ 
+ 	return len;
+ }
+@@ -3234,19 +3237,19 @@ __lpfc_idiag_print_rqpair(struct lpfc_queue *qp, struct lpfc_queue *datqp,
+ 	if (!qp || !datqp)
+ 		return len;
+ 
+-	len += snprintf(pbuffer + len, LPFC_QUE_INFO_GET_BUF_SIZE - len,
++	len += scnprintf(pbuffer + len, LPFC_QUE_INFO_GET_BUF_SIZE - len,
+ 			"\t\t%s RQ info: ", rqtype);
+-	len += snprintf(pbuffer + len, LPFC_QUE_INFO_GET_BUF_SIZE - len,
++	len += scnprintf(pbuffer + len, LPFC_QUE_INFO_GET_BUF_SIZE - len,
+ 			"AssocCQID[%02d]: RQ-STAT[nopost:x%x nobuf:x%x "
+ 			"posted:x%x rcv:x%llx]\n",
+ 			qp->assoc_qid, qp->q_cnt_1, qp->q_cnt_2,
+ 			qp->q_cnt_3, (unsigned long long)qp->q_cnt_4);
+-	len += snprintf(pbuffer + len, LPFC_QUE_INFO_GET_BUF_SIZE - len,
++	len += scnprintf(pbuffer + len, LPFC_QUE_INFO_GET_BUF_SIZE - len,
+ 			"\t\tHQID[%02d], QE-CNT[%04d], QE-SZ[%04d], "
+ 			"HST-IDX[%04d], PRT-IDX[%04d], PST[%03d]\n",
+ 			qp->queue_id, qp->entry_count, qp->entry_size,
+ 			qp->host_index, qp->hba_index, qp->entry_repost);
+-	len += snprintf(pbuffer + len, LPFC_QUE_INFO_GET_BUF_SIZE - len,
++	len += scnprintf(pbuffer + len, LPFC_QUE_INFO_GET_BUF_SIZE - len,
+ 			"\t\tDQID[%02d], QE-CNT[%04d], QE-SZ[%04d], "
+ 			"HST-IDX[%04d], PRT-IDX[%04d], PST[%03d]\n",
+ 			datqp->queue_id, datqp->entry_count,
+@@ -3331,17 +3334,17 @@ __lpfc_idiag_print_eq(struct lpfc_queue *qp, char *eqtype,
+ 	if (!qp)
+ 		return len;
+ 
+-	len += snprintf(pbuffer + len, LPFC_QUE_INFO_GET_BUF_SIZE - len,
++	len += scnprintf(pbuffer + len, LPFC_QUE_INFO_GET_BUF_SIZE - len,
+ 			"\n%s EQ info: EQ-STAT[max:x%x noE:x%x "
+ 			"cqe_proc:x%x eqe_proc:x%llx eqd %d]\n",
+ 			eqtype, qp->q_cnt_1, qp->q_cnt_2, qp->q_cnt_3,
+ 			(unsigned long long)qp->q_cnt_4, qp->q_mode);
+-	len += snprintf(pbuffer + len, LPFC_QUE_INFO_GET_BUF_SIZE - len,
++	len += scnprintf(pbuffer + len, LPFC_QUE_INFO_GET_BUF_SIZE - len,
+ 			"EQID[%02d], QE-CNT[%04d], QE-SZ[%04d], "
+ 			"HST-IDX[%04d], PRT-IDX[%04d], PST[%03d]",
+ 			qp->queue_id, qp->entry_count, qp->entry_size,
+ 			qp->host_index, qp->hba_index, qp->entry_repost);
+-	len +=  snprintf(pbuffer + len, LPFC_QUE_INFO_GET_BUF_SIZE - len, "\n");
++	len +=  scnprintf(pbuffer + len, LPFC_QUE_INFO_GET_BUF_SIZE - len, "\n");
+ 
+ 	return len;
+ }
+@@ -3399,7 +3402,7 @@ lpfc_idiag_queinfo_read(struct file *file, char __user *buf, size_t nbytes,
+ 			if (phba->cfg_fof == 0)
+ 				phba->lpfc_idiag_last_eq = 0;
+ 
+-		len += snprintf(pbuffer + len, LPFC_QUE_INFO_GET_BUF_SIZE - len,
++		len += scnprintf(pbuffer + len, LPFC_QUE_INFO_GET_BUF_SIZE - len,
+ 					"EQ %d out of %d HBA EQs\n",
+ 					x, phba->io_channel_irqs);
+ 
+@@ -3512,7 +3515,7 @@ lpfc_idiag_queinfo_read(struct file *file, char __user *buf, size_t nbytes,
+ 	return simple_read_from_buffer(buf, nbytes, ppos, pbuffer, len);
+ 
+ too_big:
+-	len +=  snprintf(pbuffer + len,
++	len +=  scnprintf(pbuffer + len,
+ 		LPFC_QUE_INFO_GET_BUF_SIZE - len, "Truncated ...\n");
+ out:
+ 	spin_unlock_irq(&phba->hbalock);
+@@ -3568,22 +3571,22 @@ lpfc_idiag_queacc_read_qe(char *pbuffer, int len, struct lpfc_queue *pque,
+ 		return 0;
+ 
+ 	esize = pque->entry_size;
+-	len += snprintf(pbuffer+len, LPFC_QUE_ACC_BUF_SIZE-len,
++	len += scnprintf(pbuffer+len, LPFC_QUE_ACC_BUF_SIZE-len,
+ 			"QE-INDEX[%04d]:\n", index);
+ 
+ 	offset = 0;
+ 	pentry = pque->qe[index].address;
+ 	while (esize > 0) {
+-		len += snprintf(pbuffer+len, LPFC_QUE_ACC_BUF_SIZE-len,
++		len += scnprintf(pbuffer+len, LPFC_QUE_ACC_BUF_SIZE-len,
+ 				"%08x ", *pentry);
+ 		pentry++;
+ 		offset += sizeof(uint32_t);
+ 		esize -= sizeof(uint32_t);
+ 		if (esize > 0 && !(offset % (4 * sizeof(uint32_t))))
+-			len += snprintf(pbuffer+len,
++			len += scnprintf(pbuffer+len,
+ 					LPFC_QUE_ACC_BUF_SIZE-len, "\n");
+ 	}
+-	len += snprintf(pbuffer+len, LPFC_QUE_ACC_BUF_SIZE-len, "\n");
++	len += scnprintf(pbuffer+len, LPFC_QUE_ACC_BUF_SIZE-len, "\n");
+ 
+ 	return len;
+ }
+@@ -3989,27 +3992,27 @@ lpfc_idiag_drbacc_read_reg(struct lpfc_hba *phba, char *pbuffer,
+ 
+ 	switch (drbregid) {
+ 	case LPFC_DRB_EQ:
+-		len += snprintf(pbuffer + len, LPFC_DRB_ACC_BUF_SIZE-len,
++		len += scnprintf(pbuffer + len, LPFC_DRB_ACC_BUF_SIZE-len,
+ 				"EQ-DRB-REG: 0x%08x\n",
+ 				readl(phba->sli4_hba.EQDBregaddr));
+ 		break;
+ 	case LPFC_DRB_CQ:
+-		len += snprintf(pbuffer + len, LPFC_DRB_ACC_BUF_SIZE - len,
++		len += scnprintf(pbuffer + len, LPFC_DRB_ACC_BUF_SIZE - len,
+ 				"CQ-DRB-REG: 0x%08x\n",
+ 				readl(phba->sli4_hba.CQDBregaddr));
+ 		break;
+ 	case LPFC_DRB_MQ:
+-		len += snprintf(pbuffer+len, LPFC_DRB_ACC_BUF_SIZE-len,
++		len += scnprintf(pbuffer+len, LPFC_DRB_ACC_BUF_SIZE-len,
+ 				"MQ-DRB-REG:   0x%08x\n",
+ 				readl(phba->sli4_hba.MQDBregaddr));
+ 		break;
+ 	case LPFC_DRB_WQ:
+-		len += snprintf(pbuffer+len, LPFC_DRB_ACC_BUF_SIZE-len,
++		len += scnprintf(pbuffer+len, LPFC_DRB_ACC_BUF_SIZE-len,
+ 				"WQ-DRB-REG:   0x%08x\n",
+ 				readl(phba->sli4_hba.WQDBregaddr));
+ 		break;
+ 	case LPFC_DRB_RQ:
+-		len += snprintf(pbuffer+len, LPFC_DRB_ACC_BUF_SIZE-len,
++		len += scnprintf(pbuffer+len, LPFC_DRB_ACC_BUF_SIZE-len,
+ 				"RQ-DRB-REG:   0x%08x\n",
+ 				readl(phba->sli4_hba.RQDBregaddr));
+ 		break;
+@@ -4199,37 +4202,37 @@ lpfc_idiag_ctlacc_read_reg(struct lpfc_hba *phba, char *pbuffer,
+ 
+ 	switch (ctlregid) {
+ 	case LPFC_CTL_PORT_SEM:
+-		len += snprintf(pbuffer+len, LPFC_CTL_ACC_BUF_SIZE-len,
++		len += scnprintf(pbuffer+len, LPFC_CTL_ACC_BUF_SIZE-len,
+ 				"Port SemReg:   0x%08x\n",
+ 				readl(phba->sli4_hba.conf_regs_memmap_p +
+ 				      LPFC_CTL_PORT_SEM_OFFSET));
+ 		break;
+ 	case LPFC_CTL_PORT_STA:
+-		len += snprintf(pbuffer+len, LPFC_CTL_ACC_BUF_SIZE-len,
++		len += scnprintf(pbuffer+len, LPFC_CTL_ACC_BUF_SIZE-len,
+ 				"Port StaReg:   0x%08x\n",
+ 				readl(phba->sli4_hba.conf_regs_memmap_p +
+ 				      LPFC_CTL_PORT_STA_OFFSET));
+ 		break;
+ 	case LPFC_CTL_PORT_CTL:
+-		len += snprintf(pbuffer+len, LPFC_CTL_ACC_BUF_SIZE-len,
++		len += scnprintf(pbuffer+len, LPFC_CTL_ACC_BUF_SIZE-len,
+ 				"Port CtlReg:   0x%08x\n",
+ 				readl(phba->sli4_hba.conf_regs_memmap_p +
+ 				      LPFC_CTL_PORT_CTL_OFFSET));
+ 		break;
+ 	case LPFC_CTL_PORT_ER1:
+-		len += snprintf(pbuffer+len, LPFC_CTL_ACC_BUF_SIZE-len,
++		len += scnprintf(pbuffer+len, LPFC_CTL_ACC_BUF_SIZE-len,
+ 				"Port Er1Reg:   0x%08x\n",
+ 				readl(phba->sli4_hba.conf_regs_memmap_p +
+ 				      LPFC_CTL_PORT_ER1_OFFSET));
+ 		break;
+ 	case LPFC_CTL_PORT_ER2:
+-		len += snprintf(pbuffer+len, LPFC_CTL_ACC_BUF_SIZE-len,
++		len += scnprintf(pbuffer+len, LPFC_CTL_ACC_BUF_SIZE-len,
+ 				"Port Er2Reg:   0x%08x\n",
+ 				readl(phba->sli4_hba.conf_regs_memmap_p +
+ 				      LPFC_CTL_PORT_ER2_OFFSET));
+ 		break;
+ 	case LPFC_CTL_PDEV_CTL:
+-		len += snprintf(pbuffer+len, LPFC_CTL_ACC_BUF_SIZE-len,
++		len += scnprintf(pbuffer+len, LPFC_CTL_ACC_BUF_SIZE-len,
+ 				"PDev CtlReg:   0x%08x\n",
+ 				readl(phba->sli4_hba.conf_regs_memmap_p +
+ 				      LPFC_CTL_PDEV_CTL_OFFSET));
+@@ -4422,13 +4425,13 @@ lpfc_idiag_mbxacc_get_setup(struct lpfc_hba *phba, char *pbuffer)
+ 	mbx_dump_cnt = idiag.cmd.data[IDIAG_MBXACC_DPCNT_INDX];
+ 	mbx_word_cnt = idiag.cmd.data[IDIAG_MBXACC_WDCNT_INDX];
+ 
+-	len += snprintf(pbuffer+len, LPFC_MBX_ACC_BUF_SIZE-len,
++	len += scnprintf(pbuffer+len, LPFC_MBX_ACC_BUF_SIZE-len,
+ 			"mbx_dump_map: 0x%08x\n", mbx_dump_map);
+-	len += snprintf(pbuffer+len, LPFC_MBX_ACC_BUF_SIZE-len,
++	len += scnprintf(pbuffer+len, LPFC_MBX_ACC_BUF_SIZE-len,
+ 			"mbx_dump_cnt: %04d\n", mbx_dump_cnt);
+-	len += snprintf(pbuffer+len, LPFC_MBX_ACC_BUF_SIZE-len,
++	len += scnprintf(pbuffer+len, LPFC_MBX_ACC_BUF_SIZE-len,
+ 			"mbx_word_cnt: %04d\n", mbx_word_cnt);
+-	len += snprintf(pbuffer+len, LPFC_MBX_ACC_BUF_SIZE-len,
++	len += scnprintf(pbuffer+len, LPFC_MBX_ACC_BUF_SIZE-len,
+ 			"mbx_mbox_cmd: 0x%02x\n", mbx_mbox_cmd);
+ 
+ 	return len;
+@@ -4577,35 +4580,35 @@ lpfc_idiag_extacc_avail_get(struct lpfc_hba *phba, char *pbuffer, int len)
+ {
+ 	uint16_t ext_cnt, ext_size;
+ 
+-	len += snprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
++	len += scnprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
+ 			"\nAvailable Extents Information:\n");
+ 
+-	len += snprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
++	len += scnprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
+ 			"\tPort Available VPI extents: ");
+ 	lpfc_sli4_get_avail_extnt_rsrc(phba, LPFC_RSC_TYPE_FCOE_VPI,
+ 				       &ext_cnt, &ext_size);
+-	len += snprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
++	len += scnprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
+ 			"Count %3d, Size %3d\n", ext_cnt, ext_size);
+ 
+-	len += snprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
++	len += scnprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
+ 			"\tPort Available VFI extents: ");
+ 	lpfc_sli4_get_avail_extnt_rsrc(phba, LPFC_RSC_TYPE_FCOE_VFI,
+ 				       &ext_cnt, &ext_size);
+-	len += snprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
++	len += scnprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
+ 			"Count %3d, Size %3d\n", ext_cnt, ext_size);
+ 
+-	len += snprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
++	len += scnprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
+ 			"\tPort Available RPI extents: ");
+ 	lpfc_sli4_get_avail_extnt_rsrc(phba, LPFC_RSC_TYPE_FCOE_RPI,
+ 				       &ext_cnt, &ext_size);
+-	len += snprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
++	len += scnprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
+ 			"Count %3d, Size %3d\n", ext_cnt, ext_size);
+ 
+-	len += snprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
++	len += scnprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
+ 			"\tPort Available XRI extents: ");
+ 	lpfc_sli4_get_avail_extnt_rsrc(phba, LPFC_RSC_TYPE_FCOE_XRI,
+ 				       &ext_cnt, &ext_size);
+-	len += snprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
++	len += scnprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
+ 			"Count %3d, Size %3d\n", ext_cnt, ext_size);
+ 
+ 	return len;
+@@ -4629,55 +4632,55 @@ lpfc_idiag_extacc_alloc_get(struct lpfc_hba *phba, char *pbuffer, int len)
+ 	uint16_t ext_cnt, ext_size;
+ 	int rc;
+ 
+-	len += snprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
++	len += scnprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
+ 			"\nAllocated Extents Information:\n");
+ 
+-	len += snprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
++	len += scnprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
+ 			"\tHost Allocated VPI extents: ");
+ 	rc = lpfc_sli4_get_allocated_extnts(phba, LPFC_RSC_TYPE_FCOE_VPI,
+ 					    &ext_cnt, &ext_size);
+ 	if (!rc)
+-		len += snprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
++		len += scnprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
+ 				"Port %d Extent %3d, Size %3d\n",
+ 				phba->brd_no, ext_cnt, ext_size);
+ 	else
+-		len += snprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
++		len += scnprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
+ 				"N/A\n");
+ 
+-	len += snprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
++	len += scnprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
+ 			"\tHost Allocated VFI extents: ");
+ 	rc = lpfc_sli4_get_allocated_extnts(phba, LPFC_RSC_TYPE_FCOE_VFI,
+ 					    &ext_cnt, &ext_size);
+ 	if (!rc)
+-		len += snprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
++		len += scnprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
+ 				"Port %d Extent %3d, Size %3d\n",
+ 				phba->brd_no, ext_cnt, ext_size);
+ 	else
+-		len += snprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
++		len += scnprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
+ 				"N/A\n");
+ 
+-	len += snprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
++	len += scnprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
+ 			"\tHost Allocated RPI extents: ");
+ 	rc = lpfc_sli4_get_allocated_extnts(phba, LPFC_RSC_TYPE_FCOE_RPI,
+ 					    &ext_cnt, &ext_size);
+ 	if (!rc)
+-		len += snprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
++		len += scnprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
+ 				"Port %d Extent %3d, Size %3d\n",
+ 				phba->brd_no, ext_cnt, ext_size);
+ 	else
+-		len += snprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
++		len += scnprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
+ 				"N/A\n");
+ 
+-	len += snprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
++	len += scnprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
+ 			"\tHost Allocated XRI extents: ");
+ 	rc = lpfc_sli4_get_allocated_extnts(phba, LPFC_RSC_TYPE_FCOE_XRI,
+ 					    &ext_cnt, &ext_size);
+ 	if (!rc)
+-		len += snprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
++		len += scnprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
+ 				"Port %d Extent %3d, Size %3d\n",
+ 				phba->brd_no, ext_cnt, ext_size);
+ 	else
+-		len += snprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
++		len += scnprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
+ 				"N/A\n");
+ 
+ 	return len;
+@@ -4701,49 +4704,49 @@ lpfc_idiag_extacc_drivr_get(struct lpfc_hba *phba, char *pbuffer, int len)
+ 	struct lpfc_rsrc_blks *rsrc_blks;
+ 	int index;
+ 
+-	len += snprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
++	len += scnprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
+ 			"\nDriver Extents Information:\n");
+ 
+-	len += snprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
++	len += scnprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
+ 			"\tVPI extents:\n");
+ 	index = 0;
+ 	list_for_each_entry(rsrc_blks, &phba->lpfc_vpi_blk_list, list) {
+-		len += snprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
++		len += scnprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
+ 				"\t\tBlock %3d: Start %4d, Count %4d\n",
+ 				index, rsrc_blks->rsrc_start,
+ 				rsrc_blks->rsrc_size);
+ 		index++;
+ 	}
+-	len += snprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
++	len += scnprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
+ 			"\tVFI extents:\n");
+ 	index = 0;
+ 	list_for_each_entry(rsrc_blks, &phba->sli4_hba.lpfc_vfi_blk_list,
+ 			    list) {
+-		len += snprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
++		len += scnprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
+ 				"\t\tBlock %3d: Start %4d, Count %4d\n",
+ 				index, rsrc_blks->rsrc_start,
+ 				rsrc_blks->rsrc_size);
+ 		index++;
+ 	}
+ 
+-	len += snprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
++	len += scnprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
+ 			"\tRPI extents:\n");
+ 	index = 0;
+ 	list_for_each_entry(rsrc_blks, &phba->sli4_hba.lpfc_rpi_blk_list,
+ 			    list) {
+-		len += snprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
++		len += scnprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
+ 				"\t\tBlock %3d: Start %4d, Count %4d\n",
+ 				index, rsrc_blks->rsrc_start,
+ 				rsrc_blks->rsrc_size);
+ 		index++;
+ 	}
+ 
+-	len += snprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
++	len += scnprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
+ 			"\tXRI extents:\n");
+ 	index = 0;
+ 	list_for_each_entry(rsrc_blks, &phba->sli4_hba.lpfc_xri_blk_list,
+ 			    list) {
+-		len += snprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
++		len += scnprintf(pbuffer+len, LPFC_EXT_ACC_BUF_SIZE-len,
+ 				"\t\tBlock %3d: Start %4d, Count %4d\n",
+ 				index, rsrc_blks->rsrc_start,
+ 				rsrc_blks->rsrc_size);
+@@ -5137,11 +5140,11 @@ lpfc_idiag_mbxacc_dump_bsg_mbox(struct lpfc_hba *phba, enum nemb_type nemb_tp,
+ 				if (i != 0)
+ 					pr_err("%s\n", line_buf);
+ 				len = 0;
+-				len += snprintf(line_buf+len,
++				len += scnprintf(line_buf+len,
+ 						LPFC_MBX_ACC_LBUF_SZ-len,
+ 						"%03d: ", i);
+ 			}
+-			len += snprintf(line_buf+len, LPFC_MBX_ACC_LBUF_SZ-len,
++			len += scnprintf(line_buf+len, LPFC_MBX_ACC_LBUF_SZ-len,
+ 					"%08x ", (uint32_t)*pword);
+ 			pword++;
+ 		}
+@@ -5204,11 +5207,11 @@ lpfc_idiag_mbxacc_dump_issue_mbox(struct lpfc_hba *phba, MAILBOX_t *pmbox)
+ 					pr_err("%s\n", line_buf);
+ 				len = 0;
+ 				memset(line_buf, 0, LPFC_MBX_ACC_LBUF_SZ);
+-				len += snprintf(line_buf+len,
++				len += scnprintf(line_buf+len,
+ 						LPFC_MBX_ACC_LBUF_SZ-len,
+ 						"%03d: ", i);
+ 			}
+-			len += snprintf(line_buf+len, LPFC_MBX_ACC_LBUF_SZ-len,
++			len += scnprintf(line_buf+len, LPFC_MBX_ACC_LBUF_SZ-len,
+ 					"%08x ",
+ 					((uint32_t)*pword) & 0xffffffff);
+ 			pword++;
+@@ -5227,18 +5230,18 @@ lpfc_idiag_mbxacc_dump_issue_mbox(struct lpfc_hba *phba, MAILBOX_t *pmbox)
+ 					pr_err("%s\n", line_buf);
+ 				len = 0;
+ 				memset(line_buf, 0, LPFC_MBX_ACC_LBUF_SZ);
+-				len += snprintf(line_buf+len,
++				len += scnprintf(line_buf+len,
+ 						LPFC_MBX_ACC_LBUF_SZ-len,
+ 						"%03d: ", i);
+ 			}
+ 			for (j = 0; j < 4; j++) {
+-				len += snprintf(line_buf+len,
++				len += scnprintf(line_buf+len,
+ 						LPFC_MBX_ACC_LBUF_SZ-len,
+ 						"%02x",
+ 						((uint8_t)*pbyte) & 0xff);
+ 				pbyte++;
+ 			}
+-			len += snprintf(line_buf+len,
++			len += scnprintf(line_buf+len,
+ 					LPFC_MBX_ACC_LBUF_SZ-len, " ");
+ 		}
+ 		if ((i - 1) % 8)
+diff --git a/drivers/scsi/lpfc/lpfc_debugfs.h b/drivers/scsi/lpfc/lpfc_debugfs.h
+index 30efc7bf91bd..824de3e410ca 100644
+--- a/drivers/scsi/lpfc/lpfc_debugfs.h
++++ b/drivers/scsi/lpfc/lpfc_debugfs.h
+@@ -342,7 +342,7 @@ lpfc_debug_dump_qe(struct lpfc_queue *q, uint32_t idx)
+ 	pword = q->qe[idx].address;
+ 
+ 	len = 0;
+-	len += snprintf(line_buf+len, LPFC_LBUF_SZ-len, "QE[%04d]: ", idx);
++	len += scnprintf(line_buf+len, LPFC_LBUF_SZ-len, "QE[%04d]: ", idx);
+ 	if (qe_word_cnt > 8)
+ 		printk(KERN_ERR "%s\n", line_buf);
+ 
+@@ -353,11 +353,11 @@ lpfc_debug_dump_qe(struct lpfc_queue *q, uint32_t idx)
+ 			if (qe_word_cnt > 8) {
+ 				len = 0;
+ 				memset(line_buf, 0, LPFC_LBUF_SZ);
+-				len += snprintf(line_buf+len, LPFC_LBUF_SZ-len,
++				len += scnprintf(line_buf+len, LPFC_LBUF_SZ-len,
+ 						"%03d: ", i);
+ 			}
+ 		}
+-		len += snprintf(line_buf+len, LPFC_LBUF_SZ-len, "%08x ",
++		len += scnprintf(line_buf+len, LPFC_LBUF_SZ-len, "%08x ",
+ 				((uint32_t)*pword) & 0xffffffff);
+ 		pword++;
+ 	}
 diff --git a/drivers/scsi/lpfc/lpfc_scsi.c b/drivers/scsi/lpfc/lpfc_scsi.c
 index b4f1a840b3b4..d83f8e2c13af 100644
 --- a/drivers/scsi/lpfc/lpfc_scsi.c
@@ -38292,6 +40718,28 @@ index 9bbc19fc190b..9f9431a4cc0e 100644
  
  	qedf->ctlr.send = qedf_fip_send;
  	qedf->ctlr.get_src_addr = qedf_get_src_mac;
+diff --git a/drivers/scsi/qla2xxx/qla_attr.c b/drivers/scsi/qla2xxx/qla_attr.c
+index ac504a1ff0ff..1a396f843de1 100644
+--- a/drivers/scsi/qla2xxx/qla_attr.c
++++ b/drivers/scsi/qla2xxx/qla_attr.c
+@@ -364,7 +364,7 @@ qla2x00_sysfs_write_optrom_ctl(struct file *filp, struct kobject *kobj,
+ 		}
+ 
+ 		ha->optrom_region_start = start;
+-		ha->optrom_region_size = start + size;
++		ha->optrom_region_size = size;
+ 
+ 		ha->optrom_state = QLA_SREADING;
+ 		ha->optrom_buffer = vmalloc(ha->optrom_region_size);
+@@ -437,7 +437,7 @@ qla2x00_sysfs_write_optrom_ctl(struct file *filp, struct kobject *kobj,
+ 		}
+ 
+ 		ha->optrom_region_start = start;
+-		ha->optrom_region_size = start + size;
++		ha->optrom_region_size = size;
+ 
+ 		ha->optrom_state = QLA_SWRITING;
+ 		ha->optrom_buffer = vmalloc(ha->optrom_region_size);
 diff --git a/drivers/scsi/qla2xxx/qla_init.c b/drivers/scsi/qla2xxx/qla_init.c
 index 8d1acc802a67..7f8946844a5e 100644
 --- a/drivers/scsi/qla2xxx/qla_init.c
@@ -38487,6 +40935,28 @@ index c6ef83d0d99b..503fda4e7e8e 100644
  		rc = blk_mq_map_queues(qmap);
  	else
  		rc = blk_mq_pci_map_queues(qmap, vha->hw->pdev, vha->irq_offset);
+diff --git a/drivers/scsi/qla2xxx/qla_target.c b/drivers/scsi/qla2xxx/qla_target.c
+index 510337eac106..d4ac18573d81 100644
+--- a/drivers/scsi/qla2xxx/qla_target.c
++++ b/drivers/scsi/qla2xxx/qla_target.c
+@@ -977,6 +977,8 @@ void qlt_free_session_done(struct work_struct *work)
+ 		sess->send_els_logo);
+ 
+ 	if (!IS_SW_RESV_ADDR(sess->d_id)) {
++		qla2x00_mark_device_lost(vha, sess, 0, 0);
++
+ 		if (sess->send_els_logo) {
+ 			qlt_port_logo_t logo;
+ 
+@@ -1157,8 +1159,6 @@ void qlt_unreg_sess(struct fc_port *sess)
+ 	if (sess->se_sess)
+ 		vha->hw->tgt.tgt_ops->clear_nacl_from_fcport_map(sess);
+ 
+-	qla2x00_mark_device_lost(vha, sess, 0, 0);
+-
+ 	sess->deleted = QLA_SESS_DELETION_IN_PROGRESS;
+ 	sess->disc_state = DSC_DELETE_PEND;
+ 	sess->last_rscn_gen = sess->rscn_gen;
 diff --git a/drivers/scsi/qla4xxx/ql4_os.c b/drivers/scsi/qla4xxx/ql4_os.c
 index a77bfb224248..80289c885c07 100644
 --- a/drivers/scsi/qla4xxx/ql4_os.c
@@ -40030,6 +42500,18 @@ index c7beb6841289..ab8f731a3426 100644
  
  	return ret;
  }
+diff --git a/drivers/soc/sunxi/Kconfig b/drivers/soc/sunxi/Kconfig
+index 353b07e40176..e84eb4e59f58 100644
+--- a/drivers/soc/sunxi/Kconfig
++++ b/drivers/soc/sunxi/Kconfig
+@@ -4,6 +4,7 @@
+ config SUNXI_SRAM
+ 	bool
+ 	default ARCH_SUNXI
++	select REGMAP_MMIO
+ 	help
+ 	  Say y here to enable the SRAM controller support. This
+ 	  device is responsible on mapping the SRAM in the sunXi SoCs
 diff --git a/drivers/soc/tegra/fuse/fuse-tegra.c b/drivers/soc/tegra/fuse/fuse-tegra.c
 index a33ee8ef8b6b..51625703399e 100644
 --- a/drivers/soc/tegra/fuse/fuse-tegra.c
@@ -43431,10 +45913,72 @@ index 7bfcbb23c2a4..016e4004fe9d 100644
  		/* if both generic PHY and USB PHY layers aren't enabled */
  		if (PTR_ERR(ci->phy) == -ENOSYS &&
 diff --git a/drivers/usb/class/cdc-acm.c b/drivers/usb/class/cdc-acm.c
-index 739f8960811a..ec666eb4b7b4 100644
+index 739f8960811a..c03aa8550980 100644
 --- a/drivers/usb/class/cdc-acm.c
 +++ b/drivers/usb/class/cdc-acm.c
-@@ -558,10 +558,8 @@ static void acm_softint(struct work_struct *work)
+@@ -470,12 +470,12 @@ static void acm_read_bulk_callback(struct urb *urb)
+ 	struct acm *acm = rb->instance;
+ 	unsigned long flags;
+ 	int status = urb->status;
++	bool stopped = false;
++	bool stalled = false;
+ 
+ 	dev_vdbg(&acm->data->dev, "got urb %d, len %d, status %d\n",
+ 		rb->index, urb->actual_length, status);
+ 
+-	set_bit(rb->index, &acm->read_urbs_free);
+-
+ 	if (!acm->dev) {
+ 		dev_dbg(&acm->data->dev, "%s - disconnected\n", __func__);
+ 		return;
+@@ -488,15 +488,16 @@ static void acm_read_bulk_callback(struct urb *urb)
+ 		break;
+ 	case -EPIPE:
+ 		set_bit(EVENT_RX_STALL, &acm->flags);
+-		schedule_work(&acm->work);
+-		return;
++		stalled = true;
++		break;
+ 	case -ENOENT:
+ 	case -ECONNRESET:
+ 	case -ESHUTDOWN:
+ 		dev_dbg(&acm->data->dev,
+ 			"%s - urb shutting down with status: %d\n",
+ 			__func__, status);
+-		return;
++		stopped = true;
++		break;
+ 	default:
+ 		dev_dbg(&acm->data->dev,
+ 			"%s - nonzero urb status received: %d\n",
+@@ -505,10 +506,24 @@ static void acm_read_bulk_callback(struct urb *urb)
+ 	}
+ 
+ 	/*
+-	 * Unthrottle may run on another CPU which needs to see events
+-	 * in the same order. Submission has an implict barrier
++	 * Make sure URB processing is done before marking as free to avoid
++	 * racing with unthrottle() on another CPU. Matches the barriers
++	 * implied by the test_and_clear_bit() in acm_submit_read_urb().
+ 	 */
+ 	smp_mb__before_atomic();
++	set_bit(rb->index, &acm->read_urbs_free);
++	/*
++	 * Make sure URB is marked as free before checking the throttled flag
++	 * to avoid racing with unthrottle() on another CPU. Matches the
++	 * smp_mb() in unthrottle().
++	 */
++	smp_mb__after_atomic();
++
++	if (stopped || stalled) {
++		if (stalled)
++			schedule_work(&acm->work);
++		return;
++	}
+ 
+ 	/* throttle device if requested by tty */
+ 	spin_lock_irqsave(&acm->read_lock, flags);
+@@ -558,10 +573,8 @@ static void acm_softint(struct work_struct *work)
  		clear_bit(EVENT_RX_STALL, &acm->flags);
  	}
  
@@ -43446,6 +45990,16 @@ index 739f8960811a..ec666eb4b7b4 100644
  }
  
  /*
+@@ -844,6 +857,9 @@ static void acm_tty_unthrottle(struct tty_struct *tty)
+ 	acm->throttle_req = 0;
+ 	spin_unlock_irq(&acm->read_lock);
+ 
++	/* Matches the smp_mb__after_atomic() in acm_read_bulk_callback(). */
++	smp_mb();
++
+ 	if (was_throttled)
+ 		acm_submit_read_urbs(acm, GFP_KERNEL);
+ }
 diff --git a/drivers/usb/common/common.c b/drivers/usb/common/common.c
 index 48277bbc15e4..73c8e6591746 100644
 --- a/drivers/usb/common/common.c
@@ -43699,6 +46253,43 @@ index 546a2219454b..d95a5358f73d 100644
  {
  	return 0;
  }
+diff --git a/drivers/usb/dwc3/Kconfig b/drivers/usb/dwc3/Kconfig
+index 1a0404fda596..5d22f4bf2a9f 100644
+--- a/drivers/usb/dwc3/Kconfig
++++ b/drivers/usb/dwc3/Kconfig
+@@ -52,7 +52,8 @@ comment "Platform Glue Driver Support"
+ 
+ config USB_DWC3_OMAP
+ 	tristate "Texas Instruments OMAP5 and similar Platforms"
+-	depends on EXTCON && (ARCH_OMAP2PLUS || COMPILE_TEST)
++	depends on ARCH_OMAP2PLUS || COMPILE_TEST
++	depends on EXTCON || !EXTCON
+ 	depends on OF
+ 	default USB_DWC3
+ 	help
+@@ -113,7 +114,8 @@ config USB_DWC3_ST
+ 
+ config USB_DWC3_QCOM
+ 	tristate "Qualcomm Platform"
+-	depends on EXTCON && (ARCH_QCOM || COMPILE_TEST)
++	depends on ARCH_QCOM || COMPILE_TEST
++	depends on EXTCON || !EXTCON
+ 	depends on OF
+ 	default USB_DWC3
+ 	help
+diff --git a/drivers/usb/dwc3/core.c b/drivers/usb/dwc3/core.c
+index a1b126f90261..f944cea4056b 100644
+--- a/drivers/usb/dwc3/core.c
++++ b/drivers/usb/dwc3/core.c
+@@ -1218,7 +1218,7 @@ static void dwc3_get_properties(struct dwc3 *dwc)
+ 	u8			tx_max_burst_prd;
+ 
+ 	/* default to highest possible threshold */
+-	lpm_nyet_threshold = 0xff;
++	lpm_nyet_threshold = 0xf;
+ 
+ 	/* default to -3.5dB de-emphasis */
+ 	tx_de_emphasis = 1;
 diff --git a/drivers/usb/dwc3/dwc3-pci.c b/drivers/usb/dwc3/dwc3-pci.c
 index fdc6e4e403e8..8cced3609e24 100644
 --- a/drivers/usb/dwc3/dwc3-pci.c
@@ -44067,6 +46658,19 @@ index 40bbf1f53337..fe58904f350b 100644
  	select USB_XHCI_MTK if USB_SUPPORT && USB_XHCI_HCD
  	help
  	  Say Y or M here if your system runs on MediaTek SoCs with
+diff --git a/drivers/usb/musb/Kconfig b/drivers/usb/musb/Kconfig
+index ad08895e78f9..c3dae7d5cb6e 100644
+--- a/drivers/usb/musb/Kconfig
++++ b/drivers/usb/musb/Kconfig
+@@ -66,7 +66,7 @@ config USB_MUSB_SUNXI
+ 	depends on NOP_USB_XCEIV
+ 	depends on PHY_SUN4I_USB
+ 	depends on EXTCON
+-	depends on GENERIC_PHY
++	select GENERIC_PHY
+ 	select SUNXI_SRAM
+ 
+ config USB_MUSB_DAVINCI
 diff --git a/drivers/usb/serial/cp210x.c b/drivers/usb/serial/cp210x.c
 index c0777a374a88..e732949f6567 100644
 --- a/drivers/usb/serial/cp210x.c
@@ -44121,6 +46725,73 @@ index c0777a374a88..e732949f6567 100644
  	if (result < 0) {
  		dev_err(&serial->interface->dev, "failed to set GPIO value: %d\n",
  				result);
+diff --git a/drivers/usb/serial/f81232.c b/drivers/usb/serial/f81232.c
+index 0dcdcb4b2cde..dee6f2caf9b5 100644
+--- a/drivers/usb/serial/f81232.c
++++ b/drivers/usb/serial/f81232.c
+@@ -556,9 +556,12 @@ static int f81232_open(struct tty_struct *tty, struct usb_serial_port *port)
+ 
+ static void f81232_close(struct usb_serial_port *port)
+ {
++	struct f81232_private *port_priv = usb_get_serial_port_data(port);
++
+ 	f81232_port_disable(port);
+ 	usb_serial_generic_close(port);
+ 	usb_kill_urb(port->interrupt_in_urb);
++	flush_work(&port_priv->interrupt_work);
+ }
+ 
+ static void f81232_dtr_rts(struct usb_serial_port *port, int on)
+@@ -632,6 +635,40 @@ static int f81232_port_remove(struct usb_serial_port *port)
+ 	return 0;
+ }
+ 
++static int f81232_suspend(struct usb_serial *serial, pm_message_t message)
++{
++	struct usb_serial_port *port = serial->port[0];
++	struct f81232_private *port_priv = usb_get_serial_port_data(port);
++	int i;
++
++	for (i = 0; i < ARRAY_SIZE(port->read_urbs); ++i)
++		usb_kill_urb(port->read_urbs[i]);
++
++	usb_kill_urb(port->interrupt_in_urb);
++
++	if (port_priv)
++		flush_work(&port_priv->interrupt_work);
++
++	return 0;
++}
++
++static int f81232_resume(struct usb_serial *serial)
++{
++	struct usb_serial_port *port = serial->port[0];
++	int result;
++
++	if (tty_port_initialized(&port->port)) {
++		result = usb_submit_urb(port->interrupt_in_urb, GFP_NOIO);
++		if (result) {
++			dev_err(&port->dev, "submit interrupt urb failed: %d\n",
++					result);
++			return result;
++		}
++	}
++
++	return usb_serial_generic_resume(serial);
++}
++
+ static struct usb_serial_driver f81232_device = {
+ 	.driver = {
+ 		.owner =	THIS_MODULE,
+@@ -655,6 +692,8 @@ static struct usb_serial_driver f81232_device = {
+ 	.read_int_callback =	f81232_read_int_callback,
+ 	.port_probe =		f81232_port_probe,
+ 	.port_remove =		f81232_port_remove,
++	.suspend =		f81232_suspend,
++	.resume =		f81232_resume,
+ };
+ 
+ static struct usb_serial_driver * const serial_drivers[] = {
 diff --git a/drivers/usb/serial/ftdi_sio.c b/drivers/usb/serial/ftdi_sio.c
 index 77ef4c481f3c..1d8461ae2c34 100644
 --- a/drivers/usb/serial/ftdi_sio.c
@@ -44291,6 +46962,101 @@ index 31b024441938..cc794e25a0b6 100644
  			ret = usb_autopm_get_interface(us->pusb_intf);
  			usb_stor_dbg(us, "working scsi, ret=%d\n", ret);
  		}
+diff --git a/drivers/usb/storage/scsiglue.c b/drivers/usb/storage/scsiglue.c
+index a73ea495d5a7..59190d88fa9f 100644
+--- a/drivers/usb/storage/scsiglue.c
++++ b/drivers/usb/storage/scsiglue.c
+@@ -65,6 +65,7 @@ static const char* host_info(struct Scsi_Host *host)
+ static int slave_alloc (struct scsi_device *sdev)
+ {
+ 	struct us_data *us = host_to_us(sdev->host);
++	int maxp;
+ 
+ 	/*
+ 	 * Set the INQUIRY transfer length to 36.  We don't use any of
+@@ -74,20 +75,17 @@ static int slave_alloc (struct scsi_device *sdev)
+ 	sdev->inquiry_len = 36;
+ 
+ 	/*
+-	 * USB has unusual DMA-alignment requirements: Although the
+-	 * starting address of each scatter-gather element doesn't matter,
+-	 * the length of each element except the last must be divisible
+-	 * by the Bulk maxpacket value.  There's currently no way to
+-	 * express this by block-layer constraints, so we'll cop out
+-	 * and simply require addresses to be aligned at 512-byte
+-	 * boundaries.  This is okay since most block I/O involves
+-	 * hardware sectors that are multiples of 512 bytes in length,
+-	 * and since host controllers up through USB 2.0 have maxpacket
+-	 * values no larger than 512.
+-	 *
+-	 * But it doesn't suffice for Wireless USB, where Bulk maxpacket
+-	 * values can be as large as 2048.  To make that work properly
+-	 * will require changes to the block layer.
++	 * USB has unusual scatter-gather requirements: the length of each
++	 * scatterlist element except the last must be divisible by the
++	 * Bulk maxpacket value.  Fortunately this value is always a
++	 * power of 2.  Inform the block layer about this requirement.
++	 */
++	maxp = usb_maxpacket(us->pusb_dev, us->recv_bulk_pipe, 0);
++	blk_queue_virt_boundary(sdev->request_queue, maxp - 1);
++
++	/*
++	 * Some host controllers may have alignment requirements.
++	 * We'll play it safe by requiring 512-byte alignment always.
+ 	 */
+ 	blk_queue_update_dma_alignment(sdev->request_queue, (512 - 1));
+ 
+diff --git a/drivers/usb/storage/uas.c b/drivers/usb/storage/uas.c
+index 36742e8e7edc..d2ed3049e7de 100644
+--- a/drivers/usb/storage/uas.c
++++ b/drivers/usb/storage/uas.c
+@@ -796,24 +796,33 @@ static int uas_slave_alloc(struct scsi_device *sdev)
+ {
+ 	struct uas_dev_info *devinfo =
+ 		(struct uas_dev_info *)sdev->host->hostdata;
++	int maxp;
+ 
+ 	sdev->hostdata = devinfo;
+ 
+ 	/*
+-	 * USB has unusual DMA-alignment requirements: Although the
+-	 * starting address of each scatter-gather element doesn't matter,
+-	 * the length of each element except the last must be divisible
+-	 * by the Bulk maxpacket value.  There's currently no way to
+-	 * express this by block-layer constraints, so we'll cop out
+-	 * and simply require addresses to be aligned at 512-byte
+-	 * boundaries.  This is okay since most block I/O involves
+-	 * hardware sectors that are multiples of 512 bytes in length,
+-	 * and since host controllers up through USB 2.0 have maxpacket
+-	 * values no larger than 512.
++	 * We have two requirements here. We must satisfy the requirements
++	 * of the physical HC and the demands of the protocol, as we
++	 * definitely want no additional memory allocation in this path
++	 * ruling out using bounce buffers.
+ 	 *
+-	 * But it doesn't suffice for Wireless USB, where Bulk maxpacket
+-	 * values can be as large as 2048.  To make that work properly
+-	 * will require changes to the block layer.
++	 * For a transmission on USB to continue we must never send
++	 * a package that is smaller than maxpacket. Hence the length of each
++         * scatterlist element except the last must be divisible by the
++         * Bulk maxpacket value.
++	 * If the HC does not ensure that through SG,
++	 * the upper layer must do that. We must assume nothing
++	 * about the capabilities off the HC, so we use the most
++	 * pessimistic requirement.
++	 */
++
++	maxp = usb_maxpacket(devinfo->udev, devinfo->data_in_pipe, 0);
++	blk_queue_virt_boundary(sdev->request_queue, maxp - 1);
++
++	/*
++	 * The protocol has no requirements on alignment in the strict sense.
++	 * Controllers may or may not have alignment restrictions.
++	 * As this is not exported, we use an extremely conservative guess.
+ 	 */
+ 	blk_queue_update_dma_alignment(sdev->request_queue, (512 - 1));
+ 
 diff --git a/drivers/usb/typec/tcpm/tcpm.c b/drivers/usb/typec/tcpm/tcpm.c
 index f1c39a3c7534..d34e945e5d09 100644
 --- a/drivers/usb/typec/tcpm/tcpm.c
@@ -110812,6 +113578,20 @@ index ec9d6bc65855..fabee6db0abb 100644
  void bt_accept_unlink(struct sock *sk);
  struct sock *bt_accept_dequeue(struct sock *parent, struct socket *newsock);
  
+diff --git a/include/net/bluetooth/hci_core.h b/include/net/bluetooth/hci_core.h
+index e5ea633ea368..fa61e70788c5 100644
+--- a/include/net/bluetooth/hci_core.h
++++ b/include/net/bluetooth/hci_core.h
+@@ -190,6 +190,9 @@ struct adv_info {
+ 
+ #define HCI_MAX_SHORT_NAME_LENGTH	10
+ 
++/* Min encryption key size to match with SMP */
++#define HCI_MIN_ENC_KEY_SIZE		7
++
+ /* Default LE RPA expiry time, 15 minutes */
+ #define HCI_DEFAULT_RPA_TIMEOUT		(15 * 60)
+ 
 diff --git a/include/net/ip.h b/include/net/ip.h
 index be3cad9c2e4c..583526aad1d0 100644
 --- a/include/net/ip.h
@@ -112424,20 +115204,311 @@ index b69248e6f0e0..3b1cd11dc6dc 100644
  	if (err)
  		goto bad_unshare_out;
 diff --git a/kernel/futex.c b/kernel/futex.c
-index a0514e01c3eb..52668d44e07b 100644
+index a0514e01c3eb..4eafa8ec76a4 100644
 --- a/kernel/futex.c
 +++ b/kernel/futex.c
-@@ -3440,6 +3440,10 @@ static int handle_futex_death(u32 __user *uaddr, struct task_struct *curr, int p
+@@ -1314,13 +1314,15 @@ static int lookup_pi_state(u32 __user *uaddr, u32 uval,
+ 
+ static int lock_pi_update_atomic(u32 __user *uaddr, u32 uval, u32 newval)
+ {
++	int err;
+ 	u32 uninitialized_var(curval);
+ 
+ 	if (unlikely(should_fail_futex(true)))
+ 		return -EFAULT;
+ 
+-	if (unlikely(cmpxchg_futex_value_locked(&curval, uaddr, uval, newval)))
+-		return -EFAULT;
++	err = cmpxchg_futex_value_locked(&curval, uaddr, uval, newval);
++	if (unlikely(err))
++		return err;
+ 
+ 	/* If user space value changed, let the caller retry */
+ 	return curval != uval ? -EAGAIN : 0;
+@@ -1506,10 +1508,8 @@ static int wake_futex_pi(u32 __user *uaddr, u32 uval, struct futex_pi_state *pi_
+ 	if (unlikely(should_fail_futex(true)))
+ 		ret = -EFAULT;
+ 
+-	if (cmpxchg_futex_value_locked(&curval, uaddr, uval, newval)) {
+-		ret = -EFAULT;
+-
+-	} else if (curval != uval) {
++	ret = cmpxchg_futex_value_locked(&curval, uaddr, uval, newval);
++	if (!ret && (curval != uval)) {
+ 		/*
+ 		 * If a unconditional UNLOCK_PI operation (user space did not
+ 		 * try the TID->0 transition) raced with a waiter setting the
+@@ -1704,32 +1704,32 @@ futex_wake_op(u32 __user *uaddr1, unsigned int flags, u32 __user *uaddr2,
+ 	double_lock_hb(hb1, hb2);
+ 	op_ret = futex_atomic_op_inuser(op, uaddr2);
+ 	if (unlikely(op_ret < 0)) {
+-
+ 		double_unlock_hb(hb1, hb2);
+ 
+-#ifndef CONFIG_MMU
+-		/*
+-		 * we don't get EFAULT from MMU faults if we don't have an MMU,
+-		 * but we might get them from range checking
+-		 */
+-		ret = op_ret;
+-		goto out_put_keys;
+-#endif
+-
+-		if (unlikely(op_ret != -EFAULT)) {
++		if (!IS_ENABLED(CONFIG_MMU) ||
++		    unlikely(op_ret != -EFAULT && op_ret != -EAGAIN)) {
++			/*
++			 * we don't get EFAULT from MMU faults if we don't have
++			 * an MMU, but we might get them from range checking
++			 */
+ 			ret = op_ret;
+ 			goto out_put_keys;
+ 		}
+ 
+-		ret = fault_in_user_writeable(uaddr2);
+-		if (ret)
+-			goto out_put_keys;
++		if (op_ret == -EFAULT) {
++			ret = fault_in_user_writeable(uaddr2);
++			if (ret)
++				goto out_put_keys;
++		}
+ 
+-		if (!(flags & FLAGS_SHARED))
++		if (!(flags & FLAGS_SHARED)) {
++			cond_resched();
+ 			goto retry_private;
++		}
+ 
+ 		put_futex_key(&key2);
+ 		put_futex_key(&key1);
++		cond_resched();
+ 		goto retry;
+ 	}
+ 
+@@ -2354,7 +2354,7 @@ static int fixup_pi_state_owner(u32 __user *uaddr, struct futex_q *q,
+ 	u32 uval, uninitialized_var(curval), newval;
+ 	struct task_struct *oldowner, *newowner;
+ 	u32 newtid;
+-	int ret;
++	int ret, err = 0;
+ 
+ 	lockdep_assert_held(q->lock_ptr);
+ 
+@@ -2425,14 +2425,17 @@ static int fixup_pi_state_owner(u32 __user *uaddr, struct futex_q *q,
+ 	if (!pi_state->owner)
+ 		newtid |= FUTEX_OWNER_DIED;
+ 
+-	if (get_futex_value_locked(&uval, uaddr))
+-		goto handle_fault;
++	err = get_futex_value_locked(&uval, uaddr);
++	if (err)
++		goto handle_err;
+ 
+ 	for (;;) {
+ 		newval = (uval & FUTEX_OWNER_DIED) | newtid;
+ 
+-		if (cmpxchg_futex_value_locked(&curval, uaddr, uval, newval))
+-			goto handle_fault;
++		err = cmpxchg_futex_value_locked(&curval, uaddr, uval, newval);
++		if (err)
++			goto handle_err;
++
+ 		if (curval == uval)
+ 			break;
+ 		uval = curval;
+@@ -2460,23 +2463,37 @@ static int fixup_pi_state_owner(u32 __user *uaddr, struct futex_q *q,
+ 	return 0;
+ 
+ 	/*
+-	 * To handle the page fault we need to drop the locks here. That gives
+-	 * the other task (either the highest priority waiter itself or the
+-	 * task which stole the rtmutex) the chance to try the fixup of the
+-	 * pi_state. So once we are back from handling the fault we need to
+-	 * check the pi_state after reacquiring the locks and before trying to
+-	 * do another fixup. When the fixup has been done already we simply
+-	 * return.
++	 * In order to reschedule or handle a page fault, we need to drop the
++	 * locks here. In the case of a fault, this gives the other task
++	 * (either the highest priority waiter itself or the task which stole
++	 * the rtmutex) the chance to try the fixup of the pi_state. So once we
++	 * are back from handling the fault we need to check the pi_state after
++	 * reacquiring the locks and before trying to do another fixup. When
++	 * the fixup has been done already we simply return.
+ 	 *
+ 	 * Note: we hold both hb->lock and pi_mutex->wait_lock. We can safely
+ 	 * drop hb->lock since the caller owns the hb -> futex_q relation.
+ 	 * Dropping the pi_mutex->wait_lock requires the state revalidate.
+ 	 */
+-handle_fault:
++handle_err:
+ 	raw_spin_unlock_irq(&pi_state->pi_mutex.wait_lock);
+ 	spin_unlock(q->lock_ptr);
+ 
+-	ret = fault_in_user_writeable(uaddr);
++	switch (err) {
++	case -EFAULT:
++		ret = fault_in_user_writeable(uaddr);
++		break;
++
++	case -EAGAIN:
++		cond_resched();
++		ret = 0;
++		break;
++
++	default:
++		WARN_ON_ONCE(1);
++		ret = err;
++		break;
++	}
+ 
+ 	spin_lock(q->lock_ptr);
+ 	raw_spin_lock_irq(&pi_state->pi_mutex.wait_lock);
+@@ -3045,10 +3062,8 @@ static int futex_unlock_pi(u32 __user *uaddr, unsigned int flags)
+ 		 * A unconditional UNLOCK_PI op raced against a waiter
+ 		 * setting the FUTEX_WAITERS bit. Try again.
+ 		 */
+-		if (ret == -EAGAIN) {
+-			put_futex_key(&key);
+-			goto retry;
+-		}
++		if (ret == -EAGAIN)
++			goto pi_retry;
+ 		/*
+ 		 * wake_futex_pi has detected invalid state. Tell user
+ 		 * space.
+@@ -3063,9 +3078,19 @@ static int futex_unlock_pi(u32 __user *uaddr, unsigned int flags)
+ 	 * preserve the WAITERS bit not the OWNER_DIED one. We are the
+ 	 * owner.
+ 	 */
+-	if (cmpxchg_futex_value_locked(&curval, uaddr, uval, 0)) {
++	if ((ret = cmpxchg_futex_value_locked(&curval, uaddr, uval, 0))) {
+ 		spin_unlock(&hb->lock);
+-		goto pi_faulted;
++		switch (ret) {
++		case -EFAULT:
++			goto pi_faulted;
++
++		case -EAGAIN:
++			goto pi_retry;
++
++		default:
++			WARN_ON_ONCE(1);
++			goto out_putkey;
++		}
+ 	}
+ 
+ 	/*
+@@ -3079,6 +3104,11 @@ static int futex_unlock_pi(u32 __user *uaddr, unsigned int flags)
+ 	put_futex_key(&key);
+ 	return ret;
+ 
++pi_retry:
++	put_futex_key(&key);
++	cond_resched();
++	goto retry;
++
+ pi_faulted:
+ 	put_futex_key(&key);
+ 
+@@ -3439,47 +3469,67 @@ SYSCALL_DEFINE3(get_robust_list, int, pid,
+ static int handle_futex_death(u32 __user *uaddr, struct task_struct *curr, int pi)
  {
  	u32 uval, uninitialized_var(nval), mval;
- 
++	int err;
++
 +	/* Futex address must be 32bit aligned */
 +	if ((((unsigned long)uaddr) % sizeof(*uaddr)) != 0)
 +		return -1;
-+
+ 
  retry:
  	if (get_user(uval, uaddr))
  		return -1;
+ 
+-	if ((uval & FUTEX_TID_MASK) == task_pid_vnr(curr)) {
+-		/*
+-		 * Ok, this dying thread is truly holding a futex
+-		 * of interest. Set the OWNER_DIED bit atomically
+-		 * via cmpxchg, and if the value had FUTEX_WAITERS
+-		 * set, wake up a waiter (if any). (We have to do a
+-		 * futex_wake() even if OWNER_DIED is already set -
+-		 * to handle the rare but possible case of recursive
+-		 * thread-death.) The rest of the cleanup is done in
+-		 * userspace.
+-		 */
+-		mval = (uval & FUTEX_WAITERS) | FUTEX_OWNER_DIED;
+-		/*
+-		 * We are not holding a lock here, but we want to have
+-		 * the pagefault_disable/enable() protection because
+-		 * we want to handle the fault gracefully. If the
+-		 * access fails we try to fault in the futex with R/W
+-		 * verification via get_user_pages. get_user() above
+-		 * does not guarantee R/W access. If that fails we
+-		 * give up and leave the futex locked.
+-		 */
+-		if (cmpxchg_futex_value_locked(&nval, uaddr, uval, mval)) {
++	if ((uval & FUTEX_TID_MASK) != task_pid_vnr(curr))
++		return 0;
++
++	/*
++	 * Ok, this dying thread is truly holding a futex
++	 * of interest. Set the OWNER_DIED bit atomically
++	 * via cmpxchg, and if the value had FUTEX_WAITERS
++	 * set, wake up a waiter (if any). (We have to do a
++	 * futex_wake() even if OWNER_DIED is already set -
++	 * to handle the rare but possible case of recursive
++	 * thread-death.) The rest of the cleanup is done in
++	 * userspace.
++	 */
++	mval = (uval & FUTEX_WAITERS) | FUTEX_OWNER_DIED;
++
++	/*
++	 * We are not holding a lock here, but we want to have
++	 * the pagefault_disable/enable() protection because
++	 * we want to handle the fault gracefully. If the
++	 * access fails we try to fault in the futex with R/W
++	 * verification via get_user_pages. get_user() above
++	 * does not guarantee R/W access. If that fails we
++	 * give up and leave the futex locked.
++	 */
++	if ((err = cmpxchg_futex_value_locked(&nval, uaddr, uval, mval))) {
++		switch (err) {
++		case -EFAULT:
+ 			if (fault_in_user_writeable(uaddr))
+ 				return -1;
+ 			goto retry;
+-		}
+-		if (nval != uval)
++
++		case -EAGAIN:
++			cond_resched();
+ 			goto retry;
+ 
+-		/*
+-		 * Wake robust non-PI futexes here. The wakeup of
+-		 * PI futexes happens in exit_pi_state():
+-		 */
+-		if (!pi && (uval & FUTEX_WAITERS))
+-			futex_wake(uaddr, 1, 1, FUTEX_BITSET_MATCH_ANY);
++		default:
++			WARN_ON_ONCE(1);
++			return err;
++		}
+ 	}
++
++	if (nval != uval)
++		goto retry;
++
++	/*
++	 * Wake robust non-PI futexes here. The wakeup of
++	 * PI futexes happens in exit_pi_state():
++	 */
++	if (!pi && (uval & FUTEX_WAITERS))
++		futex_wake(uaddr, 1, 1, FUTEX_BITSET_MATCH_ANY);
++
+ 	return 0;
+ }
+ 
 diff --git a/kernel/irq/Kconfig b/kernel/irq/Kconfig
 index 5f3e2baefca9..15a5bfbef48b 100644
 --- a/kernel/irq/Kconfig
@@ -112556,7 +115627,7 @@ index ef8ad36cadcf..e16e022eae09 100644
  		sum += *per_cpu_ptr(desc->kstat_irqs, cpu);
  	return sum;
 diff --git a/kernel/irq/manage.c b/kernel/irq/manage.c
-index 84b54a17b95d..3b3d6f654e0e 100644
+index 84b54a17b95d..d21d0ab470a1 100644
 --- a/kernel/irq/manage.c
 +++ b/kernel/irq/manage.c
 @@ -23,7 +23,7 @@
@@ -112582,6 +115653,18 @@ index 84b54a17b95d..3b3d6f654e0e 100644
  #endif
  
  static void __synchronize_hardirq(struct irq_desc *desc)
+@@ -356,8 +362,10 @@ irq_set_affinity_notifier(unsigned int irq, struct irq_affinity_notify *notify)
+ 	desc->affinity_notify = notify;
+ 	raw_spin_unlock_irqrestore(&desc->lock, flags);
+ 
+-	if (old_notify)
++	if (old_notify) {
++		cancel_work_sync(&old_notify->work);
+ 		kref_put(&old_notify->kref, old_notify->release);
++	}
+ 
+ 	return 0;
+ }
 diff --git a/kernel/kprobes.c b/kernel/kprobes.c
 index f4ddfdd2d07e..de78d1b998f8 100644
 --- a/kernel/kprobes.c
@@ -124961,6 +128044,25 @@ index deacc52d7ff1..8d12198eaa94 100644
  	parent->sk_ack_backlog++;
  }
  EXPORT_SYMBOL(bt_accept_enqueue);
+diff --git a/net/bluetooth/hci_conn.c b/net/bluetooth/hci_conn.c
+index bd4978ce8c45..3cf0764d5793 100644
+--- a/net/bluetooth/hci_conn.c
++++ b/net/bluetooth/hci_conn.c
+@@ -1276,6 +1276,14 @@ int hci_conn_check_link_mode(struct hci_conn *conn)
+ 	    !test_bit(HCI_CONN_ENCRYPT, &conn->flags))
+ 		return 0;
+ 
++	/* The minimum encryption key size needs to be enforced by the
++	 * host stack before establishing any L2CAP connections. The
++	 * specification in theory allows a minimum of 1, but to align
++	 * BR/EDR and LE transports, a minimum of 7 is chosen.
++	 */
++	if (conn->enc_key_size < HCI_MIN_ENC_KEY_SIZE)
++		return 0;
++
+ 	return 1;
+ }
+ 
 diff --git a/net/bluetooth/hci_sock.c b/net/bluetooth/hci_sock.c
 index 1506e1632394..d4e2a166ae17 100644
 --- a/net/bluetooth/hci_sock.c
@@ -124982,10 +128084,46 @@ index 1506e1632394..d4e2a166ae17 100644
  	if (hdev) {
  		if (hci_pi(sk)->channel == HCI_CHANNEL_USER) {
  			/* When releasing a user channel exclusive access,
+diff --git a/net/bluetooth/hidp/sock.c b/net/bluetooth/hidp/sock.c
+index 9f85a1943be9..2151913892ce 100644
+--- a/net/bluetooth/hidp/sock.c
++++ b/net/bluetooth/hidp/sock.c
+@@ -75,6 +75,7 @@ static int do_hidp_sock_ioctl(struct socket *sock, unsigned int cmd, void __user
+ 			sockfd_put(csock);
+ 			return err;
+ 		}
++		ca.name[sizeof(ca.name)-1] = 0;
+ 
+ 		err = hidp_connection_add(&ca, csock, isock);
+ 		if (!err && copy_to_user(argp, &ca, sizeof(ca)))
 diff --git a/net/bluetooth/l2cap_core.c b/net/bluetooth/l2cap_core.c
-index 2a7fb517d460..ccdc5c67d22a 100644
+index 2a7fb517d460..a3b2e3b5f04b 100644
 --- a/net/bluetooth/l2cap_core.c
 +++ b/net/bluetooth/l2cap_core.c
+@@ -510,12 +510,12 @@ void l2cap_chan_set_defaults(struct l2cap_chan *chan)
+ }
+ EXPORT_SYMBOL_GPL(l2cap_chan_set_defaults);
+ 
+-static void l2cap_le_flowctl_init(struct l2cap_chan *chan)
++static void l2cap_le_flowctl_init(struct l2cap_chan *chan, u16 tx_credits)
+ {
+ 	chan->sdu = NULL;
+ 	chan->sdu_last_frag = NULL;
+ 	chan->sdu_len = 0;
+-	chan->tx_credits = 0;
++	chan->tx_credits = tx_credits;
+ 	/* Derive MPS from connection MTU to stop HCI fragmentation */
+ 	chan->mps = min_t(u16, chan->imtu, chan->conn->mtu - L2CAP_HDR_SIZE);
+ 	/* Give enough credits for a full packet */
+@@ -1281,7 +1281,7 @@ static void l2cap_le_connect(struct l2cap_chan *chan)
+ 	if (test_and_set_bit(FLAG_LE_CONN_REQ_SENT, &chan->flags))
+ 		return;
+ 
+-	l2cap_le_flowctl_init(chan);
++	l2cap_le_flowctl_init(chan, 0);
+ 
+ 	req.psm     = chan->psm;
+ 	req.scid    = cpu_to_le16(chan->scid);
 @@ -3337,16 +3337,22 @@ static int l2cap_parse_conf_req(struct l2cap_chan *chan, void *data, size_t data
  
  	while (len >= L2CAP_CONF_OPT_SIZE) {
@@ -125163,6 +128301,19 @@ index 2a7fb517d460..ccdc5c67d22a 100644
  			txwin_ext = val;
  			break;
  		}
+@@ -5510,11 +5531,10 @@ static int l2cap_le_connect_req(struct l2cap_conn *conn,
+ 	chan->dcid = scid;
+ 	chan->omtu = mtu;
+ 	chan->remote_mps = mps;
+-	chan->tx_credits = __le16_to_cpu(req->credits);
+ 
+ 	__l2cap_chan_add(conn, chan);
+ 
+-	l2cap_le_flowctl_init(chan);
++	l2cap_le_flowctl_init(chan, __le16_to_cpu(req->credits));
+ 
+ 	dcid = chan->scid;
+ 	credits = chan->rx_credits;
 diff --git a/net/bluetooth/l2cap_sock.c b/net/bluetooth/l2cap_sock.c
 index 686bdc6b35b0..a3a2cd55e23a 100644
 --- a/net/bluetooth/l2cap_sock.c
@@ -133553,6 +136704,28 @@ index 7044d8c2b187..879f14257a3e 100644
  };
  
  static const struct snd_pcm_hw_constraint_list constraints_dmic_2ch = {
+diff --git a/sound/soc/intel/common/sst-firmware.c b/sound/soc/intel/common/sst-firmware.c
+index 1e067504b604..f830e59f93ea 100644
+--- a/sound/soc/intel/common/sst-firmware.c
++++ b/sound/soc/intel/common/sst-firmware.c
+@@ -1251,11 +1251,15 @@ struct sst_dsp *sst_dsp_new(struct device *dev,
+ 		goto irq_err;
+ 
+ 	err = sst_dma_new(sst);
+-	if (err)
+-		dev_warn(dev, "sst_dma_new failed %d\n", err);
++	if (err)  {
++		dev_err(dev, "sst_dma_new failed %d\n", err);
++		goto dma_err;
++	}
+ 
+ 	return sst;
+ 
++dma_err:
++	free_irq(sst->irq, sst);
+ irq_err:
+ 	if (sst->ops->free)
+ 		sst->ops->free(sst);
 diff --git a/sound/soc/intel/skylake/skl-pcm.c b/sound/soc/intel/skylake/skl-pcm.c
 index 557f80c0bfe5..5cd308d622f6 100644
 --- a/sound/soc/intel/skylake/skl-pcm.c
