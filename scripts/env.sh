@@ -21,7 +21,8 @@ source_arch='amd64'
 source_distro='ubuntu'
 source_release='bionic'
 
-releases_debian=('sid')
+# stable => stretch, testing => buster, unstable => sid
+releases_debian=('stretch' 'buster' 'sid')
 releases_ubuntu=('xenial' 'bionic' 'cosmic' 'disco')
 mirror_debian='http://deb.debian.org/debian'
 mirror_ubuntu='http://archive.ubuntu.com/ubuntu'
