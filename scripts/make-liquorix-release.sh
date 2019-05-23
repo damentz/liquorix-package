@@ -18,11 +18,11 @@ if [[ $procs -lt 2 ]]; then
     procs=2
 fi
 
-schedtool -D -n19 -e "$dir_scripts"/docker_bootstrap.sh $procs
-schedtool -D -n19 -e "$dir_scripts"/docker_build-source_all.sh $procs $build
-schedtool -D -n19 -e "$dir_scripts"/docker_submit-ppa-sources.sh $build
+"$dir_scripts"/docker_bootstrap.sh $procs
+"$dir_scripts"/docker_build-source_all.sh $procs $build
+"$dir_scripts"/docker_submit-ppa-sources.sh $build
 
 # We build only one kernel at a time since each build uses all CPU resources
-schedtool -D -n19 -e "$dir_scripts"/docker_build-binary_debian.sh 1 $build
+"$dir_scripts"/docker_build-binary_debian.sh 1 $build
 
 "$dir_scripts"/repo_add-debian-packages.sh $build
