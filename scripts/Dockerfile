@@ -15,7 +15,8 @@ RUN apt-get update &&\
         devscripts \
         equivs \
         wget \
-        gnupg &&\
+        gnupg \
+        schedtool &&\
     eatmydata apt-get clean &&\
     eatmydata rm -rfv /var/lib/apt/lists/* &&\
     echo "$PUBLIC" | gpg --import &&\
