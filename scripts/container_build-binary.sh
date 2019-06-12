@@ -75,7 +75,7 @@ cd "$dir_build/$package_name-$version_kernel"
 mk-build-deps -ir -t 'apt-get -y'
 
 echo "[INFO ] Building binary package for $release"
-dpkg-buildpackage --build=binary
+$schedtool dpkg-buildpackage --build=binary
 
 echo "[INFO ] Copying binary packages to bind mount: $dir_artifacts/"
 mkdir -p "$dir_artifacts"

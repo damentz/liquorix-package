@@ -42,6 +42,8 @@ build_deps=(
     'schedtool'
 )
 
+schedtool='schedtool -D -n19 -e'
+
 # Common routine to get correct release version for Debian / Ubuntu
 function get_release_version {
     local distro="${1:-}"
@@ -119,5 +121,5 @@ function build_source_package {
     mk-build-deps -ir -t 'apt-get -y'
 
     echo "[INFO ] Making source package"
-    dpkg-buildpackage --build=source
+    $schedtool dpkg-buildpackage --build=source
 }
