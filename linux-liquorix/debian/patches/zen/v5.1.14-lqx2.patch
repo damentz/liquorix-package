@@ -2199,7 +2199,7 @@ index 000000000000..5d4330be200f
 +   legacy interface which is only used on older systems which are either
 +   not affected or do not receive microcode updates anymore.
 diff --git a/Makefile b/Makefile
-index 26c92f892d24..92a059bf0e56 100644
+index 26c92f892d24..623d0662eeaf 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -1,9 +1,9 @@
@@ -2210,7 +2210,7 @@ index 26c92f892d24..92a059bf0e56 100644
 -EXTRAVERSION =
 -NAME = Shy Crocodile
 +SUBLEVEL = 14
-+EXTRAVERSION = -lqx1
++EXTRAVERSION = -lqx2
 +NAME = Chainsaw Slalom
  
  # *DOCUMENTATION*
@@ -105409,31 +105409,11 @@ index 13c1288b04a7..b5c6c4a8ab5d 100644
  			if (ses->session_flags & SMB2_SESSION_FLAG_ENCRYPT_DATA)
  				seq_puts(m, " encrypted");
  			if (ses->sign)
-diff --git a/fs/cifs/cifsfs.c b/fs/cifs/cifsfs.c
-index a05bf1d6e1d0..2ab3de440927 100644
---- a/fs/cifs/cifsfs.c
-+++ b/fs/cifs/cifsfs.c
-@@ -303,6 +303,7 @@ cifs_alloc_inode(struct super_block *sb)
- 	cifs_inode->uniqueid = 0;
- 	cifs_inode->createtime = 0;
- 	cifs_inode->epoch = 0;
-+	spin_lock_init(&cifs_inode->open_file_lock);
- 	generate_random_uuid(cifs_inode->lease_key);
- 
- 	/*
 diff --git a/fs/cifs/cifsglob.h b/fs/cifs/cifsglob.h
-index 585ad3207cb1..a588fbc54968 100644
+index 585ad3207cb1..607468948f72 100644
 --- a/fs/cifs/cifsglob.h
 +++ b/fs/cifs/cifsglob.h
-@@ -1357,6 +1357,7 @@ struct cifsInodeInfo {
- 	struct rw_semaphore lock_sem;	/* protect the fields above */
- 	/* BB add in lists for dirty pages i.e. write caching info for oplock */
- 	struct list_head openFileList;
-+	spinlock_t	open_file_lock;	/* protects openFileList */
- 	__u32 cifsAttrs; /* e.g. DOS archive bit, sparse, compressed, system */
- 	unsigned int oplock;		/* oplock/lease level we have */
- 	unsigned int epoch;		/* used to track lease state changes */
-@@ -1687,6 +1688,7 @@ static inline bool is_retryable_error(int error)
+@@ -1687,6 +1687,7 @@ static inline bool is_retryable_error(int error)
  
  #define   CIFS_HAS_CREDITS 0x0400    /* already has credits */
  #define   CIFS_TRANSFORM_REQ 0x0800    /* transform request before sending */
@@ -105441,21 +105421,6 @@ index 585ad3207cb1..a588fbc54968 100644
  
  /* Security Flags: indicate type of session setup needed */
  #define   CIFSSEC_MAY_SIGN	0x00001
-@@ -1759,10 +1761,14 @@ require use of the stronger protocol */
-  *  tcp_ses_lock protects:
-  *	list operations on tcp and SMB session lists
-  *  tcon->open_file_lock protects the list of open files hanging off the tcon
-+ *  inode->open_file_lock protects the openFileList hanging off the inode
-  *  cfile->file_info_lock protects counters and fields in cifs file struct
-  *  f_owner.lock protects certain per file struct operations
-  *  mapping->page_lock protects certain per page operations
-  *
-+ *  Note that the cifs_tcon.open_file_lock should be taken before
-+ *  not after the cifsInodeInfo.open_file_lock
-+ *
-  *  Semaphores
-  *  ----------
-  *  sesSem     operations on smb session
 diff --git a/fs/cifs/cifssmb.c b/fs/cifs/cifssmb.c
 index f43747c062a7..6050851edcb8 100644
 --- a/fs/cifs/cifssmb.c
@@ -105469,26 +105434,6 @@ index f43747c062a7..6050851edcb8 100644
  		pSMB->Timeout = 0;
  	} else if (waitFlag) {
  		flags = CIFS_BLOCKING_OP; /* blocking operation, no timeout */
-diff --git a/fs/cifs/connect.c b/fs/cifs/connect.c
-index 4c0e44489f21..e9507fba0b36 100644
---- a/fs/cifs/connect.c
-+++ b/fs/cifs/connect.c
-@@ -478,6 +478,7 @@ cifs_reconnect(struct TCP_Server_Info *server)
- 	spin_lock(&GlobalMid_Lock);
- 	server->nr_targets = 1;
- #ifdef CONFIG_CIFS_DFS_UPCALL
-+	spin_unlock(&GlobalMid_Lock);
- 	cifs_sb = find_super_by_tcp(server);
- 	if (IS_ERR(cifs_sb)) {
- 		rc = PTR_ERR(cifs_sb);
-@@ -495,6 +496,7 @@ cifs_reconnect(struct TCP_Server_Info *server)
- 	}
- 	cifs_dbg(FYI, "%s: will retry %d target(s)\n", __func__,
- 		 server->nr_targets);
-+	spin_lock(&GlobalMid_Lock);
- #endif
- 	if (server->tcpStatus == CifsExiting) {
- 		/* the demux thread will exit normally
 diff --git a/fs/cifs/dfs_cache.c b/fs/cifs/dfs_cache.c
 index 09b7d0d4f6e4..007cfa39be5f 100644
 --- a/fs/cifs/dfs_cache.c
@@ -105512,45 +105457,10 @@ index 09b7d0d4f6e4..007cfa39be5f 100644
  		ce = ERR_PTR(rc);
  	}
 diff --git a/fs/cifs/file.c b/fs/cifs/file.c
-index 7037a137fa53..736a61843e73 100644
+index 7037a137fa53..9a1db37b303a 100644
 --- a/fs/cifs/file.c
 +++ b/fs/cifs/file.c
-@@ -338,10 +338,12 @@ cifs_new_fileinfo(struct cifs_fid *fid, struct file *file,
- 	atomic_inc(&tcon->num_local_opens);
- 
- 	/* if readable file instance put first in list*/
-+	spin_lock(&cinode->open_file_lock);
- 	if (file->f_mode & FMODE_READ)
- 		list_add(&cfile->flist, &cinode->openFileList);
- 	else
- 		list_add_tail(&cfile->flist, &cinode->openFileList);
-+	spin_unlock(&cinode->open_file_lock);
- 	spin_unlock(&tcon->open_file_lock);
- 
- 	if (fid->purge_cache)
-@@ -413,7 +415,9 @@ void _cifsFileInfo_put(struct cifsFileInfo *cifs_file, bool wait_oplock_handler)
- 	cifs_add_pending_open_locked(&fid, cifs_file->tlink, &open);
- 
- 	/* remove it from the lists */
-+	spin_lock(&cifsi->open_file_lock);
- 	list_del(&cifs_file->flist);
-+	spin_unlock(&cifsi->open_file_lock);
- 	list_del(&cifs_file->tlist);
- 	atomic_dec(&tcon->num_local_opens);
- 
-@@ -1950,9 +1954,9 @@ cifs_get_writable_file(struct cifsInodeInfo *cifs_inode, bool fsuid_only,
- 			return 0;
- 		}
- 
--		spin_lock(&tcon->open_file_lock);
-+		spin_lock(&cifs_inode->open_file_lock);
- 		list_move_tail(&inv_file->flist, &cifs_inode->openFileList);
--		spin_unlock(&tcon->open_file_lock);
-+		spin_unlock(&cifs_inode->open_file_lock);
- 		cifsFileInfo_put(inv_file);
- 		++refind;
- 		inv_file = NULL;
-@@ -3221,7 +3225,9 @@ cifs_read_allocate_pages(struct cifs_readdata *rdata, unsigned int nr_pages)
+@@ -3221,7 +3221,9 @@ cifs_read_allocate_pages(struct cifs_readdata *rdata, unsigned int nr_pages)
  	}
  
  	if (rc) {
@@ -105601,7 +105511,7 @@ index c36ff0d1fe2a..aa61dcf471b3 100644
  		 &cinode->vfs_inode);
  }
 diff --git a/fs/cifs/smb2pdu.c b/fs/cifs/smb2pdu.c
-index a37774a55f3a..c96df8162c98 100644
+index a37774a55f3a..d2d8708f5e1a 100644
 --- a/fs/cifs/smb2pdu.c
 +++ b/fs/cifs/smb2pdu.c
 @@ -1013,7 +1013,8 @@ int smb3_validate_negotiate(const unsigned int xid, struct cifs_tcon *tcon)
@@ -105614,33 +105524,6 @@ index a37774a55f3a..c96df8162c98 100644
  	} else if (rc != 0) {
  		cifs_dbg(VFS, "validate protocol negotiate failed: %d\n", rc);
  		rc = -EIO;
-@@ -3048,9 +3049,14 @@ void smb2_reconnect_server(struct work_struct *work)
- 				tcon_exist = true;
- 			}
- 		}
-+		/*
-+		 * IPC has the same lifetime as its session and uses its
-+		 * refcount.
-+		 */
- 		if (ses->tcon_ipc && ses->tcon_ipc->need_reconnect) {
- 			list_add_tail(&ses->tcon_ipc->rlist, &tmp_list);
- 			tcon_exist = true;
-+			ses->ses_count++;
- 		}
- 	}
- 	/*
-@@ -3069,7 +3075,10 @@ void smb2_reconnect_server(struct work_struct *work)
- 		else
- 			resched = true;
- 		list_del_init(&tcon->rlist);
--		cifs_put_tcon(tcon);
-+		if (tcon->ipc)
-+			cifs_put_smb_ses(tcon->ses);
-+		else
-+			cifs_put_tcon(tcon);
- 	}
- 
- 	cifs_dbg(FYI, "Reconnecting tcons finished\n");
 diff --git a/fs/cifs/transport.c b/fs/cifs/transport.c
 index 1de8e996e566..72e242c49ca1 100644
 --- a/fs/cifs/transport.c
