@@ -25,7 +25,7 @@ else
 fi
 
 # Build arguments to bootstrap images in parallel
-declare -a architectures=('amd64' 'i386')
+declare -a architectures=('amd64')
 declare -a distros=('debian' 'ubuntu')
 declare -a args=()
 for arch in "${architectures[@]}"; do

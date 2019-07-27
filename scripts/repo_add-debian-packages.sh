@@ -15,7 +15,7 @@ if [[ ! -d "$repo_local_path" ]]; then
     exit 1
 fi
 
-for arch in 'amd64' 'i386'; do
+for arch in 'amd64'; do
     distro='debian'
     for release in "${releases_debian[@]}"; do
         cd "$dir_artifacts/$distro/$release"

@@ -12,7 +12,7 @@ declare -a args=()
 
 declare distro=''
 
-for arch in 'amd64' 'i386'; do
+for arch in 'amd64'; do
     distro='debian'
     for release in "${releases_debian[@]}"; do
         args+=("$arch" "$distro" "$release" "$build")
