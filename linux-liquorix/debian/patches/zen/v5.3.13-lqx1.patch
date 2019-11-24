@@ -2186,7 +2186,7 @@ index a50e97a63bc8..1d235c674be8 100644
  M:	Alan Stern <stern@rowland.harvard.edu>
  L:	linux-usb@vger.kernel.org
 diff --git a/Makefile b/Makefile
-index 6886f22902c9..1dc75863eaa0 100644
+index 6886f22902c9..7ca81e1d4c08 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -1,9 +1,9 @@
@@ -2196,7 +2196,7 @@ index 6886f22902c9..1dc75863eaa0 100644
 -SUBLEVEL = 0
 -EXTRAVERSION =
 -NAME = Bobtail Squid
-+SUBLEVEL = 12
++SUBLEVEL = 13
 +EXTRAVERSION = -lqx1
 +NAME = The Beauty and the Bug
  
@@ -6139,6 +6139,50 @@ index adaf266d8de8..7fdc821ebb78 100644
  	/*
  	 * We trap the first access to the FP/SIMD to save the host context
  	 * and restore the guest context lazily.
+diff --git a/arch/arm64/lib/clear_user.S b/arch/arm64/lib/clear_user.S
+index 10415572e82f..322b55664cca 100644
+--- a/arch/arm64/lib/clear_user.S
++++ b/arch/arm64/lib/clear_user.S
+@@ -48,5 +48,6 @@ EXPORT_SYMBOL(__arch_clear_user)
+ 	.section .fixup,"ax"
+ 	.align	2
+ 9:	mov	x0, x2			// return the original size
++	uaccess_disable_not_uao x2, x3
+ 	ret
+ 	.previous
+diff --git a/arch/arm64/lib/copy_from_user.S b/arch/arm64/lib/copy_from_user.S
+index 680e74409ff9..8472dc7798b3 100644
+--- a/arch/arm64/lib/copy_from_user.S
++++ b/arch/arm64/lib/copy_from_user.S
+@@ -66,5 +66,6 @@ EXPORT_SYMBOL(__arch_copy_from_user)
+ 	.section .fixup,"ax"
+ 	.align	2
+ 9998:	sub	x0, end, dst			// bytes not copied
++	uaccess_disable_not_uao x3, x4
+ 	ret
+ 	.previous
+diff --git a/arch/arm64/lib/copy_in_user.S b/arch/arm64/lib/copy_in_user.S
+index 0bedae3f3792..8e0355c1e318 100644
+--- a/arch/arm64/lib/copy_in_user.S
++++ b/arch/arm64/lib/copy_in_user.S
+@@ -68,5 +68,6 @@ EXPORT_SYMBOL(__arch_copy_in_user)
+ 	.section .fixup,"ax"
+ 	.align	2
+ 9998:	sub	x0, end, dst			// bytes not copied
++	uaccess_disable_not_uao x3, x4
+ 	ret
+ 	.previous
+diff --git a/arch/arm64/lib/copy_to_user.S b/arch/arm64/lib/copy_to_user.S
+index 2d88c736e8f2..6085214654dc 100644
+--- a/arch/arm64/lib/copy_to_user.S
++++ b/arch/arm64/lib/copy_to_user.S
+@@ -65,5 +65,6 @@ EXPORT_SYMBOL(__arch_copy_to_user)
+ 	.section .fixup,"ax"
+ 	.align	2
+ 9998:	sub	x0, end, dst			// bytes not copied
++	uaccess_disable_not_uao x3, x4
+ 	ret
+ 	.previous
 diff --git a/arch/arm64/mm/init.c b/arch/arm64/mm/init.c
 index f3c795278def..b1ee6cb4b17f 100644
 --- a/arch/arm64/mm/init.c
@@ -36414,7 +36458,7 @@ index 32f53de5b1fe..fe630438f67b 100644
  {
  	USB_DEVICE_AND_INTERFACE_INFO(NVIDIA_VENDOR_ID, 0x09ff, USB_CLASS_COMM,
 diff --git a/drivers/net/usb/cdc_ncm.c b/drivers/net/usb/cdc_ncm.c
-index 50c05d0f44cb..a245597a3902 100644
+index 50c05d0f44cb..c2c82e6391b4 100644
 --- a/drivers/net/usb/cdc_ncm.c
 +++ b/drivers/net/usb/cdc_ncm.c
 @@ -578,8 +578,8 @@ static void cdc_ncm_set_dgram_size(struct usbnet *dev, int new_size)
@@ -36424,7 +36468,7 @@ index 50c05d0f44cb..a245597a3902 100644
 -			      0, iface_no, &max_datagram_size, 2);
 -	if (err < 0) {
 +			      0, iface_no, &max_datagram_size, sizeof(max_datagram_size));
-+	if (err < sizeof(max_datagram_size)) {
++	if (err != sizeof(max_datagram_size)) {
  		dev_dbg(&dev->intf->dev, "GET_MAX_DATAGRAM_SIZE failed\n");
  		goto out;
  	}
@@ -50808,6 +50852,195 @@ index 703948c9fbe1..02206162eaa9 100644
  
  	pci_restore_state(pdev);
  out:
+diff --git a/drivers/video/fbdev/core/fbmon.c b/drivers/video/fbdev/core/fbmon.c
+index 3558a70a6664..8e2e19f3bf44 100644
+--- a/drivers/video/fbdev/core/fbmon.c
++++ b/drivers/video/fbdev/core/fbmon.c
+@@ -999,98 +999,6 @@ void fb_edid_to_monspecs(unsigned char *edid, struct fb_monspecs *specs)
+ 	DPRINTK("========================================\n");
+ }
+ 
+-/**
+- * fb_edid_add_monspecs() - add monitor video modes from E-EDID data
+- * @edid:	128 byte array with an E-EDID block
+- * @spacs:	monitor specs to be extended
+- */
+-void fb_edid_add_monspecs(unsigned char *edid, struct fb_monspecs *specs)
+-{
+-	unsigned char *block;
+-	struct fb_videomode *m;
+-	int num = 0, i;
+-	u8 svd[64], edt[(128 - 4) / DETAILED_TIMING_DESCRIPTION_SIZE];
+-	u8 pos = 4, svd_n = 0;
+-
+-	if (!edid)
+-		return;
+-
+-	if (!edid_checksum(edid))
+-		return;
+-
+-	if (edid[0] != 0x2 ||
+-	    edid[2] < 4 || edid[2] > 128 - DETAILED_TIMING_DESCRIPTION_SIZE)
+-		return;
+-
+-	DPRINTK("  Short Video Descriptors\n");
+-
+-	while (pos < edid[2]) {
+-		u8 len = edid[pos] & 0x1f, type = (edid[pos] >> 5) & 7;
+-		pr_debug("Data block %u of %u bytes\n", type, len);
+-		if (type == 2) {
+-			for (i = pos; i < pos + len; i++) {
+-				u8 idx = edid[pos + i] & 0x7f;
+-				svd[svd_n++] = idx;
+-				pr_debug("N%sative mode #%d\n",
+-					 edid[pos + i] & 0x80 ? "" : "on-n", idx);
+-			}
+-		} else if (type == 3 && len >= 3) {
+-			/* Check Vendor Specific Data Block.  For HDMI,
+-			   it is always 00-0C-03 for HDMI Licensing, LLC. */
+-			if (edid[pos + 1] == 3 && edid[pos + 2] == 0xc &&
+-			    edid[pos + 3] == 0)
+-				specs->misc |= FB_MISC_HDMI;
+-		}
+-		pos += len + 1;
+-	}
+-
+-	block = edid + edid[2];
+-
+-	DPRINTK("  Extended Detailed Timings\n");
+-
+-	for (i = 0; i < (128 - edid[2]) / DETAILED_TIMING_DESCRIPTION_SIZE;
+-	     i++, block += DETAILED_TIMING_DESCRIPTION_SIZE)
+-		if (PIXEL_CLOCK != 0)
+-			edt[num++] = block - edid;
+-
+-	/* Yikes, EDID data is totally useless */
+-	if (!(num + svd_n))
+-		return;
+-
+-	m = kcalloc(specs->modedb_len + num + svd_n,
+-		    sizeof(struct fb_videomode),
+-		    GFP_KERNEL);
+-
+-	if (!m)
+-		return;
+-
+-	memcpy(m, specs->modedb, specs->modedb_len * sizeof(struct fb_videomode));
+-
+-	for (i = specs->modedb_len; i < specs->modedb_len + num; i++) {
+-		get_detailed_timing(edid + edt[i - specs->modedb_len], &m[i]);
+-		if (i == specs->modedb_len)
+-			m[i].flag |= FB_MODE_IS_FIRST;
+-		pr_debug("Adding %ux%u@%u\n", m[i].xres, m[i].yres, m[i].refresh);
+-	}
+-
+-	for (i = specs->modedb_len + num; i < specs->modedb_len + num + svd_n; i++) {
+-		int idx = svd[i - specs->modedb_len - num];
+-		if (!idx || idx >= ARRAY_SIZE(cea_modes)) {
+-			pr_warn("Reserved SVD code %d\n", idx);
+-		} else if (!cea_modes[idx].xres) {
+-			pr_warn("Unimplemented SVD code %d\n", idx);
+-		} else {
+-			memcpy(&m[i], cea_modes + idx, sizeof(m[i]));
+-			pr_debug("Adding SVD #%d: %ux%u@%u\n", idx,
+-				 m[i].xres, m[i].yres, m[i].refresh);
+-		}
+-	}
+-
+-	kfree(specs->modedb);
+-	specs->modedb = m;
+-	specs->modedb_len = specs->modedb_len + num + svd_n;
+-}
+-
+ /*
+  * VESA Generalized Timing Formula (GTF)
+  */
+@@ -1500,9 +1408,6 @@ int fb_parse_edid(unsigned char *edid, struct fb_var_screeninfo *var)
+ void fb_edid_to_monspecs(unsigned char *edid, struct fb_monspecs *specs)
+ {
+ }
+-void fb_edid_add_monspecs(unsigned char *edid, struct fb_monspecs *specs)
+-{
+-}
+ void fb_destroy_modedb(struct fb_videomode *modedb)
+ {
+ }
+@@ -1610,7 +1515,6 @@ EXPORT_SYMBOL(fb_firmware_edid);
+ 
+ EXPORT_SYMBOL(fb_parse_edid);
+ EXPORT_SYMBOL(fb_edid_to_monspecs);
+-EXPORT_SYMBOL(fb_edid_add_monspecs);
+ EXPORT_SYMBOL(fb_get_mode);
+ EXPORT_SYMBOL(fb_validate_mode);
+ EXPORT_SYMBOL(fb_destroy_modedb);
+diff --git a/drivers/video/fbdev/core/modedb.c b/drivers/video/fbdev/core/modedb.c
+index ac049871704d..6473e0dfe146 100644
+--- a/drivers/video/fbdev/core/modedb.c
++++ b/drivers/video/fbdev/core/modedb.c
+@@ -289,63 +289,6 @@ static const struct fb_videomode modedb[] = {
+ };
+ 
+ #ifdef CONFIG_FB_MODE_HELPERS
+-const struct fb_videomode cea_modes[65] = {
+-	/* #1: 640x480p@59.94/60Hz */
+-	[1] = {
+-		NULL, 60, 640, 480, 39722, 48, 16, 33, 10, 96, 2, 0,
+-		FB_VMODE_NONINTERLACED, 0,
+-	},
+-	/* #3: 720x480p@59.94/60Hz */
+-	[3] = {
+-		NULL, 60, 720, 480, 37037, 60, 16, 30, 9, 62, 6, 0,
+-		FB_VMODE_NONINTERLACED, 0,
+-	},
+-	/* #5: 1920x1080i@59.94/60Hz */
+-	[5] = {
+-		NULL, 60, 1920, 1080, 13763, 148, 88, 15, 2, 44, 5,
+-		FB_SYNC_HOR_HIGH_ACT | FB_SYNC_VERT_HIGH_ACT,
+-		FB_VMODE_INTERLACED, 0,
+-	},
+-	/* #7: 720(1440)x480iH@59.94/60Hz */
+-	[7] = {
+-		NULL, 60, 1440, 480, 18554/*37108*/, 114, 38, 15, 4, 124, 3, 0,
+-		FB_VMODE_INTERLACED, 0,
+-	},
+-	/* #9: 720(1440)x240pH@59.94/60Hz */
+-	[9] = {
+-		NULL, 60, 1440, 240, 18554, 114, 38, 16, 4, 124, 3, 0,
+-		FB_VMODE_NONINTERLACED, 0,
+-	},
+-	/* #18: 720x576pH@50Hz */
+-	[18] = {
+-		NULL, 50, 720, 576, 37037, 68, 12, 39, 5, 64, 5, 0,
+-		FB_VMODE_NONINTERLACED, 0,
+-	},
+-	/* #19: 1280x720p@50Hz */
+-	[19] = {
+-		NULL, 50, 1280, 720, 13468, 220, 440, 20, 5, 40, 5,
+-		FB_SYNC_HOR_HIGH_ACT | FB_SYNC_VERT_HIGH_ACT,
+-		FB_VMODE_NONINTERLACED, 0,
+-	},
+-	/* #20: 1920x1080i@50Hz */
+-	[20] = {
+-		NULL, 50, 1920, 1080, 13480, 148, 528, 15, 5, 528, 5,
+-		FB_SYNC_HOR_HIGH_ACT | FB_SYNC_VERT_HIGH_ACT,
+-		FB_VMODE_INTERLACED, 0,
+-	},
+-	/* #32: 1920x1080p@23.98/24Hz */
+-	[32] = {
+-		NULL, 24, 1920, 1080, 13468, 148, 638, 36, 4, 44, 5,
+-		FB_SYNC_HOR_HIGH_ACT | FB_SYNC_VERT_HIGH_ACT,
+-		FB_VMODE_NONINTERLACED, 0,
+-	},
+-	/* #35: (2880)x480p4x@59.94/60Hz */
+-	[35] = {
+-		NULL, 60, 2880, 480, 9250, 240, 64, 30, 9, 248, 6, 0,
+-		FB_VMODE_NONINTERLACED, 0,
+-	},
+-};
+-
+ const struct fb_videomode vesa_modes[] = {
+ 	/* 0 640x350-85 VESA */
+ 	{ NULL, 85, 640, 350, 31746,  96, 32, 60, 32, 64, 3,
 diff --git a/drivers/video/fbdev/efifb.c b/drivers/video/fbdev/efifb.c
 index 04a22663b4fb..51d97ec4f58f 100644
 --- a/drivers/video/fbdev/efifb.c
@@ -115242,6 +115475,27 @@ index f87fabea4a85..b3a93f8e6e59 100644
  
  efi_status_t handle_cmdline_files(efi_system_table_t *sys_table_arg,
  				  efi_loaded_image_t *image,
+diff --git a/include/linux/fb.h b/include/linux/fb.h
+index 303771264644..50948e519897 100644
+--- a/include/linux/fb.h
++++ b/include/linux/fb.h
+@@ -721,8 +721,6 @@ extern int fb_parse_edid(unsigned char *edid, struct fb_var_screeninfo *var);
+ extern const unsigned char *fb_firmware_edid(struct device *device);
+ extern void fb_edid_to_monspecs(unsigned char *edid,
+ 				struct fb_monspecs *specs);
+-extern void fb_edid_add_monspecs(unsigned char *edid,
+-				 struct fb_monspecs *specs);
+ extern void fb_destroy_modedb(struct fb_videomode *modedb);
+ extern int fb_find_mode_cvt(struct fb_videomode *mode, int margins, int rb);
+ extern unsigned char *fb_ddc_read(struct i2c_adapter *adapter);
+@@ -796,7 +794,6 @@ struct dmt_videomode {
+ 
+ extern const char *fb_mode_option;
+ extern const struct fb_videomode vesa_modes[];
+-extern const struct fb_videomode cea_modes[65];
+ extern const struct dmt_videomode dmt_modes[];
+ 
+ struct fb_modelist {
 diff --git a/include/linux/filter.h b/include/linux/filter.h
 index 92c6e31fb008..38716f93825f 100644
 --- a/include/linux/filter.h
@@ -129118,7 +129372,7 @@ index 56cec636a1fc..c304a03ca94c 100644
  	  A lightweight compressed cache for swap pages.  It takes
  	  pages that are in the process of being swapped out and attempts to
 diff --git a/mm/compaction.c b/mm/compaction.c
-index 952dc2fb24e5..45e344c3aa08 100644
+index 952dc2fb24e5..07b30409bec6 100644
 --- a/mm/compaction.c
 +++ b/mm/compaction.c
 @@ -25,6 +25,10 @@
@@ -129126,7 +129380,7 @@ index 952dc2fb24e5..45e344c3aa08 100644
  #include "internal.h"
  
 +#ifdef CONFIG_COMPACTION
-+struct compaction_state compaction_states[MAX_NUMNODES];
++static struct compaction_state compaction_states[MAX_NUMNODES];
 +#endif
 +
  #ifdef CONFIG_COMPACTION
@@ -129183,7 +129437,7 @@ index 952dc2fb24e5..45e344c3aa08 100644
 +	wmark_low = 100 - compaction_states[node_id].hpage_compaction_effort;
 +	wmark = low ? wmark_low : min(wmark_low + 10, 100);
 +
-+	return extfrag_for_order(zone, HPAGE_PMD_ORDER) > wmark;
++	return extfrag_for_order(zone, HUGETLB_PAGE_ORDER) > wmark;
 +}
 +
 +static bool node_hpage_should_compact(pg_data_t *pgdat)
@@ -129192,7 +129446,7 @@ index 952dc2fb24e5..45e344c3aa08 100644
 +
 +	for_each_populated_zone(zone) {
 +		if (extfrag_hpage_wmark(zone, false) &&
-+			compaction_suitable(zone, HPAGE_PMD_ORDER,
++			compaction_suitable(zone, HUGETLB_PAGE_ORDER,
 +				0, zone_idx(zone)) == COMPACT_CONTINUE) {
 +			return true;
 +		}
@@ -129849,10 +130103,106 @@ index 7ef849da8278..3151c87dff73 100644
  		return memory_failure_hugetlb(pfn, flags);
  	if (TestSetPageHWPoison(p)) {
 diff --git a/mm/memory_hotplug.c b/mm/memory_hotplug.c
-index c73f09913165..2c1a66cd47df 100644
+index c73f09913165..f363fed0db4f 100644
 --- a/mm/memory_hotplug.c
 +++ b/mm/memory_hotplug.c
-@@ -1687,6 +1687,18 @@ static int check_cpu_on_node(pg_data_t *pgdat)
+@@ -436,67 +436,33 @@ static void shrink_zone_span(struct zone *zone, unsigned long start_pfn,
+ 	zone_span_writeunlock(zone);
+ }
+ 
+-static void shrink_pgdat_span(struct pglist_data *pgdat,
+-			      unsigned long start_pfn, unsigned long end_pfn)
++static void update_pgdat_span(struct pglist_data *pgdat)
+ {
+-	unsigned long pgdat_start_pfn = pgdat->node_start_pfn;
+-	unsigned long p = pgdat_end_pfn(pgdat); /* pgdat_end_pfn namespace clash */
+-	unsigned long pgdat_end_pfn = p;
+-	unsigned long pfn;
+-	int nid = pgdat->node_id;
+-
+-	if (pgdat_start_pfn == start_pfn) {
+-		/*
+-		 * If the section is smallest section in the pgdat, it need
+-		 * shrink pgdat->node_start_pfn and pgdat->node_spanned_pages.
+-		 * In this case, we find second smallest valid mem_section
+-		 * for shrinking zone.
+-		 */
+-		pfn = find_smallest_section_pfn(nid, NULL, end_pfn,
+-						pgdat_end_pfn);
+-		if (pfn) {
+-			pgdat->node_start_pfn = pfn;
+-			pgdat->node_spanned_pages = pgdat_end_pfn - pfn;
+-		}
+-	} else if (pgdat_end_pfn == end_pfn) {
+-		/*
+-		 * If the section is biggest section in the pgdat, it need
+-		 * shrink pgdat->node_spanned_pages.
+-		 * In this case, we find second biggest valid mem_section for
+-		 * shrinking zone.
+-		 */
+-		pfn = find_biggest_section_pfn(nid, NULL, pgdat_start_pfn,
+-					       start_pfn);
+-		if (pfn)
+-			pgdat->node_spanned_pages = pfn - pgdat_start_pfn + 1;
+-	}
++	unsigned long node_start_pfn = 0, node_end_pfn = 0;
++	struct zone *zone;
+ 
+-	/*
+-	 * If the section is not biggest or smallest mem_section in the pgdat,
+-	 * it only creates a hole in the pgdat. So in this case, we need not
+-	 * change the pgdat.
+-	 * But perhaps, the pgdat has only hole data. Thus it check the pgdat
+-	 * has only hole or not.
+-	 */
+-	pfn = pgdat_start_pfn;
+-	for (; pfn < pgdat_end_pfn; pfn += PAGES_PER_SUBSECTION) {
+-		if (unlikely(!pfn_valid(pfn)))
+-			continue;
++	for (zone = pgdat->node_zones;
++	     zone < pgdat->node_zones + MAX_NR_ZONES; zone++) {
++		unsigned long zone_end_pfn = zone->zone_start_pfn +
++					     zone->spanned_pages;
+ 
+-		if (pfn_to_nid(pfn) != nid)
++		/* No need to lock the zones, they can't change. */
++		if (!zone->spanned_pages)
+ 			continue;
+-
+-		/* Skip range to be removed */
+-		if (pfn >= start_pfn && pfn < end_pfn)
++		if (!node_end_pfn) {
++			node_start_pfn = zone->zone_start_pfn;
++			node_end_pfn = zone_end_pfn;
+ 			continue;
++		}
+ 
+-		/* If we find valid section, we have nothing to do */
+-		return;
++		if (zone_end_pfn > node_end_pfn)
++			node_end_pfn = zone_end_pfn;
++		if (zone->zone_start_pfn < node_start_pfn)
++			node_start_pfn = zone->zone_start_pfn;
+ 	}
+ 
+-	/* The pgdat has no valid section */
+-	pgdat->node_start_pfn = 0;
+-	pgdat->node_spanned_pages = 0;
++	pgdat->node_start_pfn = node_start_pfn;
++	pgdat->node_spanned_pages = node_end_pfn - node_start_pfn;
+ }
+ 
+ static void __remove_zone(struct zone *zone, unsigned long start_pfn,
+@@ -507,7 +473,7 @@ static void __remove_zone(struct zone *zone, unsigned long start_pfn,
+ 
+ 	pgdat_resize_lock(zone->zone_pgdat, &flags);
+ 	shrink_zone_span(zone, start_pfn, start_pfn + nr_pages);
+-	shrink_pgdat_span(pgdat, start_pfn, start_pfn + nr_pages);
++	update_pgdat_span(pgdat);
+ 	pgdat_resize_unlock(zone->zone_pgdat, &flags);
+ }
+ 
+@@ -1687,6 +1653,18 @@ static int check_cpu_on_node(pg_data_t *pgdat)
  	return 0;
  }
  
@@ -129871,7 +130221,7 @@ index c73f09913165..2c1a66cd47df 100644
  /**
   * try_offline_node
   * @nid: the node ID
-@@ -1699,25 +1711,24 @@ static int check_cpu_on_node(pg_data_t *pgdat)
+@@ -1699,25 +1677,24 @@ static int check_cpu_on_node(pg_data_t *pgdat)
  void try_offline_node(int nid)
  {
  	pg_data_t *pgdat = NODE_DATA(nid);
