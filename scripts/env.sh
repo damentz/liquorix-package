@@ -23,7 +23,7 @@ source_release='bionic'
 
 # stable => stretch, testing => buster, unstable => sid
 releases_debian=('stretch' 'buster' 'bullseye' 'sid')
-releases_ubuntu=('xenial' 'bionic' 'disco' 'eoan')
+releases_ubuntu=('xenial' 'bionic' 'disco' 'eoan' 'focal')
 mirror_debian='http://deb.debian.org/debian'
 mirror_ubuntu='http://archive.ubuntu.com/ubuntu'
 
