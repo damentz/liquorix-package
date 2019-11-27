@@ -6,9 +6,9 @@ set -euo pipefail
 source "$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/env.sh"
 
 # Bootstrap common prerequisites
-"$dir_base"/scripts/common_bootstrap.sh
+"$dir_scripts"/common_bootstrap.sh
 
-cd "$dir_base/scripts"
+cd "$dir_scripts"
 
 if ! command -v docker > /dev/null; then
     echo "[ERROR] Docker is not installed, cannot continue!"
@@ -46,4 +46,4 @@ done
 # Then pass them into docker_bootstrap-image.sh with xargs
 for item in "${args[@]}"; do
     echo "$item"
-done | xargs -n3 -P "$processes" "$dir_base/scripts/docker_bootstrap-image.sh"
+done | xargs -n3 -P "$processes" "$dir_scripts/docker_bootstrap-image.sh"

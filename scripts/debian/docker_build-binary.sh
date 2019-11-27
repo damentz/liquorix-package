@@ -5,11 +5,17 @@ set -euo pipefail
 # shellcheck source=env.sh
 source "$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/env.sh"
 
-declare distro=${1:-}
-declare release=${2:-}
-declare build=${3:-${version_build}}
+declare arch=${1:-}
+declare distro=${2:-}
+declare release=${3:-}
+declare build=${4:-${version_build}}
 
 declare -i fail=0
+
+if [[ -z "$arch" ]]; then
+    echo "[ERROR] No architecture set!"
+    fail=1
+fi
 
 if [[ -z "$distro" ]]; then
     echo "[ERROR] No distribution set!"
@@ -30,8 +36,9 @@ docker run \
     --rm \
     --tmpfs /build:exec \
     -v $dir_base:/liquorix-package \
-    -t "liquorix_$source_arch/$source_distro/$source_release" \
-    /liquorix-package/scripts/container_build-source.sh \
+    -t "liquorix_$arch/$distro/$release" \
+    /liquorix-package/scripts/debian/container_build-binary.sh \
+        $arch \
         $distro \
         $release \
         $build
