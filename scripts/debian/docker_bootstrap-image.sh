@@ -72,7 +72,7 @@ if [[ "$(docker image ls)" == *"$release_string"* ]]; then
 else
     echo "[INFO ] $release_string: Docker image not found, building with Dockerfile."
     DOCKER_BUILDKIT=1 docker build \
-        -f "$dir_base/scripts/Dockerfile" \
+        -f "$dir_scripts/Dockerfile" \
         -t "$release_string" \
         --pull=true \
         --build-arg ARCH="$arch" \

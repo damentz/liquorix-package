@@ -15,7 +15,7 @@ for release in "${releases_ubuntu[@]}"; do
     --tmpfs /build:exec \
     -v "$dir_base":/liquorix-package \
     -t "liquorix_$source_arch/$source_distro/$source_release" \
-    /liquorix-package/scripts/container_dput-to-ppa.sh \
+    /liquorix-package/scripts/debian/container_dput-to-ppa.sh \
         "$distro" \
         "$release" \
         "$build"

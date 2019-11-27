@@ -2,12 +2,11 @@
 
 set -euo pipefail
 
-# shellcheck source=env.sh
-source "$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/env.sh"
+# shellcheck source=debian/env.sh
+source "$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/debian/env.sh"
 
 
 declare build=${1:-${version_build}}
-declare dir_scripts="$dir_base/scripts"
 
 declare -i procs=0
 if command -v nproc > /dev/null 2>&1; then
