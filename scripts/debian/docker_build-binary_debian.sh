@@ -22,4 +22,4 @@ done
 echo "[DEBUG] $0, args: ${args[@]}"
 for item in "${args[@]}"; do
     echo "$item"
-done | xargs -n4 -P "$processes" "$dir_scripts/debian/docker_build-binary.sh"
+done | xargs -n4 -P "$processes" "$dir_scripts/docker_build-binary.sh"
