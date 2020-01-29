@@ -21,15 +21,19 @@ class Changelog(list):
 (?P<distribution>
     [-+0-9a-zA-Z.]+
 )
-\;
+\;\s+urgency=
+(?P<urgency>
+    \w+
+)
 """
     _re = re.compile(_rules, re.X)
 
     class Entry(object):
-        __slot__ = 'distribution', 'source', 'version'
+        __slot__ = 'distribution', 'source', 'version', 'urgency'
 
-        def __init__(self, distribution, source, version):
-            self.distribution, self.source, self.version = distribution, source, version
+        def __init__(self, distribution, source, version, urgency):
+            self.distribution, self.source, self.version, self.urgency = \
+                distribution, source, version, urgency
 
     def __init__(self, dir='', version=None):
         if version is None:
@@ -48,7 +52,9 @@ class Changelog(list):
                 if not len(self):
                     raise
                 v = Version(match.group('version'))
-            self.append(self.Entry(match.group('distribution'), match.group('source'), v))
+            self.append(self.Entry(match.group('distribution'),
+                                   match.group('source'), v,
+                                   match.group('urgency')))
 
 
 class Version(object):
@@ -210,9 +216,10 @@ class PackageDescription(object):
         self.short = []
         self.long = []
         if value is not None:
-            short, long = value.split(u"\n", 1)
-            self.append(long)
-            self.append_short(short)
+            desc_split = value.split("\n", 1)
+            self.append_short(desc_split[0])
+            if len(desc_split) == 2:
+                self.append(desc_split[1])
 
     def __str__(self):
         wrap = utils.TextWrapper(width=74, fix_sentence_endings=True).wrap
@@ -221,7 +228,7 @@ class PackageDescription(object):
         for i in self.long:
             long_pars.append(wrap(i))
         long = '\n .\n '.join(['\n '.join(i) for i in long_pars])
-        return short + '\n ' + long
+        return short + '\n ' + long if long else short
 
     def append(self, str):
         str = str.strip()
@@ -386,7 +393,35 @@ class PackageRelationEntry(object):
             self.arches = []
 
 
-class Package(dict):
+class _ControlFileDict(dict):
+    def __setitem__(self, key, value):
+        try:
+            cls = self._fields[key]
+            if not isinstance(value, cls):
+                value = cls(value)
+        except KeyError:
+            pass
+        super(_ControlFileDict, self).__setitem__(key, value)
+
+    def keys(self):
+        keys = set(super(_ControlFileDict, self).keys())
+        for i in self._fields.keys():
+            if i in self:
+                keys.remove(i)
+                yield i
+        for i in sorted(list(keys)):
+            yield i
+
+    def items(self):
+        for i in self.keys():
+            yield (i, self[i])
+
+    def values(self):
+        for i in self.keys():
+            yield self[i]
+
+
+class Package(_ControlFileDict):
     _fields = collections.OrderedDict((
         ('Package', str),
         ('Source', str),
@@ -409,49 +444,14 @@ class Package(dict):
         ('Description', PackageDescription),
     ))
 
-    def __setitem__(self, key, value):
-        try:
-            cls = self._fields[key]
-            if not isinstance(value, cls):
-                value = cls(value)
-        except KeyError:
-            pass
-        super(Package, self).__setitem__(key, value)
 
-    def keys(self):
-        keys = set(super(Package, self).keys())
-        for i in self._fields.keys():
-            if i in self:
-                keys.remove(i)
-                yield i
-        for i in keys:
-            yield i
-
-    def items(self):
-        for i in self.keys():
-            yield (i, self[i])
-
-    def values(self):
-        for i in self.keys():
-            yield self[i]
-
-
-class TestsControl(dict):
-    _fields = {
-        'Tests': str,
-        'Test-Command': str,
-        'Restrictions': str,
-        'Features': str,
-        'Depends': PackageRelation,
-        'Tests-Directory': str,
-        'Classes': str,
-    }
-
-    def __setitem__(self, key, value):
-        try:
-            cls = self._fields[key]
-            if not isinstance(value, cls):
-                value = cls(value)
-        except KeyError:
-            pass
-        super(TestsControl, self).__setitem__(key, value)
+class TestsControl(_ControlFileDict):
+    _fields = collections.OrderedDict((
+        ('Tests', str),
+        ('Test-Command', str),
+        ('Restrictions', str),
+        ('Features', str),
+        ('Depends', PackageRelation),
+        ('Tests-Directory', str),
+        ('Classes', str),
+    ))

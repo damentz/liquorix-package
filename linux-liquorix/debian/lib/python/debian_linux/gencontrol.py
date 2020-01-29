@@ -80,6 +80,7 @@ class Gencontrol(object):
     def __init__(self, config, templates, version=Version):
         self.config, self.templates = config, templates
         self.changelog = Changelog(version=version)
+        self.vars = {}
 
     def __call__(self):
         packages = PackagesList()
@@ -94,7 +95,7 @@ class Gencontrol(object):
     def do_source(self, packages):
         source = self.templates["control.source"][0]
         source['Source'] = self.changelog[0].source
-        packages['source'] = self.process_package(source)
+        packages['source'] = self.process_package(source, self.vars)
 
     def do_main(self, packages, makefile):
         config_entry = self.config['base', ]
@@ -298,3 +299,22 @@ class Gencontrol(object):
             for key, value in entry.items():
                 f.write(u"%s: %s\n" % (key, value))
             f.write('\n')
+
+def merge_packages(packages, new, arch):
+    for new_package in new:
+        name = new_package['Package']
+        if name in packages:
+            package = packages.get(name)
+            package['Architecture'].add(arch)
+
+            for field in 'Depends', 'Provides', 'Suggests', 'Recommends', 'Conflicts':
+                if field in new_package:
+                    if field in package:
+                        v = package[field]
+                        v.extend(new_package[field])
+                    else:
+                        package[field] = new_package[field]
+
+        else:
+            new_package['Architecture'] = arch
+            packages.append(new_package)

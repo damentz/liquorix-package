@@ -61,6 +61,9 @@ def _read_rfc822(f, cls):
             if not line:
                 eof = True
                 break
+            # Strip comments rather than trying to preserve them
+            if line[0] == '#':
+                continue
             line = line.strip('\n')
             if not line:
                 break
