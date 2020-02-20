@@ -54,3 +54,5 @@ curl -X POST -H "Content-Type:application/octet-stream" \
     -H "Authorization: token ${GH_ASSET_TOKEN:-}" \
     --data-binary @"${tag_patch_dir}/${tag_patch_file}.sig" \
     "https://uploads.github.com/repositories/$repository_id/releases/$release_id/assets?name=$tag_patch_file.sig"
+
+echo -e "\n"
