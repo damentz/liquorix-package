@@ -20,3 +20,5 @@ git add Makefile
 git commit -m "Cut $tag"
 git tag -s "$tag" -m "Cut $tag"
 git push origin "$tag"
+
+echo -e "\n"
