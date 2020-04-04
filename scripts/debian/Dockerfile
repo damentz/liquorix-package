@@ -7,7 +7,8 @@ FROM $ARCH/$DISTRO:$RELEASE
 ARG DEFAULT
 ARG PUBLIC
 ARG SECRET
-RUN apt-get update &&\
+RUN export DEBIAN_FRONTEND=noninteractive &&\
+    apt-get update &&\
     apt-get install eatmydata -y &&\
     eatmydata apt-get dist-upgrade -y &&\
     eatmydata apt-get install -y \
