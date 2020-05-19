@@ -152,30 +152,6 @@ index 650eaa03f15ea..c458245893395 100644
  max_user_namespaces
  ===================
  
-diff --git a/Documentation/admin-guide/sysctl/vm.rst b/Documentation/admin-guide/sysctl/vm.rst
-index 64aeee1009cab..4b975faec43a6 100644
---- a/Documentation/admin-guide/sysctl/vm.rst
-+++ b/Documentation/admin-guide/sysctl/vm.rst
-@@ -119,6 +119,19 @@ all zones are compacted such that free memory is available in contiguous
- blocks where possible. This can be important for example in the allocation of
- huge pages although processes will also directly compact memory as required.
- 
-+compaction_proactiveness
-+========================
-+
-+This tunable takes a value in the range [0, 100] with a default value of
-+20. This tunable determines how aggressively compaction is done in the
-+background. Setting it to 0 disables proactive compaction.
-+
-+Note that compaction has a non-trivial system-wide impact as pages
-+belonging to different processes are moved around, which could also lead
-+to latency spikes in unsuspecting applications. The kernel employs
-+various heuristics to avoid wasting CPU cycles if it detects that
-+proactive compaction is not being effective.
-+
- 
- compact_unevictable_allowed
- ===========================
 diff --git a/Documentation/core-api/padata.rst b/Documentation/core-api/padata.rst
 index 9a24c111781d9..b7e047af993e8 100644
 --- a/Documentation/core-api/padata.rst
@@ -1428,7 +1404,7 @@ index 5a5332b3591d7..eedfb07a3263a 100644
  M:	Valdis Kletnieks <valdis.kletnieks@vt.edu>
  L:	linux-fsdevel@vger.kernel.org
 diff --git a/Makefile b/Makefile
-index 4d0711f540475..d0407fce7b3ee 100644
+index 4d0711f540475..d4f778d9f16e3 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -1,9 +1,9 @@
@@ -1439,7 +1415,7 @@ index 4d0711f540475..d0407fce7b3ee 100644
 -EXTRAVERSION =
 -NAME = Kleptomaniac Octopus
 +SUBLEVEL = 13
-+EXTRAVERSION = -lqx3
++EXTRAVERSION = -lqx4
 +NAME = Tea Storm
  
  # *DOCUMENTATION*
@@ -42521,24 +42497,6 @@ index 7b73ef7f902d4..b56cc825f64d9 100644
  static inline struct buffer_head *
  sb_getblk(struct super_block *sb, sector_t block)
  {
-diff --git a/include/linux/compaction.h b/include/linux/compaction.h
-index 4b898cdbdf056..ccd28978b2969 100644
---- a/include/linux/compaction.h
-+++ b/include/linux/compaction.h
-@@ -85,11 +85,13 @@ static inline unsigned long compact_gap(unsigned int order)
- 
- #ifdef CONFIG_COMPACTION
- extern int sysctl_compact_memory;
-+extern int sysctl_compaction_proactiveness;
- extern int sysctl_compaction_handler(struct ctl_table *table, int write,
- 			void __user *buffer, size_t *length, loff_t *ppos);
- extern int sysctl_extfrag_threshold;
- extern int sysctl_compact_unevictable_allowed;
- 
-+extern int extfrag_for_order(struct zone *zone, unsigned int order);
- extern int fragmentation_index(struct zone *zone, unsigned int order);
- extern enum compact_result try_to_compact_pages(gfp_t gfp_mask,
- 		unsigned int order, unsigned int alloc_flags,
 diff --git a/include/linux/compiler.h b/include/linux/compiler.h
 index 5e88e7e33abec..732754d960396 100644
 --- a/include/linux/compiler.h
@@ -56431,7 +56389,7 @@ index 0000000000000..bf5c6e97e1396
 +	l->entries--;
 +}
 diff --git a/kernel/sysctl.c b/kernel/sysctl.c
-index ad5b88a53c5a8..902d609fdaa98 100644
+index ad5b88a53c5a8..a2b6716218d55 100644
 --- a/kernel/sysctl.c
 +++ b/kernel/sysctl.c
 @@ -110,6 +110,9 @@ extern int core_uses_pid;
@@ -56567,22 +56525,6 @@ index ad5b88a53c5a8..902d609fdaa98 100644
  #if defined(CONFIG_S390) && defined(CONFIG_SMP)
  	{
  		.procname	= "spin_retry",
-@@ -1470,6 +1550,15 @@ static struct ctl_table vm_table[] = {
- 		.mode		= 0200,
- 		.proc_handler	= sysctl_compaction_handler,
- 	},
-+	{
-+		.procname	= "compaction_proactiveness",
-+		.data		= &sysctl_compaction_proactiveness,
-+		.maxlen		= sizeof(int),
-+		.mode		= 0644,
-+		.proc_handler	= proc_dointvec_minmax,
-+		.extra1		= SYSCTL_ZERO,
-+		.extra2		= &one_hundred,
-+	},
- 	{
- 		.procname	= "extfrag_threshold",
- 		.data		= &sysctl_extfrag_threshold,
 diff --git a/kernel/time/Kconfig b/kernel/time/Kconfig
 index fcc42353f1253..60b4fd254c806 100644
 --- a/kernel/time/Kconfig
@@ -57551,232 +57493,6 @@ index 62f05f605fb5b..3f2480e4c5af3 100644
  static wait_queue_head_t congestion_wqh[2] = {
  		__WAIT_QUEUE_HEAD_INITIALIZER(congestion_wqh[0]),
  		__WAIT_QUEUE_HEAD_INITIALIZER(congestion_wqh[1])
-diff --git a/mm/compaction.c b/mm/compaction.c
-index 672d3c78c6abf..40fa0c6b03842 100644
---- a/mm/compaction.c
-+++ b/mm/compaction.c
-@@ -50,6 +50,11 @@ static inline void count_compact_events(enum vm_event_item item, long delta)
- #define pageblock_start_pfn(pfn)	block_start_pfn(pfn, pageblock_order)
- #define pageblock_end_pfn(pfn)		block_end_pfn(pfn, pageblock_order)
- 
-+/*
-+ * Fragmentation score check interval for proactive compaction purposes.
-+ */
-+static const int HPAGE_FRAG_CHECK_INTERVAL_MSEC = 500;
-+
- static unsigned long release_freepages(struct list_head *freelist)
- {
- 	struct page *page, *next;
-@@ -1846,6 +1851,71 @@ static inline bool is_via_compact_memory(int order)
- 	return order == -1;
- }
- 
-+static bool kswapd_is_running(pg_data_t *pgdat)
-+{
-+	return pgdat->kswapd && (pgdat->kswapd->state == TASK_RUNNING);
-+}
-+
-+/*
-+ * A zone's fragmentation score is the external fragmentation wrt to the
-+ * HUGETLB_PAGE_ORDER scaled by the zone's size. It returns a value in the
-+ * range [0, 100].
-+
-+ * The scaling factor ensures that proactive compaction focuses on larger
-+ * zones like ZONE_NORMAL, rather than smaller, specialized zones like
-+ * ZONE_DMA32. For smaller zones, the score value remains close to zero,
-+ * and thus never exceeds the high threshold for proactive compaction.
-+ */
-+static int fragmentation_score_zone(struct zone *zone)
-+{
-+	unsigned long score;
-+
-+	score = zone->present_pages *
-+			extfrag_for_order(zone, HPAGE_PMD_ORDER);
-+	return div64_ul(score, zone->zone_pgdat->node_present_pages + 1);
-+}
-+
-+/*
-+ * The per-node proactive (background) compaction process is started by its
-+ * corresponding kcompactd thread when the node's fragmentation score
-+ * exceeds the high threshold. The compaction process remains active till
-+ * the node's score falls below the low threshold, or one of the back-off
-+ * conditions is met.
-+ */
-+static int fragmentation_score_node(pg_data_t *pgdat)
-+{
-+	unsigned long score = 0;
-+	int zoneid;
-+
-+	for (zoneid = 0; zoneid < MAX_NR_ZONES; zoneid++) {
-+		struct zone *zone;
-+
-+		zone = &pgdat->node_zones[zoneid];
-+		score += fragmentation_score_zone(zone);
-+	}
-+
-+	return score;
-+}
-+
-+static int fragmentation_score_wmark(pg_data_t *pgdat, bool low)
-+{
-+	int wmark_low;
-+
-+	wmark_low = 100 - sysctl_compaction_proactiveness;
-+	return low ? wmark_low : min(wmark_low + 10, 100);
-+}
-+
-+static bool should_proactive_compact_node(pg_data_t *pgdat)
-+{
-+	int wmark_high;
-+
-+	if (!sysctl_compaction_proactiveness || kswapd_is_running(pgdat))
-+		return false;
-+
-+	wmark_high = fragmentation_score_wmark(pgdat, false);
-+	return fragmentation_score_node(pgdat) > wmark_high;
-+}
-+
- static enum compact_result __compact_finished(struct compact_control *cc)
- {
- 	unsigned int order;
-@@ -1872,6 +1942,25 @@ static enum compact_result __compact_finished(struct compact_control *cc)
- 			return COMPACT_PARTIAL_SKIPPED;
- 	}
- 
-+	if (cc->proactive_compaction) {
-+		int score, wmark_low;
-+		pg_data_t *pgdat;
-+
-+		pgdat = cc->zone->zone_pgdat;
-+		if (kswapd_is_running(pgdat))
-+			return COMPACT_PARTIAL_SKIPPED;
-+
-+		score = fragmentation_score_zone(cc->zone);
-+		wmark_low = fragmentation_score_wmark(pgdat, true);
-+
-+		if (score > wmark_low)
-+			ret = COMPACT_CONTINUE;
-+		else
-+			ret = COMPACT_SUCCESS;
-+
-+		goto out;
-+	}
-+
- 	if (is_via_compact_memory(cc->order))
- 		return COMPACT_CONTINUE;
- 
-@@ -1930,6 +2019,7 @@ static enum compact_result __compact_finished(struct compact_control *cc)
- 		}
- 	}
- 
-+out:
- 	if (cc->contended || fatal_signal_pending(current))
- 		ret = COMPACT_CONTENDED;
- 
-@@ -2404,6 +2494,41 @@ enum compact_result try_to_compact_pages(gfp_t gfp_mask, unsigned int order,
- 	return rc;
- }
- 
-+/*
-+ * Compact all zones within a node till each zone's fragmentation score
-+ * reaches within proactive compaction thresholds (as determined by the
-+ * proactiveness tunable).
-+ *
-+ * It is possible that the function returns before reaching score targets
-+ * due to various back-off conditions, such as, contention on per-node or
-+ * per-zone locks.
-+ */
-+static void proactive_compact_node(pg_data_t *pgdat)
-+{
-+	int zoneid;
-+	struct zone *zone;
-+	struct compact_control cc = {
-+		.order = -1,
-+		.mode = MIGRATE_SYNC_LIGHT,
-+		.ignore_skip_hint = true,
-+		.whole_zone = true,
-+		.gfp_mask = GFP_KERNEL,
-+		.proactive_compaction = true,
-+	};
-+
-+	for (zoneid = 0; zoneid < MAX_NR_ZONES; zoneid++) {
-+		zone = &pgdat->node_zones[zoneid];
-+		if (!populated_zone(zone))
-+			continue;
-+
-+		cc.zone = zone;
-+
-+		compact_zone(&cc, NULL);
-+
-+		VM_BUG_ON(!list_empty(&cc.freepages));
-+		VM_BUG_ON(!list_empty(&cc.migratepages));
-+	}
-+}
- 
- /* Compact all zones within a node */
- static void compact_node(int nid)
-@@ -2450,6 +2575,13 @@ static void compact_nodes(void)
- /* The written value is actually unused, all memory is compacted */
- int sysctl_compact_memory;
- 
-+/*
-+ * Tunable for proactive compaction. It determines how
-+ * aggressively the kernel should compact memory in the
-+ * background. It takes values in the range [0, 100].
-+ */
-+int sysctl_compaction_proactiveness = 20;
-+
- /*
-  * This is the entry point for compacting all nodes via
-  * /proc/sys/vm/compact_memory
-@@ -2629,6 +2761,7 @@ static int kcompactd(void *p)
- {
- 	pg_data_t *pgdat = (pg_data_t*)p;
- 	struct task_struct *tsk = current;
-+	unsigned int proactive_defer = 0;
- 
- 	const struct cpumask *cpumask = cpumask_of_node(pgdat->node_id);
- 
-@@ -2644,12 +2777,34 @@ static int kcompactd(void *p)
- 		unsigned long pflags;
- 
- 		trace_mm_compaction_kcompactd_sleep(pgdat->node_id);
--		wait_event_freezable(pgdat->kcompactd_wait,
--				kcompactd_work_requested(pgdat));
-+		if (wait_event_freezable_timeout(pgdat->kcompactd_wait,
-+			kcompactd_work_requested(pgdat),
-+			msecs_to_jiffies(HPAGE_FRAG_CHECK_INTERVAL_MSEC))) {
-+
-+			psi_memstall_enter(&pflags);
-+			kcompactd_do_work(pgdat);
-+			psi_memstall_leave(&pflags);
-+			continue;
-+		}
- 
--		psi_memstall_enter(&pflags);
--		kcompactd_do_work(pgdat);
--		psi_memstall_leave(&pflags);
-+		/* kcompactd wait timeout */
-+		if (should_proactive_compact_node(pgdat)) {
-+			unsigned int prev_score, score;
-+
-+			if (proactive_defer) {
-+				proactive_defer--;
-+				continue;
-+			}
-+			prev_score = fragmentation_score_node(pgdat);
-+			proactive_compact_node(pgdat);
-+			score = fragmentation_score_node(pgdat);
-+			/*
-+			 * Defer proactive compaction if the fragmentation
-+			 * score did not go down i.e. no progress made.
-+			 */
-+			proactive_defer = score < prev_score ?
-+					0 : 1 << COMPACT_MAX_DEFER_SHIFT;
-+		}
- 	}
- 
- 	return 0;
 diff --git a/mm/filemap.c b/mm/filemap.c
 index 1784478270e15..fcc24b3b35406 100644
 --- a/mm/filemap.c
@@ -57977,18 +57693,6 @@ index dd8737a94bec4..0366085f37edf 100644
  		return (pte_t *)pmd;
  
  	return NULL;
-diff --git a/mm/internal.h b/mm/internal.h
-index 3cf20ab3ca01f..e66bafd6c7a20 100644
---- a/mm/internal.h
-+++ b/mm/internal.h
-@@ -203,6 +203,7 @@ struct compact_control {
- 	bool no_set_skip_hint;		/* Don't mark blocks for skipping */
- 	bool ignore_block_suitable;	/* Scan blocks considered unsuitable */
- 	bool direct_compaction;		/* False from kcompactd or /proc/... */
-+	bool proactive_compaction;	/* kcompactd proactive compaction */
- 	bool whole_zone;		/* Whole zone should/has been scanned */
- 	bool contended;			/* Signal lock or sched contention */
- 	bool rescan;			/* Rescanning the same pageblock */
 diff --git a/mm/ksm.c b/mm/ksm.c
 index d17c7d57d0d85..c55b89da4f558 100644
 --- a/mm/ksm.c
@@ -58748,34 +58452,10 @@ index 876370565455e..b36c0db82af11 100644
  
  		/*
 diff --git a/mm/vmstat.c b/mm/vmstat.c
-index 78d53378db992..514d172e716ac 100644
+index 78d53378db992..ae802253f71c5 100644
 --- a/mm/vmstat.c
 +++ b/mm/vmstat.c
-@@ -1074,6 +1074,23 @@ static int __fragmentation_index(unsigned int order, struct contig_page_info *in
- 	return 1000 - div_u64( (1000+(div_u64(info->free_pages * 1000ULL, requested))), info->free_blocks_total);
- }
- 
-+/*
-+ * Calculates external fragmentation within a zone wrt the given order.
-+ * It is defined as the percentage of pages found in blocks of size
-+ * less than 1 << order. It returns values in range [0, 100].
-+ */
-+int extfrag_for_order(struct zone *zone, unsigned int order)
-+{
-+	struct contig_page_info info;
-+
-+	fill_contig_page_info(zone, order, &info);
-+	if (info.free_pages == 0)
-+		return 0;
-+
-+	return (info.free_pages - (info.free_blocks_suitable << order)) * 100
-+							/ info.free_pages;
-+}
-+
- /* Same as __fragmentation index but allocs contig_page_info on stack */
- int fragmentation_index(struct zone *zone, unsigned int order)
- {
-@@ -1203,9 +1220,11 @@ const char * const vmstat_text[] = {
+@@ -1203,9 +1203,11 @@ const char * const vmstat_text[] = {
  #ifdef CONFIG_NUMA
  	"zone_reclaim_failed",
  #endif
