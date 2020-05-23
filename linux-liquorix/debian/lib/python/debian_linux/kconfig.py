@@ -19,7 +19,9 @@ class KConfigEntry(object):
         return hash(self.name) | hash(self.value)
 
     def __repr__(self):
-        return '<{}({!r}, {!r}, {!r})>'.format(self.__class__.__name__, self.name, self.value, self.comments)
+        return ('<{}({!r}, {!r}, {!r})>'
+                .format(self.__class__.__name__, self.name, self.value,
+                        self.comments))
 
     def __str__(self):
         return 'CONFIG_{}={}'.format(self.name, self.value)
