@@ -1085,7 +1085,7 @@ index efbbe570aa9b7..750d005a75bc3 100644
  					__u64 evt_page;
  					__u64 msg_page;
 diff --git a/Makefile b/Makefile
-index b668725a2a62a..3a83d83763973 100644
+index b668725a2a62a..9d5558fc28d56 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -1,9 +1,9 @@
@@ -1096,7 +1096,7 @@ index b668725a2a62a..3a83d83763973 100644
 -EXTRAVERSION =
 -NAME = Kleptomaniac Octopus
 +SUBLEVEL = 6
-+EXTRAVERSION = -lqx3
++EXTRAVERSION = -lqx4
 +NAME = Tea Storm
  
  # *DOCUMENTATION*
@@ -7155,18 +7155,6 @@ index 2b3dfd0b6cdd8..d95954ad4c0af 100644
  	name = kstrdup(export_name, GFP_KERNEL);
  	if (!name) {
  		rc = -ENOMEM;
-diff --git a/arch/powerpc/platforms/powernv/smp.c b/arch/powerpc/platforms/powernv/smp.c
-index 13e2516993466..b2ba3e95bda73 100644
---- a/arch/powerpc/platforms/powernv/smp.c
-+++ b/arch/powerpc/platforms/powernv/smp.c
-@@ -167,7 +167,6 @@ static void pnv_smp_cpu_kill_self(void)
- 	/* Standard hot unplug procedure */
- 
- 	idle_task_exit();
--	current->active_mm = NULL; /* for sanity */
- 	cpu = smp_processor_id();
- 	DBG("CPU%d offline\n", cpu);
- 	generic_set_cpu_dead(cpu);
 diff --git a/arch/powerpc/platforms/ps3/mm.c b/arch/powerpc/platforms/ps3/mm.c
 index 423be34f0f5fb..f42fe4e86ce52 100644
 --- a/arch/powerpc/platforms/ps3/mm.c
@@ -38981,19 +38969,6 @@ index 1aff00b65f3cb..73d6319a856ab 100644
 +#endif /* CONFIG_SCHED_MUQSS */
  
  #endif /* CONFIG_SMP */
-diff --git a/include/linux/sched/mm.h b/include/linux/sched/mm.h
-index c49257a3b5108..a132d875d3518 100644
---- a/include/linux/sched/mm.h
-+++ b/include/linux/sched/mm.h
-@@ -49,6 +49,8 @@ static inline void mmdrop(struct mm_struct *mm)
- 		__mmdrop(mm);
- }
- 
-+void mmdrop(struct mm_struct *mm);
-+
- /*
-  * This has to be called after a get_task_mm()/mmget_not_zero()
-  * followed by taking the mmap_sem for writing before modifying the
 diff --git a/include/linux/sched/nohz.h b/include/linux/sched/nohz.h
 index 6d67e9a5af6bb..101fe470aa8fa 100644
 --- a/include/linux/sched/nohz.h
@@ -40194,49 +40169,6 @@ index efe14cf24bc65..739d9ba3ba6b7 100644
  
  	nfuncs = attr->func_info_cnt;
  	if (!nfuncs)
-diff --git a/kernel/cpu.c b/kernel/cpu.c
-index 2371292f30b03..244d305443773 100644
---- a/kernel/cpu.c
-+++ b/kernel/cpu.c
-@@ -3,6 +3,7 @@
-  *
-  * This code is licenced under the GPL.
-  */
-+#include <linux/sched/mm.h>
- #include <linux/proc_fs.h>
- #include <linux/smp.h>
- #include <linux/init.h>
-@@ -564,6 +565,21 @@ static int bringup_cpu(unsigned int cpu)
- 	return bringup_wait_for_ap(cpu);
- }
- 
-+static int finish_cpu(unsigned int cpu)
-+{
-+	struct task_struct *idle = idle_thread_get(cpu);
-+	struct mm_struct *mm = idle->active_mm;
-+
-+	/*
-+	 * idle_task_exit() will have switched to &init_mm, now
-+	 * clean up any remaining active_mm state.
-+	 */
-+	if (mm != &init_mm)
-+		idle->active_mm = &init_mm;
-+	mmdrop(mm);
-+	return 0;
-+}
-+
- /*
-  * Hotplug state machine related functions
-  */
-@@ -1549,7 +1565,7 @@ static struct cpuhp_step cpuhp_hp_states[] = {
- 	[CPUHP_BRINGUP_CPU] = {
- 		.name			= "cpu:bringup",
- 		.startup.single		= bringup_cpu,
--		.teardown.single	= NULL,
-+		.teardown.single	= finish_cpu,
- 		.cant_stop		= true,
- 	},
- 	/* Final state before CPU kills itself */
 diff --git a/kernel/cpu_pm.c b/kernel/cpu_pm.c
 index cbca6879ab7d0..44a259338e33d 100644
 --- a/kernel/cpu_pm.c
@@ -41224,7 +41156,7 @@ index 21fb5a5662b51..a04ffebc6b7a8 100644
  obj-$(CONFIG_MEMBARRIER) += membarrier.o
 diff --git a/kernel/sched/MuQSS.c b/kernel/sched/MuQSS.c
 new file mode 100644
-index 0000000000000..1d780f47291f3
+index 0000000000000..6e1a71f789a20
 --- /dev/null
 +++ b/kernel/sched/MuQSS.c
 @@ -0,0 +1,7638 @@
@@ -47576,10 +47508,10 @@ index 0000000000000..1d780f47291f3
 +
 +	if (mm != &init_mm) {
 +		switch_mm(mm, &init_mm, current);
++		current->active_mm = &init_mm;
 +		finish_arch_post_lock_switch();
 +	}
-+
-+	/* finish_cpu(), as ran on the BP, will clean up the active_mm state */
++	mmdrop(mm);
 +}
 +#else /* CONFIG_HOTPLUG_CPU */
 +static void unbind_zero(int src_cpu) {}
@@ -49924,7 +49856,7 @@ index 0000000000000..b34f2797e44f0
 +
 +#endif /* MUQSS_SCHED_H */
 diff --git a/kernel/sched/core.c b/kernel/sched/core.c
-index 9a2fbf98fd6fa..5792397a2ac7f 100644
+index 9a2fbf98fd6fa..ace8e5e215b18 100644
 --- a/kernel/sched/core.c
 +++ b/kernel/sched/core.c
 @@ -57,7 +57,11 @@ const_debug unsigned int sysctl_sched_features =
@@ -49939,24 +49871,7 @@ index 9a2fbf98fd6fa..5792397a2ac7f 100644
  
  /*
   * period over which we measure -rt task CPU usage in us.
-@@ -6190,13 +6194,14 @@ void idle_task_exit(void)
- 	struct mm_struct *mm = current->active_mm;
- 
- 	BUG_ON(cpu_online(smp_processor_id()));
-+	BUG_ON(current != this_rq()->idle);
- 
- 	if (mm != &init_mm) {
- 		switch_mm(mm, &init_mm, current);
--		current->active_mm = &init_mm;
- 		finish_arch_post_lock_switch();
- 	}
--	mmdrop(mm);
-+
-+	/* finish_cpu(), as ran on the BP, will clean up the active_mm state */
- }
- 
- /*
-@@ -7385,6 +7390,8 @@ static DEFINE_MUTEX(cfs_constraints_mutex);
+@@ -7385,6 +7389,8 @@ static DEFINE_MUTEX(cfs_constraints_mutex);
  
  const u64 max_cfs_quota_period = 1 * NSEC_PER_SEC; /* 1s */
  static const u64 min_cfs_quota_period = 1 * NSEC_PER_MSEC; /* 1ms */
@@ -49965,7 +49880,7 @@ index 9a2fbf98fd6fa..5792397a2ac7f 100644
  
  static int __cfs_schedulable(struct task_group *tg, u64 period, u64 runtime);
  
-@@ -7412,6 +7419,12 @@ static int tg_set_cfs_bandwidth(struct task_group *tg, u64 period, u64 quota)
+@@ -7412,6 +7418,12 @@ static int tg_set_cfs_bandwidth(struct task_group *tg, u64 period, u64 quota)
  	if (period > max_cfs_quota_period)
  		return -EINVAL;
  
