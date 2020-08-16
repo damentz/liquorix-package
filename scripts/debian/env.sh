@@ -85,11 +85,6 @@ function prepare_env {
     echo "[INFO ] Running '$maintainerclean'"
     $maintainerclean
 
-    if [[ ! -f "$dir_base/$package_source" ]]; then
-        echo "[WARN ] Missing source file: $dir_base/$package_source, downloading now."
-        wget -O "$dir_base/$package_source" "https://cdn.kernel.org/pub/linux/kernel/v4.x/linux-${version_kernel}.tar.xz"
-    fi
-
     if [[ ! -L "$dir_build/$package_source" ]]; then
         echo "[INFO ] Missing symlink: $dir_build/$package_source, creating"
         ln -sf "$dir_base/$package_source" "$dir_build/$package_source"
