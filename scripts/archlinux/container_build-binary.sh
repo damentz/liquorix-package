@@ -38,7 +38,7 @@ fi
 sudo pacman -Sy
 
 echo "[INFO ] Preparing build directory: $dir_build"
-sudo mkdir -p "$dir_build"
+sudo mkdir -vp "$dir_build"
 sudo chown -R "$build_user":"$build_user" "$dir_build"
 cd "$dir_build"
 
@@ -54,7 +54,7 @@ if [[ -d "$dir_artifacts" ]]; then
     rm -rfv "$dir_artifacts"
 fi
 
-sudo mkdir -p "$dir_artifacts"
+sudo mkdir -vp "$dir_artifacts"
 sudo chown -R "$build_user":"$build_user" "$dir_artifacts"
 cp -arv "$dir_build/"*.pkg.tar* "$dir_artifacts/"
 
