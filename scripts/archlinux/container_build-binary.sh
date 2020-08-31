@@ -54,7 +54,8 @@ if [[ -d "$dir_artifacts" ]]; then
     rm -rfv "$dir_artifacts"
 fi
 
-mkdir -p "$dir_artifacts"
+sudo mkdir -p "$dir_artifacts"
+sudo chown -R "$build_user":"$build_user" "$dir_artifacts"
 cp -arv "$dir_build/"*.pkg.tar* "$dir_artifacts/"
 
 echo "[INFO ] Creating AUR repository"
