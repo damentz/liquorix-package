@@ -51,7 +51,7 @@ $schedtool makepkg --sign
 echo "[INFO ] Copying binary packages to bind mount: $dir_artifacts/"
 if [[ -d "$dir_artifacts" ]]; then
     echo "[INFO ] Removing existing artifacts first"
-    rm -rfv "$dir_artifacts"
+    sudo rm -rfv "$dir_artifacts"
 fi
 
 sudo mkdir -vp "$dir_artifacts"
