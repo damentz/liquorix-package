@@ -23,9 +23,8 @@ WORKDIR /home/builder
 ARG DEFAULT
 ARG PUBLIC
 ARG SECRET
-RUN gpg --keyserver hkps.pool.sks-keyservers.net --recv-keys 79BE3E4300411886 &&\
-    gpg --keyserver hkps.pool.sks-keyservers.net --recv-keys 9AE4078033F8024D &&\
-    gpg --keyserver hkps.pool.sks-keyservers.net --recv-keys 38DBBDC86092693E &&\
+RUN gpg --keyserver na.pool.sks-keyservers.net --recv-keys \
+		79BE3E4300411886  9AE4078033F8024D  38DBBDC86092693E &&\
     echo "$PUBLIC" | gpg --import &&\
     echo "$SECRET" | gpg --import &&\
     echo "default-key $DEFAULT" >> ~/.gnupg/gpg.conf
