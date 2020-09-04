@@ -6,7 +6,7 @@ ARG RELEASE
 FROM $ARCH/$DISTRO:$RELEASE
 
 RUN pacman -Syu --noconfirm &&\
-	pacman -S gnupg pacman-contrib zstd schedtool sudo \
+    pacman -S gnupg pacman-contrib zstd schedtool sudo \
               kmod inetutils bc libelf cpio fakeroot base-devel \
               --noconfirm --needed &&\
     rm -rf /var/cache/pacman &&\
