@@ -8,7 +8,7 @@ FROM $ARCH/$DISTRO:$RELEASE
 RUN pacman -Syu --noconfirm &&\
 	pacman -S gnupg pacman-contrib zstd schedtool sudo \
               kmod inetutils bc libelf cpio fakeroot base-devel \
-              --noconfirm &&\
+              --noconfirm --needed &&\
     rm -rf /var/cache/pacman &&\
     rm -rf /var/lib/pacman/sync &&\
     sed -r -i.bak 's/^#?MAKEFLAGS.*/MAKEFLAGS="-j$(nproc)"/' /etc/makepkg.conf &&\
