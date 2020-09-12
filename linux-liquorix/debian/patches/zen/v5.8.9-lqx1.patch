@@ -1065,7 +1065,7 @@ index 5325c71ca877..7fafc7ac00d7 100644
  ============	==============
  Field name:	payload_length
 diff --git a/Makefile b/Makefile
-index 24a4c1b97bb0..c15f6c474c1c 100644
+index 24a4c1b97bb0..5d1a8e847fed 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -1,9 +1,9 @@
@@ -1075,7 +1075,7 @@ index 24a4c1b97bb0..c15f6c474c1c 100644
 -SUBLEVEL = 0
 -EXTRAVERSION =
 -NAME = Kleptomaniac Octopus
-+SUBLEVEL = 8
++SUBLEVEL = 9
 +EXTRAVERSION = -lqx1
 +NAME = Tea Storm
  
@@ -19856,6 +19856,478 @@ index 27a5c28aac7f..460232b501db 100644
  }
  
  static int tsl2563_adjust_gainlevel(struct tsl2563_chip *chip, u16 adc)
+diff --git a/drivers/infiniband/core/cma.c b/drivers/infiniband/core/cma.c
+index c30cf5307ce3..26de0dab60bb 100644
+--- a/drivers/infiniband/core/cma.c
++++ b/drivers/infiniband/core/cma.c
+@@ -428,19 +428,6 @@ static int cma_comp_exch(struct rdma_id_private *id_priv,
+ 	return ret;
+ }
+ 
+-static enum rdma_cm_state cma_exch(struct rdma_id_private *id_priv,
+-				   enum rdma_cm_state exch)
+-{
+-	unsigned long flags;
+-	enum rdma_cm_state old;
+-
+-	spin_lock_irqsave(&id_priv->lock, flags);
+-	old = id_priv->state;
+-	id_priv->state = exch;
+-	spin_unlock_irqrestore(&id_priv->lock, flags);
+-	return old;
+-}
+-
+ static inline u8 cma_get_ip_ver(const struct cma_hdr *hdr)
+ {
+ 	return hdr->ip_version >> 4;
+@@ -1829,23 +1816,11 @@ static void cma_leave_mc_groups(struct rdma_id_private *id_priv)
+ 	}
+ }
+ 
+-void rdma_destroy_id(struct rdma_cm_id *id)
++static void _destroy_id(struct rdma_id_private *id_priv,
++			enum rdma_cm_state state)
+ {
+-	struct rdma_id_private *id_priv;
+-	enum rdma_cm_state state;
+-
+-	id_priv = container_of(id, struct rdma_id_private, id);
+-	trace_cm_id_destroy(id_priv);
+-	state = cma_exch(id_priv, RDMA_CM_DESTROYING);
+ 	cma_cancel_operation(id_priv, state);
+ 
+-	/*
+-	 * Wait for any active callback to finish.  New callbacks will find
+-	 * the id_priv state set to destroying and abort.
+-	 */
+-	mutex_lock(&id_priv->handler_mutex);
+-	mutex_unlock(&id_priv->handler_mutex);
+-
+ 	rdma_restrack_del(&id_priv->res);
+ 	if (id_priv->cma_dev) {
+ 		if (rdma_cap_ib_cm(id_priv->id.device, 1)) {
+@@ -1874,6 +1849,42 @@ void rdma_destroy_id(struct rdma_cm_id *id)
+ 	put_net(id_priv->id.route.addr.dev_addr.net);
+ 	kfree(id_priv);
+ }
++
++/*
++ * destroy an ID from within the handler_mutex. This ensures that no other
++ * handlers can start running concurrently.
++ */
++static void destroy_id_handler_unlock(struct rdma_id_private *id_priv)
++	__releases(&idprv->handler_mutex)
++{
++	enum rdma_cm_state state;
++	unsigned long flags;
++
++	trace_cm_id_destroy(id_priv);
++
++	/*
++	 * Setting the state to destroyed under the handler mutex provides a
++	 * fence against calling handler callbacks. If this is invoked due to
++	 * the failure of a handler callback then it guarentees that no future
++	 * handlers will be called.
++	 */
++	lockdep_assert_held(&id_priv->handler_mutex);
++	spin_lock_irqsave(&id_priv->lock, flags);
++	state = id_priv->state;
++	id_priv->state = RDMA_CM_DESTROYING;
++	spin_unlock_irqrestore(&id_priv->lock, flags);
++	mutex_unlock(&id_priv->handler_mutex);
++	_destroy_id(id_priv, state);
++}
++
++void rdma_destroy_id(struct rdma_cm_id *id)
++{
++	struct rdma_id_private *id_priv =
++		container_of(id, struct rdma_id_private, id);
++
++	mutex_lock(&id_priv->handler_mutex);
++	destroy_id_handler_unlock(id_priv);
++}
+ EXPORT_SYMBOL(rdma_destroy_id);
+ 
+ static int cma_rep_recv(struct rdma_id_private *id_priv)
+@@ -1925,6 +1936,8 @@ static int cma_cm_event_handler(struct rdma_id_private *id_priv,
+ {
+ 	int ret;
+ 
++	lockdep_assert_held(&id_priv->handler_mutex);
++
+ 	trace_cm_event_handler(id_priv, event);
+ 	ret = id_priv->id.event_handler(&id_priv->id, event);
+ 	trace_cm_event_done(id_priv, event, ret);
+@@ -1936,7 +1949,7 @@ static int cma_ib_handler(struct ib_cm_id *cm_id,
+ {
+ 	struct rdma_id_private *id_priv = cm_id->context;
+ 	struct rdma_cm_event event = {};
+-	int ret = 0;
++	int ret;
+ 
+ 	mutex_lock(&id_priv->handler_mutex);
+ 	if ((ib_event->event != IB_CM_TIMEWAIT_EXIT &&
+@@ -2005,14 +2018,12 @@ static int cma_ib_handler(struct ib_cm_id *cm_id,
+ 	if (ret) {
+ 		/* Destroy the CM ID by returning a non-zero value. */
+ 		id_priv->cm_id.ib = NULL;
+-		cma_exch(id_priv, RDMA_CM_DESTROYING);
+-		mutex_unlock(&id_priv->handler_mutex);
+-		rdma_destroy_id(&id_priv->id);
++		destroy_id_handler_unlock(id_priv);
+ 		return ret;
+ 	}
+ out:
+ 	mutex_unlock(&id_priv->handler_mutex);
+-	return ret;
++	return 0;
+ }
+ 
+ static struct rdma_id_private *
+@@ -2174,7 +2185,7 @@ static int cma_ib_req_handler(struct ib_cm_id *cm_id,
+ 	mutex_lock(&listen_id->handler_mutex);
+ 	if (listen_id->state != RDMA_CM_LISTEN) {
+ 		ret = -ECONNABORTED;
+-		goto err1;
++		goto err_unlock;
+ 	}
+ 
+ 	offset = cma_user_data_offset(listen_id);
+@@ -2191,55 +2202,38 @@ static int cma_ib_req_handler(struct ib_cm_id *cm_id,
+ 	}
+ 	if (!conn_id) {
+ 		ret = -ENOMEM;
+-		goto err1;
++		goto err_unlock;
+ 	}
+ 
+ 	mutex_lock_nested(&conn_id->handler_mutex, SINGLE_DEPTH_NESTING);
+ 	ret = cma_ib_acquire_dev(conn_id, listen_id, &req);
+-	if (ret)
+-		goto err2;
++	if (ret) {
++		destroy_id_handler_unlock(conn_id);
++		goto err_unlock;
++	}
+ 
+ 	conn_id->cm_id.ib = cm_id;
+ 	cm_id->context = conn_id;
+ 	cm_id->cm_handler = cma_ib_handler;
+ 
+-	/*
+-	 * Protect against the user destroying conn_id from another thread
+-	 * until we're done accessing it.
+-	 */
+-	cma_id_get(conn_id);
+ 	ret = cma_cm_event_handler(conn_id, &event);
+-	if (ret)
+-		goto err3;
+-	/*
+-	 * Acquire mutex to prevent user executing rdma_destroy_id()
+-	 * while we're accessing the cm_id.
+-	 */
+-	mutex_lock(&lock);
++	if (ret) {
++		/* Destroy the CM ID by returning a non-zero value. */
++		conn_id->cm_id.ib = NULL;
++		mutex_unlock(&listen_id->handler_mutex);
++		destroy_id_handler_unlock(conn_id);
++		goto net_dev_put;
++	}
++
+ 	if (cma_comp(conn_id, RDMA_CM_CONNECT) &&
+ 	    (conn_id->id.qp_type != IB_QPT_UD)) {
+ 		trace_cm_send_mra(cm_id->context);
+ 		ib_send_cm_mra(cm_id, CMA_CM_MRA_SETTING, NULL, 0);
+ 	}
+-	mutex_unlock(&lock);
+ 	mutex_unlock(&conn_id->handler_mutex);
+-	mutex_unlock(&listen_id->handler_mutex);
+-	cma_id_put(conn_id);
+-	if (net_dev)
+-		dev_put(net_dev);
+-	return 0;
+ 
+-err3:
+-	cma_id_put(conn_id);
+-	/* Destroy the CM ID by returning a non-zero value. */
+-	conn_id->cm_id.ib = NULL;
+-err2:
+-	cma_exch(conn_id, RDMA_CM_DESTROYING);
+-	mutex_unlock(&conn_id->handler_mutex);
+-err1:
++err_unlock:
+ 	mutex_unlock(&listen_id->handler_mutex);
+-	if (conn_id)
+-		rdma_destroy_id(&conn_id->id);
+ 
+ net_dev_put:
+ 	if (net_dev)
+@@ -2339,9 +2333,7 @@ static int cma_iw_handler(struct iw_cm_id *iw_id, struct iw_cm_event *iw_event)
+ 	if (ret) {
+ 		/* Destroy the CM ID by returning a non-zero value. */
+ 		id_priv->cm_id.iw = NULL;
+-		cma_exch(id_priv, RDMA_CM_DESTROYING);
+-		mutex_unlock(&id_priv->handler_mutex);
+-		rdma_destroy_id(&id_priv->id);
++		destroy_id_handler_unlock(id_priv);
+ 		return ret;
+ 	}
+ 
+@@ -2388,16 +2380,16 @@ static int iw_conn_req_handler(struct iw_cm_id *cm_id,
+ 
+ 	ret = rdma_translate_ip(laddr, &conn_id->id.route.addr.dev_addr);
+ 	if (ret) {
+-		mutex_unlock(&conn_id->handler_mutex);
+-		rdma_destroy_id(new_cm_id);
+-		goto out;
++		mutex_unlock(&listen_id->handler_mutex);
++		destroy_id_handler_unlock(conn_id);
++		return ret;
+ 	}
+ 
+ 	ret = cma_iw_acquire_dev(conn_id, listen_id);
+ 	if (ret) {
+-		mutex_unlock(&conn_id->handler_mutex);
+-		rdma_destroy_id(new_cm_id);
+-		goto out;
++		mutex_unlock(&listen_id->handler_mutex);
++		destroy_id_handler_unlock(conn_id);
++		return ret;
+ 	}
+ 
+ 	conn_id->cm_id.iw = cm_id;
+@@ -2407,25 +2399,16 @@ static int iw_conn_req_handler(struct iw_cm_id *cm_id,
+ 	memcpy(cma_src_addr(conn_id), laddr, rdma_addr_size(laddr));
+ 	memcpy(cma_dst_addr(conn_id), raddr, rdma_addr_size(raddr));
+ 
+-	/*
+-	 * Protect against the user destroying conn_id from another thread
+-	 * until we're done accessing it.
+-	 */
+-	cma_id_get(conn_id);
+ 	ret = cma_cm_event_handler(conn_id, &event);
+ 	if (ret) {
+ 		/* User wants to destroy the CM ID */
+ 		conn_id->cm_id.iw = NULL;
+-		cma_exch(conn_id, RDMA_CM_DESTROYING);
+-		mutex_unlock(&conn_id->handler_mutex);
+ 		mutex_unlock(&listen_id->handler_mutex);
+-		cma_id_put(conn_id);
+-		rdma_destroy_id(&conn_id->id);
++		destroy_id_handler_unlock(conn_id);
+ 		return ret;
+ 	}
+ 
+ 	mutex_unlock(&conn_id->handler_mutex);
+-	cma_id_put(conn_id);
+ 
+ out:
+ 	mutex_unlock(&listen_id->handler_mutex);
+@@ -2482,6 +2465,10 @@ static int cma_listen_handler(struct rdma_cm_id *id,
+ {
+ 	struct rdma_id_private *id_priv = id->context;
+ 
++	/* Listening IDs are always destroyed on removal */
++	if (event->event == RDMA_CM_EVENT_DEVICE_REMOVAL)
++		return -1;
++
+ 	id->context = id_priv->id.context;
+ 	id->event_handler = id_priv->id.event_handler;
+ 	trace_cm_event_handler(id_priv, event);
+@@ -2657,21 +2644,21 @@ static void cma_work_handler(struct work_struct *_work)
+ {
+ 	struct cma_work *work = container_of(_work, struct cma_work, work);
+ 	struct rdma_id_private *id_priv = work->id;
+-	int destroy = 0;
+ 
+ 	mutex_lock(&id_priv->handler_mutex);
+ 	if (!cma_comp_exch(id_priv, work->old_state, work->new_state))
+-		goto out;
++		goto out_unlock;
+ 
+ 	if (cma_cm_event_handler(id_priv, &work->event)) {
+-		cma_exch(id_priv, RDMA_CM_DESTROYING);
+-		destroy = 1;
++		cma_id_put(id_priv);
++		destroy_id_handler_unlock(id_priv);
++		goto out_free;
+ 	}
+-out:
++
++out_unlock:
+ 	mutex_unlock(&id_priv->handler_mutex);
+ 	cma_id_put(id_priv);
+-	if (destroy)
+-		rdma_destroy_id(&id_priv->id);
++out_free:
+ 	kfree(work);
+ }
+ 
+@@ -2679,23 +2666,22 @@ static void cma_ndev_work_handler(struct work_struct *_work)
+ {
+ 	struct cma_ndev_work *work = container_of(_work, struct cma_ndev_work, work);
+ 	struct rdma_id_private *id_priv = work->id;
+-	int destroy = 0;
+ 
+ 	mutex_lock(&id_priv->handler_mutex);
+ 	if (id_priv->state == RDMA_CM_DESTROYING ||
+ 	    id_priv->state == RDMA_CM_DEVICE_REMOVAL)
+-		goto out;
++		goto out_unlock;
+ 
+ 	if (cma_cm_event_handler(id_priv, &work->event)) {
+-		cma_exch(id_priv, RDMA_CM_DESTROYING);
+-		destroy = 1;
++		cma_id_put(id_priv);
++		destroy_id_handler_unlock(id_priv);
++		goto out_free;
+ 	}
+ 
+-out:
++out_unlock:
+ 	mutex_unlock(&id_priv->handler_mutex);
+ 	cma_id_put(id_priv);
+-	if (destroy)
+-		rdma_destroy_id(&id_priv->id);
++out_free:
+ 	kfree(work);
+ }
+ 
+@@ -3171,9 +3157,7 @@ static void addr_handler(int status, struct sockaddr *src_addr,
+ 		event.event = RDMA_CM_EVENT_ADDR_RESOLVED;
+ 
+ 	if (cma_cm_event_handler(id_priv, &event)) {
+-		cma_exch(id_priv, RDMA_CM_DESTROYING);
+-		mutex_unlock(&id_priv->handler_mutex);
+-		rdma_destroy_id(&id_priv->id);
++		destroy_id_handler_unlock(id_priv);
+ 		return;
+ 	}
+ out:
+@@ -3790,7 +3774,7 @@ static int cma_sidr_rep_handler(struct ib_cm_id *cm_id,
+ 	struct rdma_cm_event event = {};
+ 	const struct ib_cm_sidr_rep_event_param *rep =
+ 				&ib_event->param.sidr_rep_rcvd;
+-	int ret = 0;
++	int ret;
+ 
+ 	mutex_lock(&id_priv->handler_mutex);
+ 	if (id_priv->state != RDMA_CM_CONNECT)
+@@ -3840,14 +3824,12 @@ static int cma_sidr_rep_handler(struct ib_cm_id *cm_id,
+ 	if (ret) {
+ 		/* Destroy the CM ID by returning a non-zero value. */
+ 		id_priv->cm_id.ib = NULL;
+-		cma_exch(id_priv, RDMA_CM_DESTROYING);
+-		mutex_unlock(&id_priv->handler_mutex);
+-		rdma_destroy_id(&id_priv->id);
++		destroy_id_handler_unlock(id_priv);
+ 		return ret;
+ 	}
+ out:
+ 	mutex_unlock(&id_priv->handler_mutex);
+-	return ret;
++	return 0;
+ }
+ 
+ static int cma_resolve_ib_udp(struct rdma_id_private *id_priv,
+@@ -4372,9 +4354,7 @@ static int cma_ib_mc_handler(int status, struct ib_sa_multicast *multicast)
+ 
+ 	rdma_destroy_ah_attr(&event.param.ud.ah_attr);
+ 	if (ret) {
+-		cma_exch(id_priv, RDMA_CM_DESTROYING);
+-		mutex_unlock(&id_priv->handler_mutex);
+-		rdma_destroy_id(&id_priv->id);
++		destroy_id_handler_unlock(id_priv);
+ 		return 0;
+ 	}
+ 
+@@ -4789,50 +4769,59 @@ static int cma_add_one(struct ib_device *device)
+ 	return ret;
+ }
+ 
+-static int cma_remove_id_dev(struct rdma_id_private *id_priv)
++static void cma_send_device_removal_put(struct rdma_id_private *id_priv)
+ {
+-	struct rdma_cm_event event = {};
++	struct rdma_cm_event event = { .event = RDMA_CM_EVENT_DEVICE_REMOVAL };
+ 	enum rdma_cm_state state;
+-	int ret = 0;
+-
+-	/* Record that we want to remove the device */
+-	state = cma_exch(id_priv, RDMA_CM_DEVICE_REMOVAL);
+-	if (state == RDMA_CM_DESTROYING)
+-		return 0;
++	unsigned long flags;
+ 
+-	cma_cancel_operation(id_priv, state);
+ 	mutex_lock(&id_priv->handler_mutex);
++	/* Record that we want to remove the device */
++	spin_lock_irqsave(&id_priv->lock, flags);
++	state = id_priv->state;
++	if (state == RDMA_CM_DESTROYING || state == RDMA_CM_DEVICE_REMOVAL) {
++		spin_unlock_irqrestore(&id_priv->lock, flags);
++		mutex_unlock(&id_priv->handler_mutex);
++		cma_id_put(id_priv);
++		return;
++	}
++	id_priv->state = RDMA_CM_DEVICE_REMOVAL;
++	spin_unlock_irqrestore(&id_priv->lock, flags);
+ 
+-	/* Check for destruction from another callback. */
+-	if (!cma_comp(id_priv, RDMA_CM_DEVICE_REMOVAL))
+-		goto out;
+-
+-	event.event = RDMA_CM_EVENT_DEVICE_REMOVAL;
+-	ret = cma_cm_event_handler(id_priv, &event);
+-out:
++	if (cma_cm_event_handler(id_priv, &event)) {
++		/*
++		 * At this point the ULP promises it won't call
++		 * rdma_destroy_id() concurrently
++		 */
++		cma_id_put(id_priv);
++		mutex_unlock(&id_priv->handler_mutex);
++		trace_cm_id_destroy(id_priv);
++		_destroy_id(id_priv, state);
++		return;
++	}
+ 	mutex_unlock(&id_priv->handler_mutex);
+-	return ret;
++
++	/*
++	 * If this races with destroy then the thread that first assigns state
++	 * to a destroying does the cancel.
++	 */
++	cma_cancel_operation(id_priv, state);
++	cma_id_put(id_priv);
+ }
+ 
+ static void cma_process_remove(struct cma_device *cma_dev)
+ {
+-	struct rdma_id_private *id_priv;
+-	int ret;
+-
+ 	mutex_lock(&lock);
+ 	while (!list_empty(&cma_dev->id_list)) {
+-		id_priv = list_entry(cma_dev->id_list.next,
+-				     struct rdma_id_private, list);
++		struct rdma_id_private *id_priv = list_first_entry(
++			&cma_dev->id_list, struct rdma_id_private, list);
+ 
+ 		list_del(&id_priv->listen_list);
+ 		list_del_init(&id_priv->list);
+ 		cma_id_get(id_priv);
+ 		mutex_unlock(&lock);
+ 
+-		ret = id_priv->internal_id ? 1 : cma_remove_id_dev(id_priv);
+-		cma_id_put(id_priv);
+-		if (ret)
+-			rdma_destroy_id(&id_priv->id);
++		cma_send_device_removal_put(id_priv);
+ 
+ 		mutex_lock(&lock);
+ 	}
 diff --git a/drivers/infiniband/core/counters.c b/drivers/infiniband/core/counters.c
 index 738d1faf4bba..417ebf4d8ba9 100644
 --- a/drivers/infiniband/core/counters.c
@@ -27391,6 +27863,21 @@ index e39f41efda3e..7bc6e8f856fe 100644
  		netdev_err(dev->net, "Error reading PHYID register: %02x\n", ret);
  		goto out;
  	}
+diff --git a/drivers/net/usb/dm9601.c b/drivers/net/usb/dm9601.c
+index b91f92e4e5f2..915ac75b55fc 100644
+--- a/drivers/net/usb/dm9601.c
++++ b/drivers/net/usb/dm9601.c
+@@ -625,6 +625,10 @@ static const struct usb_device_id products[] = {
+ 	 USB_DEVICE(0x0a46, 0x1269),	/* DM9621A USB to Fast Ethernet Adapter */
+ 	 .driver_info = (unsigned long)&dm9601_info,
+ 	},
++	{
++	 USB_DEVICE(0x0586, 0x3427),	/* ZyXEL Keenetic Plus DSL xDSL modem */
++	 .driver_info = (unsigned long)&dm9601_info,
++	},
+ 	{},			// END
+ };
+ 
 diff --git a/drivers/net/usb/lan78xx.c b/drivers/net/usb/lan78xx.c
 index 442507f25aad..0305c856edb1 100644
 --- a/drivers/net/usb/lan78xx.c
@@ -42830,7 +43317,7 @@ index 47c5f3aeb460..cb9e5a444fba 100644
  		io_run_cancel(work, wqe);
  		match->nr_pending++;
 diff --git a/fs/io_uring.c b/fs/io_uring.c
-index 493e5047e67c..38f3ec15ba3b 100644
+index 493e5047e67c..d05023ca74bd 100644
 --- a/fs/io_uring.c
 +++ b/fs/io_uring.c
 @@ -669,12 +669,12 @@ struct io_kiocb {
@@ -43091,7 +43578,8 @@ index 493e5047e67c..38f3ec15ba3b 100644
  
 -static void io_poll_remove_double(struct io_kiocb *req, void *data)
 +static struct io_poll_iocb *io_poll_get_double(struct io_kiocb *req)
-+{
+ {
+-	struct io_poll_iocb *poll = data;
 +	/* pure poll stashes this in ->io, poll driven retry elsewhere */
 +	if (req->opcode == IORING_OP_POLL_ADD)
 +		return (struct io_poll_iocb *) req->io;
@@ -43099,8 +43587,7 @@ index 493e5047e67c..38f3ec15ba3b 100644
 +}
 +
 +static struct io_poll_iocb *io_poll_get_single(struct io_kiocb *req)
- {
--	struct io_poll_iocb *poll = data;
++{
 +	if (req->opcode == IORING_OP_POLL_ADD)
 +		return &req->poll;
 +	return &req->apoll->poll;
@@ -43392,7 +43879,7 @@ index 493e5047e67c..38f3ec15ba3b 100644
  	return off;
  }
  
-@@ -7488,6 +7583,98 @@ static bool io_wq_files_match(struct io_wq_work *work, void *data)
+@@ -7488,12 +7583,151 @@ static bool io_wq_files_match(struct io_wq_work *work, void *data)
  	return work->files == files;
  }
  
@@ -43411,6 +43898,28 @@ index 493e5047e67c..38f3ec15ba3b 100644
 +			return true;
 +	}
 +
++	return false;
++}
++
++static inline bool io_match_files(struct io_kiocb *req,
++				       struct files_struct *files)
++{
++	return (req->flags & REQ_F_WORK_INITIALIZED) && req->work.files == files;
++}
++
++static bool io_match_link_files(struct io_kiocb *req,
++				struct files_struct *files)
++{
++	struct io_kiocb *link;
++
++	if (io_match_files(req, files))
++		return true;
++	if (req->flags & REQ_F_LINK_HEAD) {
++		list_for_each_entry(link, &req->link_list, link_list) {
++			if (io_match_files(link, files))
++				return true;
++		}
++	}
 +	return false;
 +}
 +
@@ -43488,10 +43997,41 @@ index 493e5047e67c..38f3ec15ba3b 100644
 +	io_timeout_remove_link(ctx, req);
 +}
 +
++static void io_cancel_defer_files(struct io_ring_ctx *ctx,
++				  struct files_struct *files)
++{
++	struct io_kiocb *req = NULL;
++	LIST_HEAD(list);
++
++	spin_lock_irq(&ctx->completion_lock);
++	list_for_each_entry_reverse(req, &ctx->defer_list, list) {
++		if (io_match_link_files(req, files)) {
++			list_cut_position(&list, &ctx->defer_list, &req->list);
++			break;
++		}
++	}
++	spin_unlock_irq(&ctx->completion_lock);
++
++	while (!list_empty(&list)) {
++		req = list_first_entry(&list, struct io_kiocb, list);
++		list_del_init(&req->list);
++		req_set_fail_links(req);
++		io_cqring_add_event(req, -ECANCELED);
++		io_double_put_req(req);
++	}
++}
++
  static void io_uring_cancel_files(struct io_ring_ctx *ctx,
  				  struct files_struct *files)
  {
-@@ -7529,10 +7716,10 @@ static void io_uring_cancel_files(struct io_ring_ctx *ctx,
+ 	if (list_empty_careful(&ctx->inflight_list))
+ 		return;
+ 
++	io_cancel_defer_files(ctx, files);
+ 	/* cancel all at once, should be faster than doing it one by one*/
+ 	io_wq_cancel_cb(ctx->io_wq, io_wq_files_match, files, true);
+ 
+@@ -7529,10 +7763,10 @@ static void io_uring_cancel_files(struct io_ring_ctx *ctx,
  				clear_bit(0, &ctx->cq_check_overflow);
  				ctx->rings->sq_flags &= ~IORING_SQ_CQ_OVERFLOW;
  			}
@@ -43504,7 +44044,7 @@ index 493e5047e67c..38f3ec15ba3b 100644
  
  			/*
  			 * Put inflight ref and overflow ref. If that's
-@@ -7544,7 +7731,8 @@ static void io_uring_cancel_files(struct io_ring_ctx *ctx,
+@@ -7544,7 +7778,8 @@ static void io_uring_cancel_files(struct io_ring_ctx *ctx,
  				continue;
  			}
  		} else {
@@ -43514,7 +44054,7 @@ index 493e5047e67c..38f3ec15ba3b 100644
  			io_put_req(cancel_req);
  		}
  
-@@ -7655,8 +7843,7 @@ SYSCALL_DEFINE6(io_uring_enter, unsigned int, fd, u32, to_submit,
+@@ -7655,8 +7890,7 @@ SYSCALL_DEFINE6(io_uring_enter, unsigned int, fd, u32, to_submit,
  	int submitted = 0;
  	struct fd f;
  
@@ -43524,7 +44064,7 @@ index 493e5047e67c..38f3ec15ba3b 100644
  
  	if (flags & ~(IORING_ENTER_GETEVENTS | IORING_ENTER_SQ_WAKEUP))
  		return -EINVAL;
-@@ -7828,6 +8015,10 @@ static int io_allocate_scq_urings(struct io_ring_ctx *ctx,
+@@ -7828,6 +8062,10 @@ static int io_allocate_scq_urings(struct io_ring_ctx *ctx,
  	struct io_rings *rings;
  	size_t size, sq_array_offset;
  
@@ -43535,7 +44075,7 @@ index 493e5047e67c..38f3ec15ba3b 100644
  	size = rings_size(p->sq_entries, p->cq_entries, &sq_array_offset);
  	if (size == SIZE_MAX)
  		return -EOVERFLOW;
-@@ -7844,8 +8035,6 @@ static int io_allocate_scq_urings(struct io_ring_ctx *ctx,
+@@ -7844,8 +8082,6 @@ static int io_allocate_scq_urings(struct io_ring_ctx *ctx,
  	rings->cq_ring_entries = p->cq_entries;
  	ctx->sq_mask = rings->sq_ring_mask;
  	ctx->cq_mask = rings->cq_ring_mask;
@@ -62262,6 +62802,25 @@ index 434838bef5f8..7dc670c8eac5 100644
  		fd_install(new_fd, get_file(fp[i]));
  	}
  
+diff --git a/net/core/dev.c b/net/core/dev.c
+index 7a774ebf64e2..5bd0b550893f 100644
+--- a/net/core/dev.c
++++ b/net/core/dev.c
+@@ -6609,12 +6609,13 @@ void netif_napi_add(struct net_device *dev, struct napi_struct *napi,
+ 		netdev_err_once(dev, "%s() called with weight %d\n", __func__,
+ 				weight);
+ 	napi->weight = weight;
+-	list_add(&napi->dev_list, &dev->napi_list);
+ 	napi->dev = dev;
+ #ifdef CONFIG_NETPOLL
+ 	napi->poll_owner = -1;
+ #endif
+ 	set_bit(NAPI_STATE_SCHED, &napi->state);
++	set_bit(NAPI_STATE_NPSVC, &napi->state);
++	list_add_rcu(&napi->dev_list, &dev->napi_list);
+ 	napi_hash_add(napi);
+ }
+ EXPORT_SYMBOL(netif_napi_add);
 diff --git a/net/core/filter.c b/net/core/filter.c
 index 82e1b5b06167..a69e79327c29 100644
 --- a/net/core/filter.c
@@ -62369,6 +62928,19 @@ index 82e1b5b06167..a69e79327c29 100644
  		break;
  	}
  	return insn - insn_buf;
+diff --git a/net/core/netpoll.c b/net/core/netpoll.c
+index 093e90e52bc2..2338753e936b 100644
+--- a/net/core/netpoll.c
++++ b/net/core/netpoll.c
+@@ -162,7 +162,7 @@ static void poll_napi(struct net_device *dev)
+ 	struct napi_struct *napi;
+ 	int cpu = smp_processor_id();
+ 
+-	list_for_each_entry(napi, &dev->napi_list, dev_list) {
++	list_for_each_entry_rcu(napi, &dev->napi_list, dev_list) {
+ 		if (cmpxchg(&napi->poll_owner, -1, cpu) == -1) {
+ 			poll_one_napi(napi);
+ 			smp_store_release(&napi->poll_owner, -1);
 diff --git a/net/core/pktgen.c b/net/core/pktgen.c
 index b53b6d38c4df..a536f602a32d 100644
 --- a/net/core/pktgen.c
@@ -62535,6 +63107,20 @@ index 4e632dc987d8..495635f152ba 100644
  	ethnl_features_to_bitmap(new_active, dev->features);
  	mod = !bitmap_equal(old_active, new_active, NETDEV_FEATURE_COUNT);
  
+diff --git a/net/ipv4/fib_trie.c b/net/ipv4/fib_trie.c
+index 3c65f71d0e82..6734bab26386 100644
+--- a/net/ipv4/fib_trie.c
++++ b/net/ipv4/fib_trie.c
+@@ -2121,7 +2121,8 @@ void fib_info_notify_update(struct net *net, struct nl_info *info)
+ 		struct hlist_head *head = &net->ipv4.fib_table_hash[h];
+ 		struct fib_table *tb;
+ 
+-		hlist_for_each_entry_rcu(tb, head, tb_hlist)
++		hlist_for_each_entry_rcu(tb, head, tb_hlist,
++					 lockdep_rtnl_is_held())
+ 			__fib_info_notify_update(net, tb, info);
+ 	}
+ }
 diff --git a/net/ipv4/inet_connection_sock.c b/net/ipv4/inet_connection_sock.c
 index afaf582a5aa9..b79759ca7c13 100644
 --- a/net/ipv4/inet_connection_sock.c
@@ -62845,6 +63431,27 @@ index 409e79b84a83..6d0e942d082d 100644
  #if IS_MODULE(CONFIG_IPV6)
  	.br_fragment		= br_ip6_fragment,
  #endif
+diff --git a/net/ipv6/sysctl_net_ipv6.c b/net/ipv6/sysctl_net_ipv6.c
+index fac2135aa47b..5b60a4bdd36a 100644
+--- a/net/ipv6/sysctl_net_ipv6.c
++++ b/net/ipv6/sysctl_net_ipv6.c
+@@ -21,6 +21,7 @@
+ #include <net/calipso.h>
+ #endif
+ 
++static int two = 2;
+ static int flowlabel_reflect_max = 0x7;
+ static int auto_flowlabels_min;
+ static int auto_flowlabels_max = IP6_AUTO_FLOW_LABEL_MAX;
+@@ -150,7 +151,7 @@ static struct ctl_table ipv6_table_template[] = {
+ 		.mode		= 0644,
+ 		.proc_handler   = proc_rt6_multipath_hash_policy,
+ 		.extra1		= SYSCTL_ZERO,
+-		.extra2		= SYSCTL_ONE,
++		.extra2		= &two,
+ 	},
+ 	{
+ 		.procname	= "seg6_flowlabel",
 diff --git a/net/mac80211/sta_info.c b/net/mac80211/sta_info.c
 index af4cc5fb678e..05e966f1609e 100644
 --- a/net/mac80211/sta_info.c
@@ -62857,6 +63464,27 @@ index af4cc5fb678e..05e966f1609e 100644
 +	if (sta->sta_state == IEEE80211_STA_AUTHORIZED) {
  		ret = sta_info_move_state(sta, IEEE80211_STA_ASSOC);
  		WARN_ON_ONCE(ret);
+ 	}
+diff --git a/net/mptcp/protocol.c b/net/mptcp/protocol.c
+index c0abe738e7d3..939e445d5188 100644
+--- a/net/mptcp/protocol.c
++++ b/net/mptcp/protocol.c
+@@ -772,7 +772,6 @@ static int mptcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
+ restart:
+ 	mptcp_clean_una(sk);
+ 
+-wait_for_sndbuf:
+ 	__mptcp_flush_join_list(msk);
+ 	ssk = mptcp_subflow_get_send(msk);
+ 	while (!sk_stream_memory_free(sk) ||
+@@ -873,7 +872,7 @@ static int mptcp_sendmsg(struct sock *sk, struct msghdr *msg, size_t len)
+ 				 */
+ 				mptcp_set_timeout(sk, ssk);
+ 				release_sock(ssk);
+-				goto wait_for_sndbuf;
++				goto restart;
+ 			}
+ 		}
  	}
 diff --git a/net/netfilter/ipvs/ip_vs_core.c b/net/netfilter/ipvs/ip_vs_core.c
 index aa6a603a2425..517f6a2ac15a 100644
@@ -63344,6 +63972,109 @@ index b6aad3fc46c3..b85ce6f0c0a6 100644
  			}
  		} else {
  			if (nft_rbtree_interval_end(rbe) &&
+diff --git a/net/netlabel/netlabel_domainhash.c b/net/netlabel/netlabel_domainhash.c
+index a1f2320ecc16..785d13b8b574 100644
+--- a/net/netlabel/netlabel_domainhash.c
++++ b/net/netlabel/netlabel_domainhash.c
+@@ -85,6 +85,7 @@ static void netlbl_domhsh_free_entry(struct rcu_head *entry)
+ 			kfree(netlbl_domhsh_addr6_entry(iter6));
+ 		}
+ #endif /* IPv6 */
++		kfree(ptr->def.addrsel);
+ 	}
+ 	kfree(ptr->domain);
+ 	kfree(ptr);
+@@ -537,6 +538,8 @@ int netlbl_domhsh_add(struct netlbl_dom_map *entry,
+ 				goto add_return;
+ 		}
+ #endif /* IPv6 */
++		/* cleanup the new entry since we've moved everything over */
++		netlbl_domhsh_free_entry(&entry->rcu);
+ 	} else
+ 		ret_val = -EINVAL;
+ 
+@@ -580,6 +583,12 @@ int netlbl_domhsh_remove_entry(struct netlbl_dom_map *entry,
+ {
+ 	int ret_val = 0;
+ 	struct audit_buffer *audit_buf;
++	struct netlbl_af4list *iter4;
++	struct netlbl_domaddr4_map *map4;
++#if IS_ENABLED(CONFIG_IPV6)
++	struct netlbl_af6list *iter6;
++	struct netlbl_domaddr6_map *map6;
++#endif /* IPv6 */
+ 
+ 	if (entry == NULL)
+ 		return -ENOENT;
+@@ -597,6 +606,9 @@ int netlbl_domhsh_remove_entry(struct netlbl_dom_map *entry,
+ 		ret_val = -ENOENT;
+ 	spin_unlock(&netlbl_domhsh_lock);
+ 
++	if (ret_val)
++		return ret_val;
++
+ 	audit_buf = netlbl_audit_start_common(AUDIT_MAC_MAP_DEL, audit_info);
+ 	if (audit_buf != NULL) {
+ 		audit_log_format(audit_buf,
+@@ -606,40 +618,29 @@ int netlbl_domhsh_remove_entry(struct netlbl_dom_map *entry,
+ 		audit_log_end(audit_buf);
+ 	}
+ 
+-	if (ret_val == 0) {
+-		struct netlbl_af4list *iter4;
+-		struct netlbl_domaddr4_map *map4;
+-#if IS_ENABLED(CONFIG_IPV6)
+-		struct netlbl_af6list *iter6;
+-		struct netlbl_domaddr6_map *map6;
+-#endif /* IPv6 */
+-
+-		switch (entry->def.type) {
+-		case NETLBL_NLTYPE_ADDRSELECT:
+-			netlbl_af4list_foreach_rcu(iter4,
+-					     &entry->def.addrsel->list4) {
+-				map4 = netlbl_domhsh_addr4_entry(iter4);
+-				cipso_v4_doi_putdef(map4->def.cipso);
+-			}
++	switch (entry->def.type) {
++	case NETLBL_NLTYPE_ADDRSELECT:
++		netlbl_af4list_foreach_rcu(iter4, &entry->def.addrsel->list4) {
++			map4 = netlbl_domhsh_addr4_entry(iter4);
++			cipso_v4_doi_putdef(map4->def.cipso);
++		}
+ #if IS_ENABLED(CONFIG_IPV6)
+-			netlbl_af6list_foreach_rcu(iter6,
+-					     &entry->def.addrsel->list6) {
+-				map6 = netlbl_domhsh_addr6_entry(iter6);
+-				calipso_doi_putdef(map6->def.calipso);
+-			}
++		netlbl_af6list_foreach_rcu(iter6, &entry->def.addrsel->list6) {
++			map6 = netlbl_domhsh_addr6_entry(iter6);
++			calipso_doi_putdef(map6->def.calipso);
++		}
+ #endif /* IPv6 */
+-			break;
+-		case NETLBL_NLTYPE_CIPSOV4:
+-			cipso_v4_doi_putdef(entry->def.cipso);
+-			break;
++		break;
++	case NETLBL_NLTYPE_CIPSOV4:
++		cipso_v4_doi_putdef(entry->def.cipso);
++		break;
+ #if IS_ENABLED(CONFIG_IPV6)
+-		case NETLBL_NLTYPE_CALIPSO:
+-			calipso_doi_putdef(entry->def.calipso);
+-			break;
++	case NETLBL_NLTYPE_CALIPSO:
++		calipso_doi_putdef(entry->def.calipso);
++		break;
+ #endif /* IPv6 */
+-		}
+-		call_rcu(&entry->rcu, netlbl_domhsh_free_entry);
+ 	}
++	call_rcu(&entry->rcu, netlbl_domhsh_free_entry);
+ 
+ 	return ret_val;
+ }
 diff --git a/net/netlink/policy.c b/net/netlink/policy.c
 index f6491853c797..2b3e26f7496f 100644
 --- a/net/netlink/policy.c
@@ -64095,6 +64826,135 @@ index 6ed1652d1e26..41d8440deaf1 100644
  
  		if (!err)
  			*defrag = true;
+diff --git a/net/sched/sch_taprio.c b/net/sched/sch_taprio.c
+index b1eb12d33b9a..6a5086e586ef 100644
+--- a/net/sched/sch_taprio.c
++++ b/net/sched/sch_taprio.c
+@@ -1177,9 +1177,27 @@ static void taprio_offload_config_changed(struct taprio_sched *q)
+ 	spin_unlock(&q->current_entry_lock);
+ }
+ 
+-static void taprio_sched_to_offload(struct taprio_sched *q,
++static u32 tc_map_to_queue_mask(struct net_device *dev, u32 tc_mask)
++{
++	u32 i, queue_mask = 0;
++
++	for (i = 0; i < dev->num_tc; i++) {
++		u32 offset, count;
++
++		if (!(tc_mask & BIT(i)))
++			continue;
++
++		offset = dev->tc_to_txq[i].offset;
++		count = dev->tc_to_txq[i].count;
++
++		queue_mask |= GENMASK(offset + count - 1, offset);
++	}
++
++	return queue_mask;
++}
++
++static void taprio_sched_to_offload(struct net_device *dev,
+ 				    struct sched_gate_list *sched,
+-				    const struct tc_mqprio_qopt *mqprio,
+ 				    struct tc_taprio_qopt_offload *offload)
+ {
+ 	struct sched_entry *entry;
+@@ -1194,7 +1212,8 @@ static void taprio_sched_to_offload(struct taprio_sched *q,
+ 
+ 		e->command = entry->command;
+ 		e->interval = entry->interval;
+-		e->gate_mask = entry->gate_mask;
++		e->gate_mask = tc_map_to_queue_mask(dev, entry->gate_mask);
++
+ 		i++;
+ 	}
+ 
+@@ -1202,7 +1221,6 @@ static void taprio_sched_to_offload(struct taprio_sched *q,
+ }
+ 
+ static int taprio_enable_offload(struct net_device *dev,
+-				 struct tc_mqprio_qopt *mqprio,
+ 				 struct taprio_sched *q,
+ 				 struct sched_gate_list *sched,
+ 				 struct netlink_ext_ack *extack)
+@@ -1224,7 +1242,7 @@ static int taprio_enable_offload(struct net_device *dev,
+ 		return -ENOMEM;
+ 	}
+ 	offload->enable = 1;
+-	taprio_sched_to_offload(q, sched, mqprio, offload);
++	taprio_sched_to_offload(dev, sched, offload);
+ 
+ 	err = ops->ndo_setup_tc(dev, TC_SETUP_QDISC_TAPRIO, offload);
+ 	if (err < 0) {
+@@ -1486,7 +1504,7 @@ static int taprio_change(struct Qdisc *sch, struct nlattr *opt,
+ 	}
+ 
+ 	if (FULL_OFFLOAD_IS_ENABLED(q->flags))
+-		err = taprio_enable_offload(dev, mqprio, q, new_admin, extack);
++		err = taprio_enable_offload(dev, q, new_admin, extack);
+ 	else
+ 		err = taprio_disable_offload(dev, q, extack);
+ 	if (err)
+diff --git a/net/sctp/socket.c b/net/sctp/socket.c
+index d57e1a002ffc..fa20e945700e 100644
+--- a/net/sctp/socket.c
++++ b/net/sctp/socket.c
+@@ -8297,8 +8297,6 @@ static int sctp_get_port_local(struct sock *sk, union sctp_addr *addr)
+ 
+ 	pr_debug("%s: begins, snum:%d\n", __func__, snum);
+ 
+-	local_bh_disable();
+-
+ 	if (snum == 0) {
+ 		/* Search for an available port. */
+ 		int low, high, remaining, index;
+@@ -8316,20 +8314,21 @@ static int sctp_get_port_local(struct sock *sk, union sctp_addr *addr)
+ 				continue;
+ 			index = sctp_phashfn(net, rover);
+ 			head = &sctp_port_hashtable[index];
+-			spin_lock(&head->lock);
++			spin_lock_bh(&head->lock);
+ 			sctp_for_each_hentry(pp, &head->chain)
+ 				if ((pp->port == rover) &&
+ 				    net_eq(net, pp->net))
+ 					goto next;
+ 			break;
+ 		next:
+-			spin_unlock(&head->lock);
++			spin_unlock_bh(&head->lock);
++			cond_resched();
+ 		} while (--remaining > 0);
+ 
+ 		/* Exhausted local port range during search? */
+ 		ret = 1;
+ 		if (remaining <= 0)
+-			goto fail;
++			return ret;
+ 
+ 		/* OK, here is the one we will use.  HEAD (the port
+ 		 * hash table list entry) is non-NULL and we hold it's
+@@ -8344,7 +8343,7 @@ static int sctp_get_port_local(struct sock *sk, union sctp_addr *addr)
+ 		 * port iterator, pp being NULL.
+ 		 */
+ 		head = &sctp_port_hashtable[sctp_phashfn(net, snum)];
+-		spin_lock(&head->lock);
++		spin_lock_bh(&head->lock);
+ 		sctp_for_each_hentry(pp, &head->chain) {
+ 			if ((pp->port == snum) && net_eq(pp->net, net))
+ 				goto pp_found;
+@@ -8444,10 +8443,7 @@ static int sctp_get_port_local(struct sock *sk, union sctp_addr *addr)
+ 	ret = 0;
+ 
+ fail_unlock:
+-	spin_unlock(&head->lock);
+-
+-fail:
+-	local_bh_enable();
++	spin_unlock_bh(&head->lock);
+ 	return ret;
+ }
+ 
 diff --git a/net/sctp/stream.c b/net/sctp/stream.c
 index bda2536dd740..6dc95dcc0ff4 100644
 --- a/net/sctp/stream.c
@@ -64268,10 +65128,38 @@ index 5eb35309ecef..83806fa94def 100644
  
  out_err:
 diff --git a/net/tipc/crypto.c b/net/tipc/crypto.c
-index c8c47fc72653..d6426b6cc9c5 100644
+index c8c47fc72653..3f35577b7404 100644
 --- a/net/tipc/crypto.c
 +++ b/net/tipc/crypto.c
-@@ -757,10 +757,12 @@ static void tipc_aead_encrypt_done(struct crypto_async_request *base, int err)
+@@ -326,7 +326,8 @@ static void tipc_aead_free(struct rcu_head *rp)
+ 	if (aead->cloned) {
+ 		tipc_aead_put(aead->cloned);
+ 	} else {
+-		head = *this_cpu_ptr(aead->tfm_entry);
++		head = *get_cpu_ptr(aead->tfm_entry);
++		put_cpu_ptr(aead->tfm_entry);
+ 		list_for_each_entry_safe(tfm_entry, tmp, &head->list, list) {
+ 			crypto_free_aead(tfm_entry->tfm);
+ 			list_del(&tfm_entry->list);
+@@ -399,10 +400,15 @@ static void tipc_aead_users_set(struct tipc_aead __rcu *aead, int val)
+  */
+ static struct crypto_aead *tipc_aead_tfm_next(struct tipc_aead *aead)
+ {
+-	struct tipc_tfm **tfm_entry = this_cpu_ptr(aead->tfm_entry);
++	struct tipc_tfm **tfm_entry;
++	struct crypto_aead *tfm;
+ 
++	tfm_entry = get_cpu_ptr(aead->tfm_entry);
+ 	*tfm_entry = list_next_entry(*tfm_entry, list);
+-	return (*tfm_entry)->tfm;
++	tfm = (*tfm_entry)->tfm;
++	put_cpu_ptr(tfm_entry);
++
++	return tfm;
+ }
+ 
+ /**
+@@ -757,10 +763,12 @@ static void tipc_aead_encrypt_done(struct crypto_async_request *base, int err)
  	switch (err) {
  	case 0:
  		this_cpu_inc(tx->stats->stat[STAT_ASYNC_OK]);
@@ -64315,6 +65203,35 @@ index 217516357ef2..90e3c70a91ad 100644
  	err = __tipc_nl_compat_dumpit(cmd, msg, arg);
  	if (err) {
  		kfree_skb(msg->rep);
+diff --git a/net/tipc/socket.c b/net/tipc/socket.c
+index a94f38333698..79cc84393f93 100644
+--- a/net/tipc/socket.c
++++ b/net/tipc/socket.c
+@@ -2773,18 +2773,21 @@ static int tipc_shutdown(struct socket *sock, int how)
+ 
+ 	trace_tipc_sk_shutdown(sk, NULL, TIPC_DUMP_ALL, " ");
+ 	__tipc_shutdown(sock, TIPC_CONN_SHUTDOWN);
+-	sk->sk_shutdown = SEND_SHUTDOWN;
++	if (tipc_sk_type_connectionless(sk))
++		sk->sk_shutdown = SHUTDOWN_MASK;
++	else
++		sk->sk_shutdown = SEND_SHUTDOWN;
+ 
+ 	if (sk->sk_state == TIPC_DISCONNECTING) {
+ 		/* Discard any unreceived messages */
+ 		__skb_queue_purge(&sk->sk_receive_queue);
+ 
+-		/* Wake up anyone sleeping in poll */
+-		sk->sk_state_change(sk);
+ 		res = 0;
+ 	} else {
+ 		res = -ENOTCONN;
+ 	}
++	/* Wake up anyone sleeping in poll. */
++	sk->sk_state_change(sk);
+ 
+ 	release_sock(sk);
+ 	return res;
 diff --git a/net/tls/tls_device.c b/net/tls/tls_device.c
 index 0e55f8365ce2..0cbad566f281 100644
 --- a/net/tls/tls_device.c
