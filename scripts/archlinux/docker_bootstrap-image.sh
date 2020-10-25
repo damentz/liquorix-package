@@ -71,7 +71,7 @@ if [[ "$(docker image ls)" == *"$release_string"* ]]; then
     docker container rm "$container_id" > /dev/null
 else
     echo "[INFO ] $release_string: Docker image not found, building with Dockerfile."
-    DOCKER_BUILDKIT=1 docker build \
+    DOCKER_BUILDKIT=1 docker build --no-cache \
         -f "$dir_scripts/Dockerfile" \
         -t "$release_string" \
         --pull=true \
