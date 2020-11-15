@@ -7,7 +7,7 @@ package_maintainer="Steven Barrett <steven@liquorix.net>"
 
 dir_base="${dir_script%/*/*}"
 dir_package="$dir_base/$package_name"
-dir_build="$dir_base/build"
+dir_build="/build"
 dir_scripts="$dir_base/scripts/archlinux"
 dir_artifacts="$dir_base/artifacts"
 

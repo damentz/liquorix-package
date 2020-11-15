@@ -7,19 +7,26 @@ FROM $ARCH/$DISTRO:$RELEASE
 ARG DEFAULT
 ARG PUBLIC
 ARG SECRET
-RUN export DEBIAN_FRONTEND=noninteractive &&\
-    apt-get update &&\
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update &&\
     apt-get install eatmydata -y &&\
-    eatmydata apt-get dist-upgrade -y &&\
-    eatmydata apt-get install -y \
+    apt-get clean &&\
+    rm -rfv /var/lib/apt/lists/*
+
+ENV LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libeatmydata.so
+RUN apt-get update &&\
+    apt-get dist-upgrade -y &&\
+    apt-get install -y \
         build-essential \
         devscripts \
         equivs \
         wget \
         gnupg \
         schedtool &&\
-    eatmydata apt-get clean &&\
-    eatmydata rm -rfv /var/lib/apt/lists/* &&\
-    echo "$PUBLIC" | gpg --import &&\
+    apt-get clean &&\
+    rm -rfv /var/lib/apt/lists/*
+
+RUN echo "$PUBLIC" | gpg --import &&\
     echo "$SECRET" | gpg --import &&\
     echo "default-key $DEFAULT" > ~/.gnupg/gpg.conf

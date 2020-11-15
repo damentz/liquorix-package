@@ -5,13 +5,19 @@ ARG RELEASE
 
 FROM $ARCH/$DISTRO:$RELEASE
 
-RUN pacman -Syu --noconfirm &&\
+RUN echo 'Server = https://mirrors.kernel.org/archlinux/$repo/os/$arch' \
+      > /etc/pacman.d/mirrorlist &&\
+    pacman -Syy libeatmydata --noconfirm &&\
+    rm -rf /var/cache/pacman /var/lib/pacman/sync
+
+ENV LD_PRELOAD=/usr/lib/libeatmydata.so
+RUN pacman -Syyu --noconfirm &&\
     pacman -S gnupg pacman-contrib zstd schedtool sudo \
               kmod inetutils bc libelf cpio fakeroot base-devel \
               --noconfirm --needed &&\
-    rm -rf /var/cache/pacman &&\
-    rm -rf /var/lib/pacman/sync &&\
-    sed -r -i.bak 's/^#?MAKEFLAGS.*/MAKEFLAGS="-j$(nproc)"/' /etc/makepkg.conf &&\
+    rm -rf /var/cache/pacman /var/lib/pacman/sync
+
+RUN sed -r -i.bak 's/^#?MAKEFLAGS.*/MAKEFLAGS="-j$(nproc)"/' /etc/makepkg.conf &&\
     sed -r -i.bak 's/^PKGEXT.*/PKGEXT=".pkg.tar.zst"/' /etc/makepkg.conf &&\
     sed -r -i.bak 's/^SRCEXT.*/SRCEXT=".src.tar.zst"/' /etc/makepkg.conf &&\
     sed -r -i.bak 's/^BUILDENV.*/BUILDENV=(fakeroot !distcc !color !ccache check !sign)/' /etc/makepkg.conf &&\
@@ -23,7 +29,7 @@ WORKDIR /home/builder
 ARG DEFAULT
 ARG PUBLIC
 ARG SECRET
-RUN gpg --keyserver na.pool.sks-keyservers.net --recv-keys \
+RUN gpg --keyserver hkp://keyserver.ubuntu.com --recv-keys \
 		79BE3E4300411886  9AE4078033F8024D  38DBBDC86092693E &&\
     echo "$PUBLIC" | gpg --import &&\
     echo "$SECRET" | gpg --import &&\

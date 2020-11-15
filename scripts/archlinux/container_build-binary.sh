@@ -9,7 +9,6 @@ declare arch=${1:-}
 declare distro=${2:-}
 declare release=${3:-}
 
-declare dir_build="/build"
 declare dir_artifacts="$dir_artifacts/$distro/$release"
 
 declare -i fail=0

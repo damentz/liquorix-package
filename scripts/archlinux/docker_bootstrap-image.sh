@@ -49,8 +49,7 @@ if [[ "$(docker image ls)" == *"$release_string"* ]]; then
     echo "[INFO ] $release_string: Docker image already built, performing update."
     declare container_id=$(
         docker run -d $release_string bash -c \
-        'export DOCKER_FRONTEND=noninteractive && \
-         sudo pacman -Syu --noconfirm && \
+        'sudo pacman -Syu --noconfirm && \
          sudo rm -rf /var/cache/pacman && \
 		 sudo rm -rf /var/lib/pacman/sync'
     )

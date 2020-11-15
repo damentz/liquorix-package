@@ -34,7 +34,7 @@ fi
 echo "[DEBUG] dir_base: $dir_base"
 docker run \
     --rm \
-    --tmpfs /build:exec \
+    --tmpfs "$dir_build":exec \
     -v "$dir_base":/liquorix-package \
     -t "liquorix_$arch/$distro/$release" \
     /liquorix-package/scripts/archlinux/container_build-binary.sh \

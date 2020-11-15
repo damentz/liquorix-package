@@ -49,11 +49,10 @@ if [[ "$(docker image ls)" == *"$release_string"* ]]; then
     echo "[INFO ] $release_string: Docker image already built, performing update."
     declare container_id=$(
         docker run -d $release_string bash -c \
-        'export DOCKER_FRONTEND=noninteractive && \
-         eatmydata apt-get update && \
-         eatmydata apt-get dist-upgrade && \
-         eatmydata apt-get clean && \
-         eatmydata rm -rf /var/lib/apt/lists'
+        'apt-get update && \
+         apt-get dist-upgrade && \
+         apt-get clean && \
+         rm -rf /var/lib/apt/lists'
     )
 
     echo "[INFO ] $release_string: Trailing container - $container_id"
@@ -72,7 +71,7 @@ if [[ "$(docker image ls)" == *"$release_string"* ]]; then
     docker container rm "$container_id" > /dev/null
 else
     echo "[INFO ] $release_string: Docker image not found, building with Dockerfile."
-    DOCKER_BUILDKIT=1 docker build --no-cache \
+    docker build --no-cache \
         -f "$dir_scripts/Dockerfile" \
         -t "$release_string" \
         --pull=true \
