@@ -1,5 +1,5 @@
 diff --git a/Documentation/admin-guide/kernel-parameters.txt b/Documentation/admin-guide/kernel-parameters.txt
-index a1068742a6df..2b42003e6fe2 100644
+index a1068742a6df..cea87b3c39a5 100644
 --- a/Documentation/admin-guide/kernel-parameters.txt
 +++ b/Documentation/admin-guide/kernel-parameters.txt
 @@ -577,7 +577,7 @@
@@ -21,7 +21,35 @@ index a1068742a6df..2b42003e6fe2 100644
  			passive
  			  Use intel_pstate as a scaling driver, but configure it
  			  to work with generic cpufreq governors (instead of
-@@ -4595,6 +4598,14 @@
+@@ -2833,6 +2836,8 @@
+ 					       mds=off [X86]
+ 					       tsx_async_abort=off [X86]
+ 					       kvm.nx_huge_pages=off [X86]
++					       no_entry_flush [PPC]
++					       no_uaccess_flush [PPC]
+ 
+ 				Exceptions:
+ 					       This does not have any effect on
+@@ -3157,6 +3162,8 @@
+ 
+ 	noefi		Disable EFI runtime services support.
+ 
++	no_entry_flush  [PPC] Don't flush the L1-D cache when entering the kernel.
++
+ 	noexec		[IA-64]
+ 
+ 	noexec		[X86]
+@@ -3206,6 +3213,9 @@
+ 	nospec_store_bypass_disable
+ 			[HW] Disable all mitigations for the Speculative Store Bypass vulnerability
+ 
++	no_uaccess_flush
++	                [PPC] Don't flush the L1-D cache after accessing user data.
++
+ 	noxsave		[BUGS=X86] Disables x86 extended register state save
+ 			and restore using xsave. The kernel will fallback to
+ 			enabling legacy floating-point and sse state.
+@@ -4595,6 +4605,14 @@
  			Memory area to be used by remote processor image,
  			managed by CMA.
  
@@ -36,7 +64,7 @@ index a1068742a6df..2b42003e6fe2 100644
  	rw		[KNL] Mount root device read-write on boot
  
  	S		[KNL] Run init in single mode
-@@ -5828,6 +5839,14 @@
+@@ -5828,6 +5846,14 @@
  			improve timer resolution at the expense of processing
  			more timer interrupts.
  
@@ -991,7 +1019,7 @@ index 300c5d2e7d0f..cf1b825ec34a 100644
  
  
 diff --git a/Makefile b/Makefile
-index 51540b291738..d9f4a1831dfe 100644
+index 51540b291738..2d4fdaf6eb13 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -1,9 +1,9 @@
@@ -1001,7 +1029,7 @@ index 51540b291738..d9f4a1831dfe 100644
 -SUBLEVEL = 0
 -EXTRAVERSION =
 -NAME = Kleptomaniac Octopus
-+SUBLEVEL = 9
++SUBLEVEL = 10
 +EXTRAVERSION = -lqx1
 +NAME = Tea Storm
  
@@ -4312,6 +4340,134 @@ index 082b98808701..b3ca542f871e 100644
  
  #ifndef __ASSEMBLY__
  #define H_PTE_TABLE_SIZE	(sizeof(pte_t) << H_PTE_INDEX_SIZE)
+diff --git a/arch/powerpc/include/asm/book3s/64/kup-radix.h b/arch/powerpc/include/asm/book3s/64/kup-radix.h
+index 3ee1ec60be84..28716e2f13e3 100644
+--- a/arch/powerpc/include/asm/book3s/64/kup-radix.h
++++ b/arch/powerpc/include/asm/book3s/64/kup-radix.h
+@@ -27,6 +27,7 @@
+ #endif
+ .endm
+ 
++#ifdef CONFIG_PPC_KUAP
+ .macro kuap_check_amr gpr1, gpr2
+ #ifdef CONFIG_PPC_KUAP_DEBUG
+ 	BEGIN_MMU_FTR_SECTION_NESTED(67)
+@@ -38,6 +39,7 @@
+ 	END_MMU_FTR_SECTION_NESTED_IFSET(MMU_FTR_RADIX_KUAP, 67)
+ #endif
+ .endm
++#endif
+ 
+ .macro kuap_save_amr_and_lock gpr1, gpr2, use_cr, msr_pr_cr
+ #ifdef CONFIG_PPC_KUAP
+@@ -61,6 +63,8 @@
+ 
+ #else /* !__ASSEMBLY__ */
+ 
++DECLARE_STATIC_KEY_FALSE(uaccess_flush_key);
++
+ #ifdef CONFIG_PPC_KUAP
+ 
+ #include <asm/mmu.h>
+@@ -103,8 +107,16 @@ static inline void kuap_check_amr(void)
+ 
+ static inline unsigned long get_kuap(void)
+ {
++	/*
++	 * We return AMR_KUAP_BLOCKED when we don't support KUAP because
++	 * prevent_user_access_return needs to return AMR_KUAP_BLOCKED to
++	 * cause restore_user_access to do a flush.
++	 *
++	 * This has no effect in terms of actually blocking things on hash,
++	 * so it doesn't break anything.
++	 */
+ 	if (!early_mmu_has_feature(MMU_FTR_RADIX_KUAP))
+-		return 0;
++		return AMR_KUAP_BLOCKED;
+ 
+ 	return mfspr(SPRN_AMR);
+ }
+@@ -123,6 +135,29 @@ static inline void set_kuap(unsigned long value)
+ 	isync();
+ }
+ 
++static inline bool
++bad_kuap_fault(struct pt_regs *regs, unsigned long address, bool is_write)
++{
++	return WARN(mmu_has_feature(MMU_FTR_RADIX_KUAP) &&
++		    (regs->kuap & (is_write ? AMR_KUAP_BLOCK_WRITE : AMR_KUAP_BLOCK_READ)),
++		    "Bug: %s fault blocked by AMR!", is_write ? "Write" : "Read");
++}
++#else /* CONFIG_PPC_KUAP */
++static inline void kuap_restore_amr(struct pt_regs *regs, unsigned long amr) { }
++
++static inline unsigned long kuap_get_and_check_amr(void)
++{
++	return 0UL;
++}
++
++static inline unsigned long get_kuap(void)
++{
++	return AMR_KUAP_BLOCKED;
++}
++
++static inline void set_kuap(unsigned long value) { }
++#endif /* !CONFIG_PPC_KUAP */
++
+ static __always_inline void allow_user_access(void __user *to, const void __user *from,
+ 					      unsigned long size, unsigned long dir)
+ {
+@@ -142,6 +177,8 @@ static inline void prevent_user_access(void __user *to, const void __user *from,
+ 				       unsigned long size, unsigned long dir)
+ {
+ 	set_kuap(AMR_KUAP_BLOCKED);
++	if (static_branch_unlikely(&uaccess_flush_key))
++		do_uaccess_flush();
+ }
+ 
+ static inline unsigned long prevent_user_access_return(void)
+@@ -149,6 +186,8 @@ static inline unsigned long prevent_user_access_return(void)
+ 	unsigned long flags = get_kuap();
+ 
+ 	set_kuap(AMR_KUAP_BLOCKED);
++	if (static_branch_unlikely(&uaccess_flush_key))
++		do_uaccess_flush();
+ 
+ 	return flags;
+ }
+@@ -156,30 +195,9 @@ static inline unsigned long prevent_user_access_return(void)
+ static inline void restore_user_access(unsigned long flags)
+ {
+ 	set_kuap(flags);
++	if (static_branch_unlikely(&uaccess_flush_key) && flags == AMR_KUAP_BLOCKED)
++		do_uaccess_flush();
+ }
+-
+-static inline bool
+-bad_kuap_fault(struct pt_regs *regs, unsigned long address, bool is_write)
+-{
+-	return WARN(mmu_has_feature(MMU_FTR_RADIX_KUAP) &&
+-		    (regs->kuap & (is_write ? AMR_KUAP_BLOCK_WRITE : AMR_KUAP_BLOCK_READ)),
+-		    "Bug: %s fault blocked by AMR!", is_write ? "Write" : "Read");
+-}
+-#else /* CONFIG_PPC_KUAP */
+-static inline void kuap_restore_amr(struct pt_regs *regs, unsigned long amr)
+-{
+-}
+-
+-static inline void kuap_check_amr(void)
+-{
+-}
+-
+-static inline unsigned long kuap_get_and_check_amr(void)
+-{
+-	return 0;
+-}
+-#endif /* CONFIG_PPC_KUAP */
+-
+ #endif /* __ASSEMBLY__ */
+ 
+ #endif /* _ASM_POWERPC_BOOK3S_64_KUP_RADIX_H */
 diff --git a/arch/powerpc/include/asm/book3s/64/mmu.h b/arch/powerpc/include/asm/book3s/64/mmu.h
 index b392384a3b15..86173bfc39fe 100644
 --- a/arch/powerpc/include/asm/book3s/64/mmu.h
@@ -4419,6 +4575,79 @@ index 17ccc6474ab6..bf2402fed3e0 100644
 -#endif
 -
  #endif /* _ASM_POWERPC_LMB_H */
+diff --git a/arch/powerpc/include/asm/exception-64s.h b/arch/powerpc/include/asm/exception-64s.h
+index ebe95aa04d53..1d32b174ab6a 100644
+--- a/arch/powerpc/include/asm/exception-64s.h
++++ b/arch/powerpc/include/asm/exception-64s.h
+@@ -57,11 +57,18 @@
+ 	nop;								\
+ 	nop
+ 
++#define ENTRY_FLUSH_SLOT						\
++	ENTRY_FLUSH_FIXUP_SECTION;					\
++	nop;								\
++	nop;								\
++	nop;
++
+ /*
+  * r10 must be free to use, r13 must be paca
+  */
+ #define INTERRUPT_TO_KERNEL						\
+-	STF_ENTRY_BARRIER_SLOT
++	STF_ENTRY_BARRIER_SLOT;						\
++	ENTRY_FLUSH_SLOT
+ 
+ /*
+  * Macros for annotating the expected destination of (h)rfid
+@@ -137,6 +144,9 @@
+ 	RFSCV;								\
+ 	b	rfscv_flush_fallback
+ 
++#else /* __ASSEMBLY__ */
++/* Prototype for function defined in exceptions-64s.S */
++void do_uaccess_flush(void);
+ #endif /* __ASSEMBLY__ */
+ 
+ #endif	/* _ASM_POWERPC_EXCEPTION_H */
+diff --git a/arch/powerpc/include/asm/feature-fixups.h b/arch/powerpc/include/asm/feature-fixups.h
+index b0af97add751..fbd406cd6916 100644
+--- a/arch/powerpc/include/asm/feature-fixups.h
++++ b/arch/powerpc/include/asm/feature-fixups.h
+@@ -205,6 +205,22 @@ label##3:					       	\
+ 	FTR_ENTRY_OFFSET 955b-956b;			\
+ 	.popsection;
+ 
++#define UACCESS_FLUSH_FIXUP_SECTION			\
++959:							\
++	.pushsection __uaccess_flush_fixup,"a";		\
++	.align 2;					\
++960:							\
++	FTR_ENTRY_OFFSET 959b-960b;			\
++	.popsection;
++
++#define ENTRY_FLUSH_FIXUP_SECTION			\
++957:							\
++	.pushsection __entry_flush_fixup,"a";		\
++	.align 2;					\
++958:							\
++	FTR_ENTRY_OFFSET 957b-958b;			\
++	.popsection;
++
+ #define RFI_FLUSH_FIXUP_SECTION				\
+ 951:							\
+ 	.pushsection __rfi_flush_fixup,"a";		\
+@@ -237,8 +253,11 @@ label##3:					       	\
+ #include <linux/types.h>
+ 
+ extern long stf_barrier_fallback;
++extern long entry_flush_fallback;
+ extern long __start___stf_entry_barrier_fixup, __stop___stf_entry_barrier_fixup;
+ extern long __start___stf_exit_barrier_fixup, __stop___stf_exit_barrier_fixup;
++extern long __start___uaccess_flush_fixup, __stop___uaccess_flush_fixup;
++extern long __start___entry_flush_fixup, __stop___entry_flush_fixup;
+ extern long __start___rfi_flush_fixup, __stop___rfi_flush_fixup;
+ extern long __start___barrier_nospec_fixup, __stop___barrier_nospec_fixup;
+ extern long __start__btb_flush_fixup, __stop__btb_flush_fixup;
 diff --git a/arch/powerpc/include/asm/hw_breakpoint.h b/arch/powerpc/include/asm/hw_breakpoint.h
 index db206a7f38e2..9b68eafebf43 100644
 --- a/arch/powerpc/include/asm/hw_breakpoint.h
@@ -4431,6 +4660,63 @@ index db206a7f38e2..9b68eafebf43 100644
  
  #define DABR_MAX_LEN	8
  #define DAWR_MAX_LEN	512
+diff --git a/arch/powerpc/include/asm/kup.h b/arch/powerpc/include/asm/kup.h
+index 1d0f7d838b2e..0d93331d0fab 100644
+--- a/arch/powerpc/include/asm/kup.h
++++ b/arch/powerpc/include/asm/kup.h
+@@ -14,7 +14,7 @@
+ #define KUAP_CURRENT_WRITE	8
+ #define KUAP_CURRENT		(KUAP_CURRENT_READ | KUAP_CURRENT_WRITE)
+ 
+-#ifdef CONFIG_PPC64
++#ifdef CONFIG_PPC_BOOK3S_64
+ #include <asm/book3s/64/kup-radix.h>
+ #endif
+ #ifdef CONFIG_PPC_8xx
+@@ -35,6 +35,9 @@
+ .macro kuap_check	current, gpr
+ .endm
+ 
++.macro kuap_check_amr	gpr1, gpr2
++.endm
++
+ #endif
+ 
+ #else /* !__ASSEMBLY__ */
+@@ -53,17 +56,28 @@ static inline void setup_kuep(bool disabled) { }
+ void setup_kuap(bool disabled);
+ #else
+ static inline void setup_kuap(bool disabled) { }
++
++static inline bool
++bad_kuap_fault(struct pt_regs *regs, unsigned long address, bool is_write)
++{
++	return false;
++}
++
++static inline void kuap_check_amr(void) { }
++
++/*
++ * book3s/64/kup-radix.h defines these functions for the !KUAP case to flush
++ * the L1D cache after user accesses. Only include the empty stubs for other
++ * platforms.
++ */
++#ifndef CONFIG_PPC_BOOK3S_64
+ static inline void allow_user_access(void __user *to, const void __user *from,
+ 				     unsigned long size, unsigned long dir) { }
+ static inline void prevent_user_access(void __user *to, const void __user *from,
+ 				       unsigned long size, unsigned long dir) { }
+ static inline unsigned long prevent_user_access_return(void) { return 0UL; }
+ static inline void restore_user_access(unsigned long flags) { }
+-static inline bool
+-bad_kuap_fault(struct pt_regs *regs, unsigned long address, bool is_write)
+-{
+-	return false;
+-}
++#endif /* CONFIG_PPC_BOOK3S_64 */
+ #endif /* CONFIG_PPC_KUAP */
+ 
+ static inline void allow_read_from_user(const void __user *from, unsigned long size)
 diff --git a/arch/powerpc/include/asm/mmu_context.h b/arch/powerpc/include/asm/mmu_context.h
 index 7f3658a97384..e02aa793420b 100644
 --- a/arch/powerpc/include/asm/mmu_context.h
@@ -4457,6 +4743,51 @@ index 88fb88491fe9..5647006ed373 100644
  #define THRM1_TID	(1<<2)
  #define THRM1_TIE	(1<<1)
  #define THRM1_V		(1<<0)
+diff --git a/arch/powerpc/include/asm/security_features.h b/arch/powerpc/include/asm/security_features.h
+index fbb8fa32150f..b774a4477d5f 100644
+--- a/arch/powerpc/include/asm/security_features.h
++++ b/arch/powerpc/include/asm/security_features.h
+@@ -86,12 +86,19 @@ static inline bool security_ftr_enabled(u64 feature)
+ // Software required to flush link stack on context switch
+ #define SEC_FTR_FLUSH_LINK_STACK	0x0000000000001000ull
+ 
++// The L1-D cache should be flushed when entering the kernel
++#define SEC_FTR_L1D_FLUSH_ENTRY		0x0000000000004000ull
++
++// The L1-D cache should be flushed after user accesses from the kernel
++#define SEC_FTR_L1D_FLUSH_UACCESS	0x0000000000008000ull
+ 
+ // Features enabled by default
+ #define SEC_FTR_DEFAULT \
+ 	(SEC_FTR_L1D_FLUSH_HV | \
+ 	 SEC_FTR_L1D_FLUSH_PR | \
+ 	 SEC_FTR_BNDS_CHK_SPEC_BAR | \
++	 SEC_FTR_L1D_FLUSH_ENTRY | \
++	 SEC_FTR_L1D_FLUSH_UACCESS | \
+ 	 SEC_FTR_FAVOUR_SECURITY)
+ 
+ #endif /* _ASM_POWERPC_SECURITY_FEATURES_H */
+diff --git a/arch/powerpc/include/asm/setup.h b/arch/powerpc/include/asm/setup.h
+index 9efbddee2bca..a466749703f1 100644
+--- a/arch/powerpc/include/asm/setup.h
++++ b/arch/powerpc/include/asm/setup.h
+@@ -52,12 +52,16 @@ enum l1d_flush_type {
+ };
+ 
+ void setup_rfi_flush(enum l1d_flush_type, bool enable);
++void setup_entry_flush(bool enable);
++void setup_uaccess_flush(bool enable);
+ void do_rfi_flush_fixups(enum l1d_flush_type types);
+ #ifdef CONFIG_PPC_BARRIER_NOSPEC
+ void setup_barrier_nospec(void);
+ #else
+ static inline void setup_barrier_nospec(void) { };
+ #endif
++void do_uaccess_flush_fixups(enum l1d_flush_type types);
++void do_entry_flush_fixups(enum l1d_flush_type types);
+ void do_barrier_nospec_fixups(bool enable);
+ extern bool barrier_nospec_enabled;
+ 
 diff --git a/arch/powerpc/include/asm/string.h b/arch/powerpc/include/asm/string.h
 index 283552cd0e58..2aa0e31e6884 100644
 --- a/arch/powerpc/include/asm/string.h
@@ -4649,6 +4980,126 @@ index 733e40eba4eb..2f3846192ec7 100644
  
  	/*
  	 * On SMP kernels, care must be taken because a task may be
+diff --git a/arch/powerpc/kernel/exceptions-64s.S b/arch/powerpc/kernel/exceptions-64s.S
+index f7d748b88705..f63a3d3bca3d 100644
+--- a/arch/powerpc/kernel/exceptions-64s.S
++++ b/arch/powerpc/kernel/exceptions-64s.S
+@@ -2951,15 +2951,8 @@ TRAMP_REAL_BEGIN(stf_barrier_fallback)
+ 	.endr
+ 	blr
+ 
+-TRAMP_REAL_BEGIN(rfi_flush_fallback)
+-	SET_SCRATCH0(r13);
+-	GET_PACA(r13);
+-	std	r1,PACA_EXRFI+EX_R12(r13)
+-	ld	r1,PACAKSAVE(r13)
+-	std	r9,PACA_EXRFI+EX_R9(r13)
+-	std	r10,PACA_EXRFI+EX_R10(r13)
+-	std	r11,PACA_EXRFI+EX_R11(r13)
+-	mfctr	r9
++/* Clobbers r10, r11, ctr */
++.macro L1D_DISPLACEMENT_FLUSH
+ 	ld	r10,PACA_RFI_FLUSH_FALLBACK_AREA(r13)
+ 	ld	r11,PACA_L1D_FLUSH_SIZE(r13)
+ 	srdi	r11,r11,(7 + 3) /* 128 byte lines, unrolled 8x */
+@@ -2970,7 +2963,7 @@ TRAMP_REAL_BEGIN(rfi_flush_fallback)
+ 	sync
+ 
+ 	/*
+-	 * The load adresses are at staggered offsets within cachelines,
++	 * The load addresses are at staggered offsets within cachelines,
+ 	 * which suits some pipelines better (on others it should not
+ 	 * hurt).
+ 	 */
+@@ -2985,7 +2978,30 @@ TRAMP_REAL_BEGIN(rfi_flush_fallback)
+ 	ld	r11,(0x80 + 8)*7(r10)
+ 	addi	r10,r10,0x80*8
+ 	bdnz	1b
++.endm
++
++TRAMP_REAL_BEGIN(entry_flush_fallback)
++	std	r9,PACA_EXRFI+EX_R9(r13)
++	std	r10,PACA_EXRFI+EX_R10(r13)
++	std	r11,PACA_EXRFI+EX_R11(r13)
++	mfctr	r9
++	L1D_DISPLACEMENT_FLUSH
++	mtctr	r9
++	ld	r9,PACA_EXRFI+EX_R9(r13)
++	ld	r10,PACA_EXRFI+EX_R10(r13)
++	ld	r11,PACA_EXRFI+EX_R11(r13)
++	blr
+ 
++TRAMP_REAL_BEGIN(rfi_flush_fallback)
++	SET_SCRATCH0(r13);
++	GET_PACA(r13);
++	std	r1,PACA_EXRFI+EX_R12(r13)
++	ld	r1,PACAKSAVE(r13)
++	std	r9,PACA_EXRFI+EX_R9(r13)
++	std	r10,PACA_EXRFI+EX_R10(r13)
++	std	r11,PACA_EXRFI+EX_R11(r13)
++	mfctr	r9
++	L1D_DISPLACEMENT_FLUSH
+ 	mtctr	r9
+ 	ld	r9,PACA_EXRFI+EX_R9(r13)
+ 	ld	r10,PACA_EXRFI+EX_R10(r13)
+@@ -3003,32 +3019,7 @@ TRAMP_REAL_BEGIN(hrfi_flush_fallback)
+ 	std	r10,PACA_EXRFI+EX_R10(r13)
+ 	std	r11,PACA_EXRFI+EX_R11(r13)
+ 	mfctr	r9
+-	ld	r10,PACA_RFI_FLUSH_FALLBACK_AREA(r13)
+-	ld	r11,PACA_L1D_FLUSH_SIZE(r13)
+-	srdi	r11,r11,(7 + 3) /* 128 byte lines, unrolled 8x */
+-	mtctr	r11
+-	DCBT_BOOK3S_STOP_ALL_STREAM_IDS(r11) /* Stop prefetch streams */
+-
+-	/* order ld/st prior to dcbt stop all streams with flushing */
+-	sync
+-
+-	/*
+-	 * The load adresses are at staggered offsets within cachelines,
+-	 * which suits some pipelines better (on others it should not
+-	 * hurt).
+-	 */
+-1:
+-	ld	r11,(0x80 + 8)*0(r10)
+-	ld	r11,(0x80 + 8)*1(r10)
+-	ld	r11,(0x80 + 8)*2(r10)
+-	ld	r11,(0x80 + 8)*3(r10)
+-	ld	r11,(0x80 + 8)*4(r10)
+-	ld	r11,(0x80 + 8)*5(r10)
+-	ld	r11,(0x80 + 8)*6(r10)
+-	ld	r11,(0x80 + 8)*7(r10)
+-	addi	r10,r10,0x80*8
+-	bdnz	1b
+-
++	L1D_DISPLACEMENT_FLUSH
+ 	mtctr	r9
+ 	ld	r9,PACA_EXRFI+EX_R9(r13)
+ 	ld	r10,PACA_EXRFI+EX_R10(r13)
+@@ -3079,8 +3070,21 @@ TRAMP_REAL_BEGIN(rfscv_flush_fallback)
+ 	RFSCV
+ 
+ USE_TEXT_SECTION()
+-	MASKED_INTERRUPT
+-	MASKED_INTERRUPT hsrr=1
++
++_GLOBAL(do_uaccess_flush)
++	UACCESS_FLUSH_FIXUP_SECTION
++	nop
++	nop
++	nop
++	blr
++	L1D_DISPLACEMENT_FLUSH
++	blr
++_ASM_NOKPROBE_SYMBOL(do_uaccess_flush)
++EXPORT_SYMBOL(do_uaccess_flush)
++
++
++MASKED_INTERRUPT
++MASKED_INTERRUPT hsrr=1
+ 
+ #ifdef CONFIG_KVM_BOOK3S_64_HANDLER
+ kvmppc_skip_interrupt:
 diff --git a/arch/powerpc/kernel/head_32.S b/arch/powerpc/kernel/head_32.S
 index f3ab94d73936..898c2fe4ac67 100644
 --- a/arch/powerpc/kernel/head_32.S
@@ -5312,6 +5763,200 @@ index c9876aab3142..e4e1a94ccf6a 100644
  
  		// If we just need to flush the link stack, early return
  		if (count_cache_flush_type == BRANCH_CACHE_FLUSH_NONE) {
+diff --git a/arch/powerpc/kernel/setup_64.c b/arch/powerpc/kernel/setup_64.c
+index 6be430107c6f..3a38b0f804bf 100644
+--- a/arch/powerpc/kernel/setup_64.c
++++ b/arch/powerpc/kernel/setup_64.c
+@@ -860,7 +860,13 @@ early_initcall(disable_hardlockup_detector);
+ static enum l1d_flush_type enabled_flush_types;
+ static void *l1d_flush_fallback_area;
+ static bool no_rfi_flush;
++static bool no_entry_flush;
++static bool no_uaccess_flush;
+ bool rfi_flush;
++bool entry_flush;
++bool uaccess_flush;
++DEFINE_STATIC_KEY_FALSE(uaccess_flush_key);
++EXPORT_SYMBOL(uaccess_flush_key);
+ 
+ static int __init handle_no_rfi_flush(char *p)
+ {
+@@ -870,6 +876,22 @@ static int __init handle_no_rfi_flush(char *p)
+ }
+ early_param("no_rfi_flush", handle_no_rfi_flush);
+ 
++static int __init handle_no_entry_flush(char *p)
++{
++	pr_info("entry-flush: disabled on command line.");
++	no_entry_flush = true;
++	return 0;
++}
++early_param("no_entry_flush", handle_no_entry_flush);
++
++static int __init handle_no_uaccess_flush(char *p)
++{
++	pr_info("uaccess-flush: disabled on command line.");
++	no_uaccess_flush = true;
++	return 0;
++}
++early_param("no_uaccess_flush", handle_no_uaccess_flush);
++
+ /*
+  * The RFI flush is not KPTI, but because users will see doco that says to use
+  * nopti we hijack that option here to also disable the RFI flush.
+@@ -901,6 +923,32 @@ void rfi_flush_enable(bool enable)
+ 	rfi_flush = enable;
+ }
+ 
++void entry_flush_enable(bool enable)
++{
++	if (enable) {
++		do_entry_flush_fixups(enabled_flush_types);
++		on_each_cpu(do_nothing, NULL, 1);
++	} else {
++		do_entry_flush_fixups(L1D_FLUSH_NONE);
++	}
++
++	entry_flush = enable;
++}
++
++void uaccess_flush_enable(bool enable)
++{
++	if (enable) {
++		do_uaccess_flush_fixups(enabled_flush_types);
++		static_branch_enable(&uaccess_flush_key);
++		on_each_cpu(do_nothing, NULL, 1);
++	} else {
++		static_branch_disable(&uaccess_flush_key);
++		do_uaccess_flush_fixups(L1D_FLUSH_NONE);
++	}
++
++	uaccess_flush = enable;
++}
++
+ static void __ref init_fallback_flush(void)
+ {
+ 	u64 l1d_size, limit;
+@@ -959,10 +1007,28 @@ void setup_rfi_flush(enum l1d_flush_type types, bool enable)
+ 
+ 	enabled_flush_types = types;
+ 
+-	if (!no_rfi_flush && !cpu_mitigations_off())
++	if (!cpu_mitigations_off() && !no_rfi_flush)
+ 		rfi_flush_enable(enable);
+ }
+ 
++void setup_entry_flush(bool enable)
++{
++	if (cpu_mitigations_off())
++		return;
++
++	if (!no_entry_flush)
++		entry_flush_enable(enable);
++}
++
++void setup_uaccess_flush(bool enable)
++{
++	if (cpu_mitigations_off())
++		return;
++
++	if (!no_uaccess_flush)
++		uaccess_flush_enable(enable);
++}
++
+ #ifdef CONFIG_DEBUG_FS
+ static int rfi_flush_set(void *data, u64 val)
+ {
+@@ -990,9 +1056,63 @@ static int rfi_flush_get(void *data, u64 *val)
+ 
+ DEFINE_SIMPLE_ATTRIBUTE(fops_rfi_flush, rfi_flush_get, rfi_flush_set, "%llu\n");
+ 
++static int entry_flush_set(void *data, u64 val)
++{
++	bool enable;
++
++	if (val == 1)
++		enable = true;
++	else if (val == 0)
++		enable = false;
++	else
++		return -EINVAL;
++
++	/* Only do anything if we're changing state */
++	if (enable != entry_flush)
++		entry_flush_enable(enable);
++
++	return 0;
++}
++
++static int entry_flush_get(void *data, u64 *val)
++{
++	*val = entry_flush ? 1 : 0;
++	return 0;
++}
++
++DEFINE_SIMPLE_ATTRIBUTE(fops_entry_flush, entry_flush_get, entry_flush_set, "%llu\n");
++
++static int uaccess_flush_set(void *data, u64 val)
++{
++	bool enable;
++
++	if (val == 1)
++		enable = true;
++	else if (val == 0)
++		enable = false;
++	else
++		return -EINVAL;
++
++	/* Only do anything if we're changing state */
++	if (enable != uaccess_flush)
++		uaccess_flush_enable(enable);
++
++	return 0;
++}
++
++static int uaccess_flush_get(void *data, u64 *val)
++{
++	*val = uaccess_flush ? 1 : 0;
++	return 0;
++}
++
++DEFINE_SIMPLE_ATTRIBUTE(fops_uaccess_flush, uaccess_flush_get, uaccess_flush_set, "%llu\n");
++
+ static __init int rfi_flush_debugfs_init(void)
+ {
+ 	debugfs_create_file("rfi_flush", 0600, powerpc_debugfs_root, NULL, &fops_rfi_flush);
++	debugfs_create_file("entry_flush", 0600, powerpc_debugfs_root, NULL, &fops_entry_flush);
++	debugfs_create_file("uaccess_flush", 0600, powerpc_debugfs_root, NULL, &fops_uaccess_flush);
+ 	return 0;
+ }
+ device_initcall(rfi_flush_debugfs_init);
+diff --git a/arch/powerpc/kernel/smp.c b/arch/powerpc/kernel/smp.c
+index 8261999c7d52..a594b10e438a 100644
+--- a/arch/powerpc/kernel/smp.c
++++ b/arch/powerpc/kernel/smp.c
+@@ -1251,7 +1251,7 @@ static bool shared_caches;
+ /* Activate a secondary processor. */
+ void start_secondary(void *unused)
+ {
+-	unsigned int cpu = smp_processor_id();
++	unsigned int cpu = raw_smp_processor_id();
+ 	struct cpumask *(*sibling_mask)(int) = cpu_sibling_mask;
+ 
+ 	mmgrab(&init_mm);
+diff --git a/arch/powerpc/kernel/syscall_64.c b/arch/powerpc/kernel/syscall_64.c
+index 8e50818aa50b..310bcd768cd5 100644
+--- a/arch/powerpc/kernel/syscall_64.c
++++ b/arch/powerpc/kernel/syscall_64.c
+@@ -2,7 +2,7 @@
+ 
+ #include <linux/err.h>
+ #include <asm/asm-prototypes.h>
+-#include <asm/book3s/64/kup-radix.h>
++#include <asm/kup.h>
+ #include <asm/cputime.h>
+ #include <asm/hw_irq.h>
+ #include <asm/kprobes.h>
 diff --git a/arch/powerpc/kernel/sysfs.c b/arch/powerpc/kernel/sysfs.c
 index 46b4ebc33db7..5dea98fa2f93 100644
 --- a/arch/powerpc/kernel/sysfs.c
@@ -5634,6 +6279,31 @@ index d1ebe152f210..8bcbf632e95a 100644
  	unsigned long ea, msr, msr_mask;
  	bool swap;
  
+diff --git a/arch/powerpc/kernel/vmlinux.lds.S b/arch/powerpc/kernel/vmlinux.lds.S
+index 326e113d2e45..0447e0478691 100644
+--- a/arch/powerpc/kernel/vmlinux.lds.S
++++ b/arch/powerpc/kernel/vmlinux.lds.S
+@@ -131,6 +131,20 @@ SECTIONS
+ 		__stop___stf_entry_barrier_fixup = .;
+ 	}
+ 
++	. = ALIGN(8);
++	__uaccess_flush_fixup : AT(ADDR(__uaccess_flush_fixup) - LOAD_OFFSET) {
++		__start___uaccess_flush_fixup = .;
++		*(__uaccess_flush_fixup)
++		__stop___uaccess_flush_fixup = .;
++	}
++
++	. = ALIGN(8);
++	__entry_flush_fixup : AT(ADDR(__entry_flush_fixup) - LOAD_OFFSET) {
++		__start___entry_flush_fixup = .;
++		*(__entry_flush_fixup)
++		__stop___entry_flush_fixup = .;
++	}
++
+ 	. = ALIGN(8);
+ 	__stf_exit_barrier_fixup : AT(ADDR(__stf_exit_barrier_fixup) - LOAD_OFFSET) {
+ 		__start___stf_exit_barrier_fixup = .;
 diff --git a/arch/powerpc/kvm/book3s_hv.c b/arch/powerpc/kvm/book3s_hv.c
 index 4ba06a2a306c..e2b476d76506 100644
 --- a/arch/powerpc/kvm/book3s_hv.c
@@ -5719,6 +6389,121 @@ index cb882d9a6d8a..88d46c471493 100644
  
 -EXPORT_SYMBOL_GPL(memcpy_mcsafe);
 +EXPORT_SYMBOL_GPL(copy_mc_generic);
+diff --git a/arch/powerpc/lib/feature-fixups.c b/arch/powerpc/lib/feature-fixups.c
+index 4c0a7ee9fa00..321c12a9ef6b 100644
+--- a/arch/powerpc/lib/feature-fixups.c
++++ b/arch/powerpc/lib/feature-fixups.c
+@@ -234,6 +234,110 @@ void do_stf_barrier_fixups(enum stf_barrier_type types)
+ 	do_stf_exit_barrier_fixups(types);
+ }
+ 
++void do_uaccess_flush_fixups(enum l1d_flush_type types)
++{
++	unsigned int instrs[4], *dest;
++	long *start, *end;
++	int i;
++
++	start = PTRRELOC(&__start___uaccess_flush_fixup);
++	end = PTRRELOC(&__stop___uaccess_flush_fixup);
++
++	instrs[0] = 0x60000000; /* nop */
++	instrs[1] = 0x60000000; /* nop */
++	instrs[2] = 0x60000000; /* nop */
++	instrs[3] = 0x4e800020; /* blr */
++
++	i = 0;
++	if (types == L1D_FLUSH_FALLBACK) {
++		instrs[3] = 0x60000000; /* nop */
++		/* fallthrough to fallback flush */
++	}
++
++	if (types & L1D_FLUSH_ORI) {
++		instrs[i++] = 0x63ff0000; /* ori 31,31,0 speculation barrier */
++		instrs[i++] = 0x63de0000; /* ori 30,30,0 L1d flush*/
++	}
++
++	if (types & L1D_FLUSH_MTTRIG)
++		instrs[i++] = 0x7c12dba6; /* mtspr TRIG2,r0 (SPR #882) */
++
++	for (i = 0; start < end; start++, i++) {
++		dest = (void *)start + *start;
++
++		pr_devel("patching dest %lx\n", (unsigned long)dest);
++
++		patch_instruction((struct ppc_inst *)dest, ppc_inst(instrs[0]));
++
++		patch_instruction((struct ppc_inst *)(dest + 1), ppc_inst(instrs[1]));
++		patch_instruction((struct ppc_inst *)(dest + 2), ppc_inst(instrs[2]));
++		patch_instruction((struct ppc_inst *)(dest + 3), ppc_inst(instrs[3]));
++	}
++
++	printk(KERN_DEBUG "uaccess-flush: patched %d locations (%s flush)\n", i,
++		(types == L1D_FLUSH_NONE)       ? "no" :
++		(types == L1D_FLUSH_FALLBACK)   ? "fallback displacement" :
++		(types &  L1D_FLUSH_ORI)        ? (types & L1D_FLUSH_MTTRIG)
++							? "ori+mttrig type"
++							: "ori type" :
++		(types &  L1D_FLUSH_MTTRIG)     ? "mttrig type"
++						: "unknown");
++}
++
++void do_entry_flush_fixups(enum l1d_flush_type types)
++{
++	unsigned int instrs[3], *dest;
++	long *start, *end;
++	int i;
++
++	start = PTRRELOC(&__start___entry_flush_fixup);
++	end = PTRRELOC(&__stop___entry_flush_fixup);
++
++	instrs[0] = 0x60000000; /* nop */
++	instrs[1] = 0x60000000; /* nop */
++	instrs[2] = 0x60000000; /* nop */
++
++	i = 0;
++	if (types == L1D_FLUSH_FALLBACK) {
++		instrs[i++] = 0x7d4802a6; /* mflr r10		*/
++		instrs[i++] = 0x60000000; /* branch patched below */
++		instrs[i++] = 0x7d4803a6; /* mtlr r10		*/
++	}
++
++	if (types & L1D_FLUSH_ORI) {
++		instrs[i++] = 0x63ff0000; /* ori 31,31,0 speculation barrier */
++		instrs[i++] = 0x63de0000; /* ori 30,30,0 L1d flush*/
++	}
++
++	if (types & L1D_FLUSH_MTTRIG)
++		instrs[i++] = 0x7c12dba6; /* mtspr TRIG2,r0 (SPR #882) */
++
++	for (i = 0; start < end; start++, i++) {
++		dest = (void *)start + *start;
++
++		pr_devel("patching dest %lx\n", (unsigned long)dest);
++
++		patch_instruction((struct ppc_inst *)dest, ppc_inst(instrs[0]));
++
++		if (types == L1D_FLUSH_FALLBACK)
++			patch_branch((struct ppc_inst *)(dest + 1), (unsigned long)&entry_flush_fallback,
++				     BRANCH_SET_LINK);
++		else
++			patch_instruction((struct ppc_inst *)(dest + 1), ppc_inst(instrs[1]));
++
++		patch_instruction((struct ppc_inst *)(dest + 2), ppc_inst(instrs[2]));
++	}
++
++	printk(KERN_DEBUG "entry-flush: patched %d locations (%s flush)\n", i,
++		(types == L1D_FLUSH_NONE)       ? "no" :
++		(types == L1D_FLUSH_FALLBACK)   ? "fallback displacement" :
++		(types &  L1D_FLUSH_ORI)        ? (types & L1D_FLUSH_MTTRIG)
++							? "ori+mttrig type"
++							: "ori type" :
++		(types &  L1D_FLUSH_MTTRIG)     ? "mttrig type"
++						: "unknown");
++}
++
+ void do_rfi_flush_fixups(enum l1d_flush_type types)
+ {
+ 	unsigned int instrs[3], *dest;
 diff --git a/arch/powerpc/mm/book3s64/radix_pgtable.c b/arch/powerpc/mm/book3s64/radix_pgtable.c
 index d5f0c10d752a..aae8550379ba 100644
 --- a/arch/powerpc/mm/book3s64/radix_pgtable.c
@@ -6248,6 +7033,40 @@ index 62ef7ad995da..5e33b1fc67c2 100644
  }
  
  static irqreturn_t elog_event(int irq, void *data)
+diff --git a/arch/powerpc/platforms/powernv/setup.c b/arch/powerpc/platforms/powernv/setup.c
+index 7fcb88623081..0b4f72e002c2 100644
+--- a/arch/powerpc/platforms/powernv/setup.c
++++ b/arch/powerpc/platforms/powernv/setup.c
+@@ -122,12 +122,29 @@ static void pnv_setup_rfi_flush(void)
+ 			type = L1D_FLUSH_ORI;
+ 	}
+ 
++	/*
++	 * If we are non-Power9 bare metal, we don't need to flush on kernel
++	 * entry or after user access: they fix a P9 specific vulnerability.
++	 */
++	if (!pvr_version_is(PVR_POWER9)) {
++		security_ftr_clear(SEC_FTR_L1D_FLUSH_ENTRY);
++		security_ftr_clear(SEC_FTR_L1D_FLUSH_UACCESS);
++	}
++
+ 	enable = security_ftr_enabled(SEC_FTR_FAVOUR_SECURITY) && \
+ 		 (security_ftr_enabled(SEC_FTR_L1D_FLUSH_PR)   || \
+ 		  security_ftr_enabled(SEC_FTR_L1D_FLUSH_HV));
+ 
+ 	setup_rfi_flush(type, enable);
+ 	setup_count_cache_flush();
++
++	enable = security_ftr_enabled(SEC_FTR_FAVOUR_SECURITY) &&
++		 security_ftr_enabled(SEC_FTR_L1D_FLUSH_ENTRY);
++	setup_entry_flush(enable);
++
++	enable = security_ftr_enabled(SEC_FTR_FAVOUR_SECURITY) &&
++		 security_ftr_enabled(SEC_FTR_L1D_FLUSH_UACCESS);
++	setup_uaccess_flush(enable);
+ }
+ 
+ static void __init pnv_setup_arch(void)
 diff --git a/arch/powerpc/platforms/powernv/smp.c b/arch/powerpc/platforms/powernv/smp.c
 index b2ba3e95bda7..bbf361f23ae8 100644
 --- a/arch/powerpc/platforms/powernv/smp.c
@@ -6635,6 +7454,25 @@ index bbb97169bf63..6268545947b8 100644
  	return 0;
  }
  machine_subsys_initcall(pseries, rng_init);
+diff --git a/arch/powerpc/platforms/pseries/setup.c b/arch/powerpc/platforms/pseries/setup.c
+index 2f4ee0a90284..9f47b492a90f 100644
+--- a/arch/powerpc/platforms/pseries/setup.c
++++ b/arch/powerpc/platforms/pseries/setup.c
+@@ -573,6 +573,14 @@ void pseries_setup_rfi_flush(void)
+ 
+ 	setup_rfi_flush(types, enable);
+ 	setup_count_cache_flush();
++
++	enable = security_ftr_enabled(SEC_FTR_FAVOUR_SECURITY) &&
++		 security_ftr_enabled(SEC_FTR_L1D_FLUSH_ENTRY);
++	setup_entry_flush(enable);
++
++	enable = security_ftr_enabled(SEC_FTR_FAVOUR_SECURITY) &&
++		 security_ftr_enabled(SEC_FTR_L1D_FLUSH_UACCESS);
++	setup_uaccess_flush(enable);
+ }
+ 
+ #ifdef CONFIG_PCI_IOV
 diff --git a/arch/powerpc/platforms/pseries/svm.c b/arch/powerpc/platforms/pseries/svm.c
 index e6d7a344d9f2..7b739cc7a8a9 100644
 --- a/arch/powerpc/platforms/pseries/svm.c
@@ -8558,7 +9396,7 @@ index 86848c57b55e..404315df1e16 100644
  
  static void intel_pmu_drain_pebs_core(struct pt_regs *iregs)
 diff --git a/arch/x86/events/intel/uncore_snb.c b/arch/x86/events/intel/uncore_snb.c
-index 6a4ca27b2c9e..4aa735694e03 100644
+index 6a4ca27b2c9e..63250ac7a57c 100644
 --- a/arch/x86/events/intel/uncore_snb.c
 +++ b/arch/x86/events/intel/uncore_snb.c
 @@ -126,6 +126,10 @@
@@ -8632,6 +9470,15 @@ index 6a4ca27b2c9e..4aa735694e03 100644
  }
  
  enum {
+@@ -438,7 +459,7 @@ enum perf_snb_uncore_imc_freerunning_types {
+ static struct freerunning_counters snb_uncore_imc_freerunning[] = {
+ 	[SNB_PCI_UNCORE_IMC_DATA_READS]		= { SNB_UNCORE_PCI_IMC_DATA_READS_BASE,
+ 							0x0, 0x0, 1, 32 },
+-	[SNB_PCI_UNCORE_IMC_DATA_READS]		= { SNB_UNCORE_PCI_IMC_DATA_WRITES_BASE,
++	[SNB_PCI_UNCORE_IMC_DATA_WRITES]	= { SNB_UNCORE_PCI_IMC_DATA_WRITES_BASE,
+ 							0x0, 0x0, 1, 32 },
+ 	[SNB_PCI_UNCORE_IMC_GT_REQUESTS]	= { SNB_UNCORE_PCI_IMC_GT_REQUESTS_BASE,
+ 							0x0, 0x0, 1, 32 },
 diff --git a/arch/x86/events/intel/uncore_snbep.c b/arch/x86/events/intel/uncore_snbep.c
 index 62e88ad919ff..4f5e78a4003b 100644
 --- a/arch/x86/events/intel/uncore_snbep.c
@@ -9783,7 +10630,7 @@ index ec88bbe08a32..4a96aa3de7d8 100644
  		state->ip = READ_ONCE_NOCHECK(frame->ret_addr);
  		state->signal = (void *)state->ip == ret_from_fork;
 diff --git a/arch/x86/kvm/emulate.c b/arch/x86/kvm/emulate.c
-index 2f6510de6b0c..85111cd0adcd 100644
+index 2f6510de6b0c..ba1ea6ca5a49 100644
 --- a/arch/x86/kvm/emulate.c
 +++ b/arch/x86/kvm/emulate.c
 @@ -3606,7 +3606,7 @@ static int em_rdpid(struct x86_emulate_ctxt *ctxt)
@@ -9795,6 +10642,28 @@ index 2f6510de6b0c..85111cd0adcd 100644
  	ctxt->dst.val = tsc_aux;
  	return X86EMUL_CONTINUE;
  }
+@@ -4032,6 +4032,12 @@ static int em_clflush(struct x86_emulate_ctxt *ctxt)
+ 	return X86EMUL_CONTINUE;
+ }
+ 
++static int em_clflushopt(struct x86_emulate_ctxt *ctxt)
++{
++	/* emulating clflushopt regardless of cpuid */
++	return X86EMUL_CONTINUE;
++}
++
+ static int em_movsxd(struct x86_emulate_ctxt *ctxt)
+ {
+ 	ctxt->dst.val = (s32) ctxt->src.val;
+@@ -4571,7 +4577,7 @@ static const struct opcode group11[] = {
+ };
+ 
+ static const struct gprefix pfx_0f_ae_7 = {
+-	I(SrcMem | ByteOp, em_clflush), N, N, N,
++	I(SrcMem | ByteOp, em_clflush), I(SrcMem | ByteOp, em_clflushopt), N, N,
+ };
+ 
+ static const struct group_dual group15 = { {
 diff --git a/arch/x86/kvm/ioapic.c b/arch/x86/kvm/ioapic.c
 index d057376bd3d3..698969e18fe3 100644
 --- a/arch/x86/kvm/ioapic.c
@@ -11264,6 +12133,19 @@ index fcddda3d6712..e0cb1bcfffb2 100644
  
  	return false;
  }
+diff --git a/drivers/acpi/evged.c b/drivers/acpi/evged.c
+index b1a7f8d6965e..fe6b6792c8bb 100644
+--- a/drivers/acpi/evged.c
++++ b/drivers/acpi/evged.c
+@@ -101,7 +101,7 @@ static acpi_status acpi_ged_request_interrupt(struct acpi_resource *ares,
+ 
+ 	switch (gsi) {
+ 	case 0 ... 255:
+-		sprintf(ev_name, "_%c%02hhX",
++		sprintf(ev_name, "_%c%02X",
+ 			trigger == ACPI_EDGE_SENSITIVE ? 'E' : 'L', gsi);
+ 
+ 		if (ACPI_SUCCESS(acpi_get_handle(handle, ev_name, &evt_handle)))
 diff --git a/drivers/acpi/nfit/core.c b/drivers/acpi/nfit/core.c
 index 26dd208a0d63..103ae7401f95 100644
 --- a/drivers/acpi/nfit/core.c
@@ -26064,6 +26946,80 @@ index 94c94d7f5155..d6c924032aaa 100644
  
  	keypad_data = kzalloc(sizeof(struct omap4_keypad), GFP_KERNEL);
  	if (!keypad_data) {
+diff --git a/drivers/input/keyboard/sunkbd.c b/drivers/input/keyboard/sunkbd.c
+index 27126e621eb6..d450f11b98a7 100644
+--- a/drivers/input/keyboard/sunkbd.c
++++ b/drivers/input/keyboard/sunkbd.c
+@@ -99,7 +99,8 @@ static irqreturn_t sunkbd_interrupt(struct serio *serio,
+ 	switch (data) {
+ 
+ 	case SUNKBD_RET_RESET:
+-		schedule_work(&sunkbd->tq);
++		if (sunkbd->enabled)
++			schedule_work(&sunkbd->tq);
+ 		sunkbd->reset = -1;
+ 		break;
+ 
+@@ -200,16 +201,12 @@ static int sunkbd_initialize(struct sunkbd *sunkbd)
+ }
+ 
+ /*
+- * sunkbd_reinit() sets leds and beeps to a state the computer remembers they
+- * were in.
++ * sunkbd_set_leds_beeps() sets leds and beeps to a state the computer remembers
++ * they were in.
+  */
+ 
+-static void sunkbd_reinit(struct work_struct *work)
++static void sunkbd_set_leds_beeps(struct sunkbd *sunkbd)
+ {
+-	struct sunkbd *sunkbd = container_of(work, struct sunkbd, tq);
+-
+-	wait_event_interruptible_timeout(sunkbd->wait, sunkbd->reset >= 0, HZ);
+-
+ 	serio_write(sunkbd->serio, SUNKBD_CMD_SETLED);
+ 	serio_write(sunkbd->serio,
+ 		(!!test_bit(LED_CAPSL,   sunkbd->dev->led) << 3) |
+@@ -222,11 +219,39 @@ static void sunkbd_reinit(struct work_struct *work)
+ 		SUNKBD_CMD_BELLOFF - !!test_bit(SND_BELL, sunkbd->dev->snd));
+ }
+ 
++
++/*
++ * sunkbd_reinit() wait for the keyboard reset to complete and restores state
++ * of leds and beeps.
++ */
++
++static void sunkbd_reinit(struct work_struct *work)
++{
++	struct sunkbd *sunkbd = container_of(work, struct sunkbd, tq);
++
++	/*
++	 * It is OK that we check sunkbd->enabled without pausing serio,
++	 * as we only want to catch true->false transition that will
++	 * happen once and we will be woken up for it.
++	 */
++	wait_event_interruptible_timeout(sunkbd->wait,
++					 sunkbd->reset >= 0 || !sunkbd->enabled,
++					 HZ);
++
++	if (sunkbd->reset >= 0 && sunkbd->enabled)
++		sunkbd_set_leds_beeps(sunkbd);
++}
++
+ static void sunkbd_enable(struct sunkbd *sunkbd, bool enable)
+ {
+ 	serio_pause_rx(sunkbd->serio);
+ 	sunkbd->enabled = enable;
+ 	serio_continue_rx(sunkbd->serio);
++
++	if (!enable) {
++		wake_up_interruptible(&sunkbd->wait);
++		cancel_work_sync(&sunkbd->tq);
++	}
+ }
+ 
+ /*
 diff --git a/drivers/input/keyboard/twl4030_keypad.c b/drivers/input/keyboard/twl4030_keypad.c
 index af3a6824f1a4..77e0743a3cf8 100644
 --- a/drivers/input/keyboard/twl4030_keypad.c
@@ -26571,6 +27527,46 @@ index 94fefd456ba0..80145f9d7c14 100644
  	if (rc < 0)
  		return rc;
  
+diff --git a/drivers/leds/leds-lm3697.c b/drivers/leds/leds-lm3697.c
+index 024983088d59..31f5ed486839 100644
+--- a/drivers/leds/leds-lm3697.c
++++ b/drivers/leds/leds-lm3697.c
+@@ -78,6 +78,7 @@ struct lm3697 {
+ 	struct mutex lock;
+ 
+ 	int bank_cfg;
++	int num_banks;
+ 
+ 	struct lm3697_led leds[];
+ };
+@@ -180,7 +181,7 @@ static int lm3697_init(struct lm3697 *priv)
+ 	if (ret)
+ 		dev_err(&priv->client->dev, "Cannot write OUTPUT config\n");
+ 
+-	for (i = 0; i < LM3697_MAX_CONTROL_BANKS; i++) {
++	for (i = 0; i < priv->num_banks; i++) {
+ 		led = &priv->leds[i];
+ 		ret = ti_lmu_common_set_ramp(&led->lmu_data);
+ 		if (ret)
+@@ -307,8 +308,8 @@ static int lm3697_probe(struct i2c_client *client,
+ 	int ret;
+ 
+ 	count = device_get_child_node_count(&client->dev);
+-	if (!count) {
+-		dev_err(&client->dev, "LEDs are not defined in device tree!");
++	if (!count || count > LM3697_MAX_CONTROL_BANKS) {
++		dev_err(&client->dev, "Strange device tree!");
+ 		return -ENODEV;
+ 	}
+ 
+@@ -322,6 +323,7 @@ static int lm3697_probe(struct i2c_client *client,
+ 
+ 	led->client = client;
+ 	led->dev = &client->dev;
++	led->num_banks = count;
+ 	led->regmap = devm_regmap_init_i2c(client, &lm3697_regmap_config);
+ 	if (IS_ERR(led->regmap)) {
+ 		ret = PTR_ERR(led->regmap);
 diff --git a/drivers/lightnvm/core.c b/drivers/lightnvm/core.c
 index fe78bf0fdce5..c1bcac71008c 100644
 --- a/drivers/lightnvm/core.c
@@ -56983,34 +57979,6 @@ index 1c42f544096d..fca3f5b59078 100644
  }
  
  /*
-diff --git a/fs/xattr.c b/fs/xattr.c
-index 386b45676d7e..cabada890bae 100644
---- a/fs/xattr.c
-+++ b/fs/xattr.c
-@@ -119,15 +119,17 @@ xattr_permission(struct inode *inode, const char *name, int mask)
- 	}
- 
- 	/*
--	 * In the user.* namespace, only regular files and directories can have
--	 * extended attributes. For sticky directories, only the owner and
--	 * privileged users can write attributes.
-+	 * In the user.* namespace, only regular files, symbolic links, and
-+	 * directories can have extended attributes. For symbolic links and
-+	 * sticky directories, only the owner and privileged users can write
-+	 * attributes.
- 	 */
- 	if (!strncmp(name, XATTR_USER_PREFIX, XATTR_USER_PREFIX_LEN)) {
--		if (!S_ISREG(inode->i_mode) && !S_ISDIR(inode->i_mode))
-+		if (!S_ISREG(inode->i_mode) && !S_ISDIR(inode->i_mode) && !S_ISLNK(inode->i_mode))
- 			return (mask & MAY_WRITE) ? -EPERM : -ENODATA;
--		if (S_ISDIR(inode->i_mode) && (inode->i_mode & S_ISVTX) &&
--		    (mask & MAY_WRITE) && !inode_owner_or_capable(inode))
-+		if (((S_ISDIR(inode->i_mode) && (inode->i_mode & S_ISVTX))
-+		        || S_ISLNK(inode->i_mode)) && (mask & MAY_WRITE)
-+		        && !inode_owner_or_capable(inode))
- 			return -EPERM;
- 	}
- 
 diff --git a/fs/xfs/libxfs/xfs_alloc.c b/fs/xfs/libxfs/xfs_alloc.c
 index 852b536551b5..15640015be9d 100644
 --- a/fs/xfs/libxfs/xfs_alloc.c
@@ -77011,6 +77979,28 @@ index 0cec4152f979..e09d087ba240 100644
  	skcb = j1939_skb_to_cb(skb);
  	memcpy(skcb, rel_skcb, sizeof(*skcb));
  
+diff --git a/net/can/proc.c b/net/can/proc.c
+index e6881bfc3ed1..077af42c26ba 100644
+--- a/net/can/proc.c
++++ b/net/can/proc.c
+@@ -471,6 +471,9 @@ void can_init_proc(struct net *net)
+  */
+ void can_remove_proc(struct net *net)
+ {
++	if (!net->can.proc_dir)
++		return;
++
+ 	if (net->can.pde_version)
+ 		remove_proc_entry(CAN_PROC_VERSION, net->can.proc_dir);
+ 
+@@ -498,6 +501,5 @@ void can_remove_proc(struct net *net)
+ 	if (net->can.pde_rcvlist_sff)
+ 		remove_proc_entry(CAN_PROC_RCVLIST_SFF, net->can.proc_dir);
+ 
+-	if (net->can.proc_dir)
+-		remove_proc_entry("can", net->proc_net);
++	remove_proc_entry("can", net->proc_net);
+ }
 diff --git a/net/ceph/messenger.c b/net/ceph/messenger.c
 index d4d7a0e52491..9d4a21b819c1 100644
 --- a/net/ceph/messenger.c
@@ -77868,10 +78858,35 @@ index 2e400b0ff696..0f30f50c46b1 100644
  				IEEE80211_STA_DISABLE_HE;
  	rcu_read_unlock();
 diff --git a/net/mac80211/sta_info.c b/net/mac80211/sta_info.c
-index f2840d1d95cf..fb4f2b9b294f 100644
+index f2840d1d95cf..4fe284ff1ea3 100644
 --- a/net/mac80211/sta_info.c
 +++ b/net/mac80211/sta_info.c
-@@ -2122,6 +2122,10 @@ static void sta_stats_decode_rate(struct ieee80211_local *local, u32 rate,
+@@ -258,6 +258,24 @@ struct sta_info *sta_info_get_by_idx(struct ieee80211_sub_if_data *sdata,
+  */
+ void sta_info_free(struct ieee80211_local *local, struct sta_info *sta)
+ {
++	/*
++	 * If we had used sta_info_pre_move_state() then we might not
++	 * have gone through the state transitions down again, so do
++	 * it here now (and warn if it's inserted).
++	 *
++	 * This will clear state such as fast TX/RX that may have been
++	 * allocated during state transitions.
++	 */
++	while (sta->sta_state > IEEE80211_STA_NONE) {
++		int ret;
++
++		WARN_ON_ONCE(test_sta_flag(sta, WLAN_STA_INSERTED));
++
++		ret = sta_info_move_state(sta, sta->sta_state - 1);
++		if (WARN_ONCE(ret, "sta_info_move_state() returned %d\n", ret))
++			break;
++	}
++
+ 	if (sta->rate_ctrl)
+ 		rate_control_free_sta(sta);
+ 
+@@ -2122,6 +2140,10 @@ static void sta_stats_decode_rate(struct ieee80211_local *local, u32 rate,
  		int rate_idx = STA_STATS_GET(LEGACY_IDX, rate);
  
  		sband = local->hw.wiphy->bands[band];
@@ -84049,6 +85064,19 @@ index 7449a4b8f1f9..9098f1e7433f 100644
      fail "Failed to create combined histogram"
  fi
  
+diff --git a/tools/testing/selftests/kselftest_harness.h b/tools/testing/selftests/kselftest_harness.h
+index 4f78e4805633..d8f44f4bdb3f 100644
+--- a/tools/testing/selftests/kselftest_harness.h
++++ b/tools/testing/selftests/kselftest_harness.h
+@@ -126,7 +126,7 @@
+ 	snprintf(_metadata->results->reason, \
+ 		 sizeof(_metadata->results->reason), fmt, ##__VA_ARGS__); \
+ 	if (TH_LOG_ENABLED) { \
+-		fprintf(TH_LOG_STREAM, "#      SKIP     %s\n", \
++		fprintf(TH_LOG_STREAM, "#      SKIP      %s\n", \
+ 			_metadata->results->reason); \
+ 	} \
+ 	_metadata->passed = 1; \
 diff --git a/tools/testing/selftests/lib.mk b/tools/testing/selftests/lib.mk
 index 7a17ea815736..66f3317dc365 100644
 --- a/tools/testing/selftests/lib.mk
@@ -84344,6 +85372,308 @@ index 8a8d0f456946..0d783e1065c8 100755
 -exit $failed
 +test "$failed" == 0
 +exit $?
+diff --git a/tools/testing/selftests/powerpc/security/.gitignore b/tools/testing/selftests/powerpc/security/.gitignore
+index f795e06f5ae3..4257a1f156bb 100644
+--- a/tools/testing/selftests/powerpc/security/.gitignore
++++ b/tools/testing/selftests/powerpc/security/.gitignore
+@@ -1,2 +1,3 @@
+ # SPDX-License-Identifier: GPL-2.0-only
+ rfi_flush
++entry_flush
+diff --git a/tools/testing/selftests/powerpc/security/Makefile b/tools/testing/selftests/powerpc/security/Makefile
+index eadbbff50be6..921152caf1dc 100644
+--- a/tools/testing/selftests/powerpc/security/Makefile
++++ b/tools/testing/selftests/powerpc/security/Makefile
+@@ -1,6 +1,6 @@
+ # SPDX-License-Identifier: GPL-2.0+
+ 
+-TEST_GEN_PROGS := rfi_flush spectre_v2
++TEST_GEN_PROGS := rfi_flush entry_flush spectre_v2
+ top_srcdir = ../../../../..
+ 
+ CFLAGS += -I../../../../../usr/include
+diff --git a/tools/testing/selftests/powerpc/security/entry_flush.c b/tools/testing/selftests/powerpc/security/entry_flush.c
+new file mode 100644
+index 000000000000..7ae7e37204c5
+--- /dev/null
++++ b/tools/testing/selftests/powerpc/security/entry_flush.c
+@@ -0,0 +1,198 @@
++// SPDX-License-Identifier: GPL-2.0+
++
++/*
++ * Copyright 2018 IBM Corporation.
++ */
++
++#define __SANE_USERSPACE_TYPES__
++
++#include <sys/types.h>
++#include <stdint.h>
++#include <malloc.h>
++#include <unistd.h>
++#include <signal.h>
++#include <stdlib.h>
++#include <string.h>
++#include <stdio.h>
++#include "utils.h"
++
++#define CACHELINE_SIZE 128
++
++struct perf_event_read {
++	__u64 nr;
++	__u64 l1d_misses;
++};
++
++static inline __u64 load(void *addr)
++{
++	__u64 tmp;
++
++	asm volatile("ld %0,0(%1)" : "=r"(tmp) : "b"(addr));
++
++	return tmp;
++}
++
++static void syscall_loop(char *p, unsigned long iterations,
++			 unsigned long zero_size)
++{
++	for (unsigned long i = 0; i < iterations; i++) {
++		for (unsigned long j = 0; j < zero_size; j += CACHELINE_SIZE)
++			load(p + j);
++		getppid();
++	}
++}
++
++static void sigill_handler(int signr, siginfo_t *info, void *unused)
++{
++	static int warned;
++	ucontext_t *ctx = (ucontext_t *)unused;
++	unsigned long *pc = &UCONTEXT_NIA(ctx);
++
++	/* mtspr 3,RS to check for move to DSCR below */
++	if ((*((unsigned int *)*pc) & 0xfc1fffff) == 0x7c0303a6) {
++		if (!warned++)
++			printf("WARNING: Skipping over dscr setup. Consider running 'ppc64_cpu --dscr=1' manually.\n");
++		*pc += 4;
++	} else {
++		printf("SIGILL at %p\n", pc);
++		abort();
++	}
++}
++
++static void set_dscr(unsigned long val)
++{
++	static int init;
++	struct sigaction sa;
++
++	if (!init) {
++		memset(&sa, 0, sizeof(sa));
++		sa.sa_sigaction = sigill_handler;
++		sa.sa_flags = SA_SIGINFO;
++		if (sigaction(SIGILL, &sa, NULL))
++			perror("sigill_handler");
++		init = 1;
++	}
++
++	asm volatile("mtspr %1,%0" : : "r" (val), "i" (SPRN_DSCR));
++}
++
++int entry_flush_test(void)
++{
++	char *p;
++	int repetitions = 10;
++	int fd, passes = 0, iter, rc = 0;
++	struct perf_event_read v;
++	__u64 l1d_misses_total = 0;
++	unsigned long iterations = 100000, zero_size = 24 * 1024;
++	unsigned long l1d_misses_expected;
++	int rfi_flush_orig;
++	int entry_flush, entry_flush_orig;
++
++	SKIP_IF(geteuid() != 0);
++
++	// The PMU event we use only works on Power7 or later
++	SKIP_IF(!have_hwcap(PPC_FEATURE_ARCH_2_06));
++
++	if (read_debugfs_file("powerpc/rfi_flush", &rfi_flush_orig) < 0) {
++		perror("Unable to read powerpc/rfi_flush debugfs file");
++		SKIP_IF(1);
++	}
++
++	if (read_debugfs_file("powerpc/entry_flush", &entry_flush_orig) < 0) {
++		perror("Unable to read powerpc/entry_flush debugfs file");
++		SKIP_IF(1);
++	}
++
++	if (rfi_flush_orig != 0) {
++		if (write_debugfs_file("powerpc/rfi_flush", 0) < 0) {
++			perror("error writing to powerpc/rfi_flush debugfs file");
++			FAIL_IF(1);
++		}
++	}
++
++	entry_flush = entry_flush_orig;
++
++	fd = perf_event_open_counter(PERF_TYPE_RAW, /* L1d miss */ 0x400f0, -1);
++	FAIL_IF(fd < 0);
++
++	p = (char *)memalign(zero_size, CACHELINE_SIZE);
++
++	FAIL_IF(perf_event_enable(fd));
++
++	// disable L1 prefetching
++	set_dscr(1);
++
++	iter = repetitions;
++
++	/*
++	 * We expect to see l1d miss for each cacheline access when entry_flush
++	 * is set. Allow a small variation on this.
++	 */
++	l1d_misses_expected = iterations * (zero_size / CACHELINE_SIZE - 2);
++
++again:
++	FAIL_IF(perf_event_reset(fd));
++
++	syscall_loop(p, iterations, zero_size);
++
++	FAIL_IF(read(fd, &v, sizeof(v)) != sizeof(v));
++
++	if (entry_flush && v.l1d_misses >= l1d_misses_expected)
++		passes++;
++	else if (!entry_flush && v.l1d_misses < (l1d_misses_expected / 2))
++		passes++;
++
++	l1d_misses_total += v.l1d_misses;
++
++	while (--iter)
++		goto again;
++
++	if (passes < repetitions) {
++		printf("FAIL (L1D misses with entry_flush=%d: %llu %c %lu) [%d/%d failures]\n",
++		       entry_flush, l1d_misses_total, entry_flush ? '<' : '>',
++		       entry_flush ? repetitions * l1d_misses_expected :
++		       repetitions * l1d_misses_expected / 2,
++		       repetitions - passes, repetitions);
++		rc = 1;
++	} else {
++		printf("PASS (L1D misses with entry_flush=%d: %llu %c %lu) [%d/%d pass]\n",
++		       entry_flush, l1d_misses_total, entry_flush ? '>' : '<',
++		       entry_flush ? repetitions * l1d_misses_expected :
++		       repetitions * l1d_misses_expected / 2,
++		       passes, repetitions);
++	}
++
++	if (entry_flush == entry_flush_orig) {
++		entry_flush = !entry_flush_orig;
++		if (write_debugfs_file("powerpc/entry_flush", entry_flush) < 0) {
++			perror("error writing to powerpc/entry_flush debugfs file");
++			return 1;
++		}
++		iter = repetitions;
++		l1d_misses_total = 0;
++		passes = 0;
++		goto again;
++	}
++
++	perf_event_disable(fd);
++	close(fd);
++
++	set_dscr(0);
++
++	if (write_debugfs_file("powerpc/rfi_flush", rfi_flush_orig) < 0) {
++		perror("unable to restore original value of powerpc/rfi_flush debugfs file");
++		return 1;
++	}
++
++	if (write_debugfs_file("powerpc/entry_flush", entry_flush_orig) < 0) {
++		perror("unable to restore original value of powerpc/entry_flush debugfs file");
++		return 1;
++	}
++
++	return rc;
++}
++
++int main(int argc, char *argv[])
++{
++	return test_harness(entry_flush_test, "entry_flush_test");
++}
+diff --git a/tools/testing/selftests/powerpc/security/rfi_flush.c b/tools/testing/selftests/powerpc/security/rfi_flush.c
+index 0a7d0afb26b8..533315e68133 100644
+--- a/tools/testing/selftests/powerpc/security/rfi_flush.c
++++ b/tools/testing/selftests/powerpc/security/rfi_flush.c
+@@ -50,16 +50,30 @@ int rfi_flush_test(void)
+ 	__u64 l1d_misses_total = 0;
+ 	unsigned long iterations = 100000, zero_size = 24 * 1024;
+ 	unsigned long l1d_misses_expected;
+-	int rfi_flush_org, rfi_flush;
++	int rfi_flush_orig, rfi_flush;
++	int have_entry_flush, entry_flush_orig;
+ 
+ 	SKIP_IF(geteuid() != 0);
+ 
+-	if (read_debugfs_file("powerpc/rfi_flush", &rfi_flush_org)) {
++	if (read_debugfs_file("powerpc/rfi_flush", &rfi_flush_orig) < 0) {
+ 		perror("Unable to read powerpc/rfi_flush debugfs file");
+ 		SKIP_IF(1);
+ 	}
+ 
+-	rfi_flush = rfi_flush_org;
++	if (read_debugfs_file("powerpc/entry_flush", &entry_flush_orig) < 0) {
++		have_entry_flush = 0;
++	} else {
++		have_entry_flush = 1;
++
++		if (entry_flush_orig != 0) {
++			if (write_debugfs_file("powerpc/entry_flush", 0) < 0) {
++				perror("error writing to powerpc/entry_flush debugfs file");
++				return 1;
++			}
++		}
++	}
++
++	rfi_flush = rfi_flush_orig;
+ 
+ 	fd = perf_event_open_counter(PERF_TYPE_RAW, /* L1d miss */ 0x400f0, -1);
+ 	FAIL_IF(fd < 0);
+@@ -68,6 +82,7 @@ int rfi_flush_test(void)
+ 
+ 	FAIL_IF(perf_event_enable(fd));
+ 
++	// disable L1 prefetching
+ 	set_dscr(1);
+ 
+ 	iter = repetitions;
+@@ -109,8 +124,8 @@ int rfi_flush_test(void)
+ 		       repetitions * l1d_misses_expected / 2,
+ 		       passes, repetitions);
+ 
+-	if (rfi_flush == rfi_flush_org) {
+-		rfi_flush = !rfi_flush_org;
++	if (rfi_flush == rfi_flush_orig) {
++		rfi_flush = !rfi_flush_orig;
+ 		if (write_debugfs_file("powerpc/rfi_flush", rfi_flush) < 0) {
+ 			perror("error writing to powerpc/rfi_flush debugfs file");
+ 			return 1;
+@@ -126,11 +141,19 @@ int rfi_flush_test(void)
+ 
+ 	set_dscr(0);
+ 
+-	if (write_debugfs_file("powerpc/rfi_flush", rfi_flush_org) < 0) {
++	if (write_debugfs_file("powerpc/rfi_flush", rfi_flush_orig) < 0) {
+ 		perror("unable to restore original value of powerpc/rfi_flush debugfs file");
+ 		return 1;
+ 	}
+ 
++	if (have_entry_flush) {
++		if (write_debugfs_file("powerpc/entry_flush", entry_flush_orig) < 0) {
++			perror("unable to restore original value of powerpc/entry_flush "
++			       "debugfs file");
++			return 1;
++		}
++	}
++
+ 	return rc;
+ }
+ 
 diff --git a/tools/testing/selftests/powerpc/utils.c b/tools/testing/selftests/powerpc/utils.c
 index 18b6a773d5c7..638ffacc90aa 100644
 --- a/tools/testing/selftests/powerpc/utils.c
