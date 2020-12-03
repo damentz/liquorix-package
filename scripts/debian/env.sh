@@ -22,7 +22,7 @@ source_arch='amd64'
 source_distro='ubuntu'
 source_release='bionic'
 
-# stable => stretch, testing => buster, unstable => sid
+# stable => buster, testing => bullseye, unstable => sid
 releases_debian=('stretch' 'buster' 'bullseye' 'sid')
 releases_ubuntu=('xenial' 'bionic' 'focal' 'groovy')
 mirror_debian='http://deb.debian.org/debian'
