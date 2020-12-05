@@ -20,7 +20,7 @@ package_source="${package_name}_${version_kernel}.orig.tar.xz"
 # to Debian Sid since it normally tracks the latest upstream.
 source_arch='amd64'
 source_distro='ubuntu'
-source_release='bionic'
+source_release='focal'
 
 # stable => buster, testing => bullseye, unstable => sid
 releases_debian=('buster' 'bullseye' 'sid')
