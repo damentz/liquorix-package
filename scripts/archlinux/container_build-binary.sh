@@ -45,7 +45,7 @@ tar -xpvf "$dir_base/$package_source" --strip-components=1
 
 echo "[INFO ] Building binary package for $release"
 export PACKAGER="$package_maintainer"
-$schedtool makepkg --sign
+$schedtool makepkg --sign -s
 
 echo "[INFO ] Copying binary packages to bind mount: $dir_artifacts/"
 if [[ -d "$dir_artifacts" ]]; then
