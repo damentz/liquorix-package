@@ -955,7 +955,7 @@ index e29739904e37..7f58010ea86a 100644
  
      The logical ID of the package. As we do not trust BIOSes to enumerate the
 diff --git a/Makefile b/Makefile
-index e30cf02da8b8..6b4286c111f0 100644
+index e30cf02da8b8..efab40aa5ae7 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -1,9 +1,9 @@
@@ -966,7 +966,7 @@ index e30cf02da8b8..6b4286c111f0 100644
 -EXTRAVERSION =
 -NAME = Kleptomaniac Octopus
 +SUBLEVEL = 6
-+EXTRAVERSION = -lqx1
++EXTRAVERSION = -lqx2
 +NAME = Tea Storm
  
  # *DOCUMENTATION*
@@ -26148,8 +26148,28 @@ index 3ac7611ef7ce..fd691e4815c5 100644
  	else if (info->si_lasti > BFS_MAX_LASTI) {
  		printf("Impossible last inode number %lu > %d on %s\n", info->si_lasti, BFS_MAX_LASTI, s->s_id);
  		goto out1;
+diff --git a/fs/btrfs/btrfs_inode.h b/fs/btrfs/btrfs_inode.h
+index 92dd86bceae3..7e86ab4841dd 100644
+--- a/fs/btrfs/btrfs_inode.h
++++ b/fs/btrfs/btrfs_inode.h
+@@ -35,6 +35,15 @@ enum {
+ 	BTRFS_INODE_IN_DELALLOC_LIST,
+ 	BTRFS_INODE_HAS_PROPS,
+ 	BTRFS_INODE_SNAPSHOT_FLUSH,
++	/*
++	 * Set when we are in a context where we need to start a transaction and
++	 * have dirty pages with the respective file range locked. This is to
++	 * ensure that when reserving space for the transaction, if we are low
++	 * on available space and need to flush delalloc, we will not flush
++	 * delalloc for this inode, because that could result in a deadlock (on
++	 * the file range, inode's io_tree).
++	 */
++	BTRFS_INODE_NO_DELALLOC_FLUSH,
+ };
+ 
+ /* in memory btrfs inode */
 diff --git a/fs/btrfs/ctree.h b/fs/btrfs/ctree.h
-index 0b29bdb25105..62461239600f 100644
+index 0b29bdb25105..e01545538e07 100644
 --- a/fs/btrfs/ctree.h
 +++ b/fs/btrfs/ctree.h
 @@ -2593,7 +2593,6 @@ int btrfs_free_reserved_extent(struct btrfs_fs_info *fs_info,
@@ -26160,6 +26180,29 @@ index 0b29bdb25105..62461239600f 100644
  int btrfs_finish_extent_commit(struct btrfs_trans_handle *trans);
  int btrfs_inc_extent_ref(struct btrfs_trans_handle *trans,
  			 struct btrfs_ref *generic_ref);
+@@ -3002,7 +3001,8 @@ int btrfs_truncate_inode_items(struct btrfs_trans_handle *trans,
+ 			       u32 min_type);
+ 
+ int btrfs_start_delalloc_snapshot(struct btrfs_root *root);
+-int btrfs_start_delalloc_roots(struct btrfs_fs_info *fs_info, u64 nr);
++int btrfs_start_delalloc_roots(struct btrfs_fs_info *fs_info, u64 nr,
++			       bool in_reclaim_context);
+ int btrfs_set_extent_delalloc(struct btrfs_inode *inode, u64 start, u64 end,
+ 			      unsigned int extra_bits,
+ 			      struct extent_state **cached_state);
+diff --git a/fs/btrfs/dev-replace.c b/fs/btrfs/dev-replace.c
+index 10638537b9ef..d29780463182 100644
+--- a/fs/btrfs/dev-replace.c
++++ b/fs/btrfs/dev-replace.c
+@@ -703,7 +703,7 @@ static int btrfs_dev_replace_finishing(struct btrfs_fs_info *fs_info,
+ 	 * flush all outstanding I/O and inode extent mappings before the
+ 	 * copy operation is declared as being finished
+ 	 */
+-	ret = btrfs_start_delalloc_roots(fs_info, U64_MAX);
++	ret = btrfs_start_delalloc_roots(fs_info, U64_MAX, false);
+ 	if (ret) {
+ 		mutex_unlock(&dev_replace->lock_finishing_cancel_unmount);
+ 		return ret;
 diff --git a/fs/btrfs/extent-tree.c b/fs/btrfs/extent-tree.c
 index 5fd60b13f4f8..4209dbd6286e 100644
 --- a/fs/btrfs/extent-tree.c
@@ -26224,8 +26267,139 @@ index 76d2e43817ea..6ba0604e2162 100644
  				goto again;
  			} else
  				continue;
+diff --git a/fs/btrfs/inode.c b/fs/btrfs/inode.c
+index 7e8d8169779d..acc47e2ffb46 100644
+--- a/fs/btrfs/inode.c
++++ b/fs/btrfs/inode.c
+@@ -9389,7 +9389,9 @@ static struct btrfs_delalloc_work *btrfs_alloc_delalloc_work(struct inode *inode
+  * some fairly slow code that needs optimization. This walks the list
+  * of all the inodes with pending delalloc and forces them to disk.
+  */
+-static int start_delalloc_inodes(struct btrfs_root *root, u64 *nr, bool snapshot)
++static int start_delalloc_inodes(struct btrfs_root *root,
++				 struct writeback_control *wbc, bool snapshot,
++				 bool in_reclaim_context)
+ {
+ 	struct btrfs_inode *binode;
+ 	struct inode *inode;
+@@ -9397,6 +9399,7 @@ static int start_delalloc_inodes(struct btrfs_root *root, u64 *nr, bool snapshot
+ 	struct list_head works;
+ 	struct list_head splice;
+ 	int ret = 0;
++	bool full_flush = wbc->nr_to_write == LONG_MAX;
+ 
+ 	INIT_LIST_HEAD(&works);
+ 	INIT_LIST_HEAD(&splice);
+@@ -9410,6 +9413,11 @@ static int start_delalloc_inodes(struct btrfs_root *root, u64 *nr, bool snapshot
+ 
+ 		list_move_tail(&binode->delalloc_inodes,
+ 			       &root->delalloc_inodes);
++
++		if (in_reclaim_context &&
++		    test_bit(BTRFS_INODE_NO_DELALLOC_FLUSH, &binode->runtime_flags))
++			continue;
++
+ 		inode = igrab(&binode->vfs_inode);
+ 		if (!inode) {
+ 			cond_resched_lock(&root->delalloc_lock);
+@@ -9420,18 +9428,24 @@ static int start_delalloc_inodes(struct btrfs_root *root, u64 *nr, bool snapshot
+ 		if (snapshot)
+ 			set_bit(BTRFS_INODE_SNAPSHOT_FLUSH,
+ 				&binode->runtime_flags);
+-		work = btrfs_alloc_delalloc_work(inode);
+-		if (!work) {
+-			iput(inode);
+-			ret = -ENOMEM;
+-			goto out;
+-		}
+-		list_add_tail(&work->list, &works);
+-		btrfs_queue_work(root->fs_info->flush_workers,
+-				 &work->work);
+-		if (*nr != U64_MAX) {
+-			(*nr)--;
+-			if (*nr == 0)
++		if (full_flush) {
++			work = btrfs_alloc_delalloc_work(inode);
++			if (!work) {
++				iput(inode);
++				ret = -ENOMEM;
++				goto out;
++			}
++			list_add_tail(&work->list, &works);
++			btrfs_queue_work(root->fs_info->flush_workers,
++					 &work->work);
++		} else {
++			ret = sync_inode(inode, wbc);
++			if (!ret &&
++			    test_bit(BTRFS_INODE_HAS_ASYNC_EXTENT,
++				     &BTRFS_I(inode)->runtime_flags))
++				ret = sync_inode(inode, wbc);
++			btrfs_add_delayed_iput(inode);
++			if (ret || wbc->nr_to_write <= 0)
+ 				goto out;
+ 		}
+ 		cond_resched();
+@@ -9457,17 +9471,29 @@ static int start_delalloc_inodes(struct btrfs_root *root, u64 *nr, bool snapshot
+ 
+ int btrfs_start_delalloc_snapshot(struct btrfs_root *root)
+ {
++	struct writeback_control wbc = {
++		.nr_to_write = LONG_MAX,
++		.sync_mode = WB_SYNC_NONE,
++		.range_start = 0,
++		.range_end = LLONG_MAX,
++	};
+ 	struct btrfs_fs_info *fs_info = root->fs_info;
+-	u64 nr = U64_MAX;
+ 
+ 	if (test_bit(BTRFS_FS_STATE_ERROR, &fs_info->fs_state))
+ 		return -EROFS;
+ 
+-	return start_delalloc_inodes(root, &nr, true);
++	return start_delalloc_inodes(root, &wbc, true, false);
+ }
+ 
+-int btrfs_start_delalloc_roots(struct btrfs_fs_info *fs_info, u64 nr)
++int btrfs_start_delalloc_roots(struct btrfs_fs_info *fs_info, u64 nr,
++			       bool in_reclaim_context)
+ {
++	struct writeback_control wbc = {
++		.nr_to_write = (nr == U64_MAX) ? LONG_MAX : (unsigned long)nr,
++		.sync_mode = WB_SYNC_NONE,
++		.range_start = 0,
++		.range_end = LLONG_MAX,
++	};
+ 	struct btrfs_root *root;
+ 	struct list_head splice;
+ 	int ret;
+@@ -9481,6 +9507,13 @@ int btrfs_start_delalloc_roots(struct btrfs_fs_info *fs_info, u64 nr)
+ 	spin_lock(&fs_info->delalloc_root_lock);
+ 	list_splice_init(&fs_info->delalloc_roots, &splice);
+ 	while (!list_empty(&splice) && nr) {
++		/*
++		 * Reset nr_to_write here so we know that we're doing a full
++		 * flush.
++		 */
++		if (nr == U64_MAX)
++			wbc.nr_to_write = LONG_MAX;
++
+ 		root = list_first_entry(&splice, struct btrfs_root,
+ 					delalloc_root);
+ 		root = btrfs_grab_root(root);
+@@ -9489,9 +9522,9 @@ int btrfs_start_delalloc_roots(struct btrfs_fs_info *fs_info, u64 nr)
+ 			       &fs_info->delalloc_roots);
+ 		spin_unlock(&fs_info->delalloc_root_lock);
+ 
+-		ret = start_delalloc_inodes(root, &nr, false);
++		ret = start_delalloc_inodes(root, &wbc, false, in_reclaim_context);
+ 		btrfs_put_root(root);
+-		if (ret < 0)
++		if (ret < 0 || wbc.nr_to_write <= 0)
+ 			goto out;
+ 		spin_lock(&fs_info->delalloc_root_lock);
+ 	}
 diff --git a/fs/btrfs/ioctl.c b/fs/btrfs/ioctl.c
-index 69a384145dc6..e8ca229a216b 100644
+index 69a384145dc6..bd46e107f955 100644
 --- a/fs/btrfs/ioctl.c
 +++ b/fs/btrfs/ioctl.c
 @@ -1275,6 +1275,7 @@ static int cluster_pages_for_defrag(struct inode *inode,
@@ -26288,46 +26462,60 @@ index 69a384145dc6..e8ca229a216b 100644
  out:
  	for (i = 0; i < i_done; i++) {
  		unlock_page(pages[i]);
+@@ -4901,7 +4940,7 @@ long btrfs_ioctl(struct file *file, unsigned int
+ 	case BTRFS_IOC_SYNC: {
+ 		int ret;
+ 
+-		ret = btrfs_start_delalloc_roots(fs_info, U64_MAX);
++		ret = btrfs_start_delalloc_roots(fs_info, U64_MAX, false);
+ 		if (ret)
+ 			return ret;
+ 		ret = btrfs_sync_fs(inode->i_sb, 1);
+diff --git a/fs/btrfs/reflink.c b/fs/btrfs/reflink.c
+index 99aa87c08912..a646af95dd10 100644
+--- a/fs/btrfs/reflink.c
++++ b/fs/btrfs/reflink.c
+@@ -89,6 +89,19 @@ static int copy_inline_to_page(struct btrfs_inode *inode,
+ 	if (ret)
+ 		goto out_unlock;
+ 
++	/*
++	 * After dirtying the page our caller will need to start a transaction,
++	 * and if we are low on metadata free space, that can cause flushing of
++	 * delalloc for all inodes in order to get metadata space released.
++	 * However we are holding the range locked for the whole duration of
++	 * the clone/dedupe operation, so we may deadlock if that happens and no
++	 * other task releases enough space. So mark this inode as not being
++	 * possible to flush to avoid such deadlock. We will clear that flag
++	 * when we finish cloning all extents, since a transaction is started
++	 * after finding each extent to clone.
++	 */
++	set_bit(BTRFS_INODE_NO_DELALLOC_FLUSH, &inode->runtime_flags);
++
+ 	if (comp_type == BTRFS_COMPRESS_NONE) {
+ 		char *map;
+ 
+@@ -547,6 +560,8 @@ static int btrfs_clone(struct inode *src, struct inode *inode,
+ out:
+ 	btrfs_free_path(path);
+ 	kvfree(buf);
++	clear_bit(BTRFS_INODE_NO_DELALLOC_FLUSH, &BTRFS_I(inode)->runtime_flags);
++
+ 	return ret;
+ }
+ 
 diff --git a/fs/btrfs/space-info.c b/fs/btrfs/space-info.c
-index 64099565ab8f..8a1ce11b6ed8 100644
+index 64099565ab8f..e8347461c8dd 100644
 --- a/fs/btrfs/space-info.c
 +++ b/fs/btrfs/space-info.c
-@@ -480,6 +480,28 @@ static inline u64 calc_reclaim_items_nr(struct btrfs_fs_info *fs_info,
- 
- #define EXTENT_SIZE_PER_ITEM	SZ_256K
- 
-+static void btrfs_writeback_inodes_sb_nr(struct btrfs_fs_info *fs_info,
-+					 unsigned long nr_pages, u64 nr_items)
-+{
-+	struct super_block *sb = fs_info->sb;
-+
-+	if (down_read_trylock(&sb->s_umount)) {
-+		writeback_inodes_sb_nr(sb, nr_pages, WB_REASON_FS_FREE_SPACE);
-+		up_read(&sb->s_umount);
-+	} else {
-+		/*
-+		 * We needn't worry the filesystem going from r/w to r/o though
-+		 * we don't acquire ->s_umount mutex, because the filesystem
-+		 * should guarantee the delalloc inodes list be empty after
-+		 * the filesystem is readonly(all dirty pages are written to
-+		 * the disk).
-+		 */
-+		btrfs_start_delalloc_roots(fs_info, nr_items);
-+		if (!current->journal_info)
-+			btrfs_wait_ordered_roots(fs_info, nr_items, 0, (u64)-1);
-+       }
-+}
-+
- /*
-  * shrink metadata reservation for delalloc
-  */
-@@ -532,7 +554,8 @@ static void shrink_delalloc(struct btrfs_fs_info *fs_info,
+@@ -532,7 +532,9 @@ static void shrink_delalloc(struct btrfs_fs_info *fs_info,
  
  	loops = 0;
  	while ((delalloc_bytes || dio_bytes) && loops < 3) {
 -		btrfs_start_delalloc_roots(fs_info, items);
-+		unsigned long nr_pages = min(delalloc_bytes, to_reclaim) >> PAGE_SHIFT;
-+		btrfs_writeback_inodes_sb_nr(fs_info, nr_pages, items);
++		u64 nr_pages = min(delalloc_bytes, to_reclaim) >> PAGE_SHIFT;
++
++		btrfs_start_delalloc_roots(fs_info, nr_pages, true);
  
  		loops++;
  		if (wait_ordered && !trans) {
