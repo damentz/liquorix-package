@@ -11,7 +11,7 @@ RUN echo 'Server = https://mirrors.kernel.org/archlinux/$repo/os/$arch' \
         gnupg pacman-contrib zstd schedtool sudo python \
         kmod inetutils bc libelf cpio fakeroot base-devel \
         libeatmydata --noconfirm --needed &&\
-    rm -rf /var/cache/pacman /var/lib/pacman/sync
+    rm -rf /var/cache/pacman
 
 ENV LD_PRELOAD=/usr/lib/libeatmydata.so
 
