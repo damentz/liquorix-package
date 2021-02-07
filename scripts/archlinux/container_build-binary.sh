@@ -33,9 +33,6 @@ if [[ $fail -eq 1 ]]; then
     exit 1
 fi
 
-# We need to update our lists to we can install dependencies correctly
-sudo pacman -Sy
-
 echo "[INFO ] Preparing build directory: $dir_build"
 sudo mkdir -vp "$dir_build"
 sudo chown -R "$build_user":"$build_user" "$dir_build"
