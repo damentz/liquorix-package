@@ -7,15 +7,13 @@ FROM $ARCH/$DISTRO:$RELEASE
 
 RUN echo 'Server = https://mirrors.kernel.org/archlinux/$repo/os/$arch' \
       > /etc/pacman.d/mirrorlist &&\
-    pacman -Syy libeatmydata --noconfirm &&\
+    pacman -Syyu \
+        gnupg pacman-contrib zstd schedtool sudo python \
+        kmod inetutils bc libelf cpio fakeroot base-devel \
+        libeatmydata --noconfirm --needed &&\
     rm -rf /var/cache/pacman /var/lib/pacman/sync
 
 ENV LD_PRELOAD=/usr/lib/libeatmydata.so
-RUN pacman -Syyu --noconfirm &&\
-    pacman -S gnupg pacman-contrib zstd schedtool sudo python \
-              kmod inetutils bc libelf cpio fakeroot base-devel \
-              --noconfirm --needed &&\
-    rm -rf /var/cache/pacman /var/lib/pacman/sync
 
 RUN sed -r -i.bak 's/^#?MAKEFLAGS.*/MAKEFLAGS="-j$(nproc)"/' /etc/makepkg.conf &&\
     sed -r -i.bak 's/^PKGEXT.*/PKGEXT=".pkg.tar.zst"/' /etc/makepkg.conf &&\
