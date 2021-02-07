@@ -3,7 +3,7 @@ ARG ARCH
 ARG DISTRO
 ARG RELEASE
 
-FROM $ARCH/$DISTRO:$RELEASE
+FROM $ARCH/$DISTRO:base-devel
 
 RUN echo 'Server = https://mirrors.kernel.org/archlinux/$repo/os/$arch' \
       > /etc/pacman.d/mirrorlist &&\
