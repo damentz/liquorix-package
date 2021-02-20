@@ -7,12 +7,8 @@ if [[ "$(id -u)" -ne 0 ]]; then
     exit 0
 fi
 
-codename="$(
-    find /etc/apt -maxdepth 1 -type f -name '*.list' | \
-    xargs grep -E '^deb' | awk '{print $3}' | \
-    grep -Eo '^[a-z]+' | sort | uniq -c | sort -n | tail -n1 | \
-    grep -Eo '[a-z]+$'
-)" 
+apt-get install lsb-release -y
+codename="$(lsb_release -cs)"
 
 if [[ -z "$codename" ]]; then
     echo "[ERROR] Unable to detect system code name!"
