@@ -9,7 +9,7 @@ fi
 
 codename="$(
     find /etc/apt -maxdepth 1 -type f -name '*.list' | \
-    xargs grep -E '^deb' awk '{print $3}' | \
+    xargs grep -E '^deb' | awk '{print $3}' | \
     grep -Eo '^[a-z]+' | sort | uniq -c | sort -n | tail -n1 | \
     grep -Eo '[a-z]+$'
 )" 
