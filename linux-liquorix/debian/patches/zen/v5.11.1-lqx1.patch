@@ -1065,16 +1065,18 @@ index bfc1b86e3e733..86ed91b72aadb 100644
  F:	tools/testing/selftests/futex/
  
 diff --git a/Makefile b/Makefile
-index de1acaefe87e6..64c025fe5a06c 100644
+index de1acaefe87e6..234c1491618e2 100644
 --- a/Makefile
 +++ b/Makefile
-@@ -2,8 +2,8 @@
+@@ -1,9 +1,9 @@
+ # SPDX-License-Identifier: GPL-2.0
  VERSION = 5
  PATCHLEVEL = 11
- SUBLEVEL = 0
+-SUBLEVEL = 0
 -EXTRAVERSION =
 -NAME = 💕 Valentine's Day Edition 💕
-+EXTRAVERSION = -lqx2
++SUBLEVEL = 1
++EXTRAVERSION = -lqx1
 +NAME = 🤗 Hugs & Kisses 😚
  
  # *DOCUMENTATION*
@@ -1148,6 +1150,23 @@ index 20e1170e2e0aa..9aa1088024b05 100644
 +443	common	futex_wake			sys_futex_wake
 +444	common  futex_waitv                     sys_futex_waitv
 +445	common	futex_requeue			sys_futex_requeue
+diff --git a/arch/arm/xen/p2m.c b/arch/arm/xen/p2m.c
+index e52950a43f2ed..fd6e3aafe2724 100644
+--- a/arch/arm/xen/p2m.c
++++ b/arch/arm/xen/p2m.c
+@@ -95,8 +95,10 @@ int set_foreign_p2m_mapping(struct gnttab_map_grant_ref *map_ops,
+ 	for (i = 0; i < count; i++) {
+ 		if (map_ops[i].status)
+ 			continue;
+-		set_phys_to_machine(map_ops[i].host_addr >> XEN_PAGE_SHIFT,
+-				    map_ops[i].dev_bus_addr >> XEN_PAGE_SHIFT);
++		if (unlikely(!set_phys_to_machine(map_ops[i].host_addr >> XEN_PAGE_SHIFT,
++				    map_ops[i].dev_bus_addr >> XEN_PAGE_SHIFT))) {
++			return -ENOMEM;
++		}
+ 	}
+ 
+ 	return 0;
 diff --git a/arch/arm64/Kconfig b/arch/arm64/Kconfig
 index f39568b28ec1c..0531e228acfa2 100644
 --- a/arch/arm64/Kconfig
@@ -1945,6 +1964,43 @@ index f1f1b5a0956a0..2d2a12cbe63bf 100644
  
  	print_vma_addr(KERN_CONT " in ", regs->ip);
  
+diff --git a/arch/x86/xen/p2m.c b/arch/x86/xen/p2m.c
+index 3301875dd1965..b5949e5a83ec8 100644
+--- a/arch/x86/xen/p2m.c
++++ b/arch/x86/xen/p2m.c
+@@ -712,7 +712,8 @@ int set_foreign_p2m_mapping(struct gnttab_map_grant_ref *map_ops,
+ 		unsigned long mfn, pfn;
+ 
+ 		/* Do not add to override if the map failed. */
+-		if (map_ops[i].status)
++		if (map_ops[i].status != GNTST_okay ||
++		    (kmap_ops && kmap_ops[i].status != GNTST_okay))
+ 			continue;
+ 
+ 		if (map_ops[i].flags & GNTMAP_contains_pte) {
+@@ -750,17 +751,15 @@ int clear_foreign_p2m_mapping(struct gnttab_unmap_grant_ref *unmap_ops,
+ 		unsigned long mfn = __pfn_to_mfn(page_to_pfn(pages[i]));
+ 		unsigned long pfn = page_to_pfn(pages[i]);
+ 
+-		if (mfn == INVALID_P2M_ENTRY || !(mfn & FOREIGN_FRAME_BIT)) {
++		if (mfn != INVALID_P2M_ENTRY && (mfn & FOREIGN_FRAME_BIT))
++			set_phys_to_machine(pfn, INVALID_P2M_ENTRY);
++		else
+ 			ret = -EINVAL;
+-			goto out;
+-		}
+-
+-		set_phys_to_machine(pfn, INVALID_P2M_ENTRY);
+ 	}
+ 	if (kunmap_ops)
+ 		ret = HYPERVISOR_grant_table_op(GNTTABOP_unmap_grant_ref,
+-						kunmap_ops, count);
+-out:
++						kunmap_ops, count) ?: ret;
++
+ 	return ret;
+ }
+ EXPORT_SYMBOL_GPL(clear_foreign_p2m_mapping);
 diff --git a/block/Kconfig.iosched b/block/Kconfig.iosched
 index 2f2158e05a91c..92a47e48fb3ed 100644
 --- a/block/Kconfig.iosched
@@ -2258,11 +2314,109 @@ index cc6a0bc6c005a..ac5c170d76e81 100644
  
  		swim_select(base, RELAX);
  		if (!swim_readbit(base, STEP))
+diff --git a/drivers/block/xen-blkback/blkback.c b/drivers/block/xen-blkback/blkback.c
+index 9ebf53903d7bf..da16121140cab 100644
+--- a/drivers/block/xen-blkback/blkback.c
++++ b/drivers/block/xen-blkback/blkback.c
+@@ -794,8 +794,13 @@ static int xen_blkbk_map(struct xen_blkif_ring *ring,
+ 			pages[i]->persistent_gnt = persistent_gnt;
+ 		} else {
+ 			if (gnttab_page_cache_get(&ring->free_pages,
+-						  &pages[i]->page))
+-				goto out_of_memory;
++						  &pages[i]->page)) {
++				gnttab_page_cache_put(&ring->free_pages,
++						      pages_to_gnt,
++						      segs_to_map);
++				ret = -ENOMEM;
++				goto out;
++			}
+ 			addr = vaddr(pages[i]->page);
+ 			pages_to_gnt[segs_to_map] = pages[i]->page;
+ 			pages[i]->persistent_gnt = NULL;
+@@ -811,10 +816,8 @@ static int xen_blkbk_map(struct xen_blkif_ring *ring,
+ 			break;
+ 	}
+ 
+-	if (segs_to_map) {
++	if (segs_to_map)
+ 		ret = gnttab_map_refs(map, NULL, pages_to_gnt, segs_to_map);
+-		BUG_ON(ret);
+-	}
+ 
+ 	/*
+ 	 * Now swizzle the MFN in our domain with the MFN from the other domain
+@@ -830,7 +833,7 @@ static int xen_blkbk_map(struct xen_blkif_ring *ring,
+ 				gnttab_page_cache_put(&ring->free_pages,
+ 						      &pages[seg_idx]->page, 1);
+ 				pages[seg_idx]->handle = BLKBACK_INVALID_HANDLE;
+-				ret |= 1;
++				ret |= !ret;
+ 				goto next;
+ 			}
+ 			pages[seg_idx]->handle = map[new_map_idx].handle;
+@@ -882,17 +885,18 @@ static int xen_blkbk_map(struct xen_blkif_ring *ring,
+ 	}
+ 	segs_to_map = 0;
+ 	last_map = map_until;
+-	if (map_until != num)
++	if (!ret && map_until != num)
+ 		goto again;
+ 
+-	return ret;
+-
+-out_of_memory:
+-	pr_alert("%s: out of memory\n", __func__);
+-	gnttab_page_cache_put(&ring->free_pages, pages_to_gnt, segs_to_map);
+-	for (i = last_map; i < num; i++)
++out:
++	for (i = last_map; i < num; i++) {
++		/* Don't zap current batch's valid persistent grants. */
++		if(i >= last_map + segs_to_map)
++			pages[i]->persistent_gnt = NULL;
+ 		pages[i]->handle = BLKBACK_INVALID_HANDLE;
+-	return -ENOMEM;
++	}
++
++	return ret;
+ }
+ 
+ static int xen_blkbk_map_seg(struct pending_req *pending_req)
 diff --git a/drivers/bluetooth/btusb.c b/drivers/bluetooth/btusb.c
-index 03b83aa912779..32161dd40ed61 100644
+index 03b83aa912779..da57c561642c4 100644
 --- a/drivers/bluetooth/btusb.c
 +++ b/drivers/bluetooth/btusb.c
-@@ -4069,6 +4069,13 @@ static int btusb_setup_qca(struct hci_dev *hdev)
+@@ -506,7 +506,6 @@ static const struct dmi_system_id btusb_needs_reset_resume_table[] = {
+ #define BTUSB_HW_RESET_ACTIVE	12
+ #define BTUSB_TX_WAIT_VND_EVT	13
+ #define BTUSB_WAKEUP_DISABLE	14
+-#define BTUSB_USE_ALT1_FOR_WBS	15
+ 
+ struct btusb_data {
+ 	struct hci_dev       *hdev;
+@@ -1736,15 +1735,12 @@ static void btusb_work(struct work_struct *work)
+ 				new_alts = data->sco_num;
+ 			}
+ 		} else if (data->air_mode == HCI_NOTIFY_ENABLE_SCO_TRANSP) {
+-			/* Check if Alt 6 is supported for Transparent audio */
+-			if (btusb_find_altsetting(data, 6)) {
+-				data->usb_alt6_packet_flow = true;
+-				new_alts = 6;
+-			} else if (test_bit(BTUSB_USE_ALT1_FOR_WBS, &data->flags)) {
+-				new_alts = 1;
+-			} else {
+-				bt_dev_err(hdev, "Device does not support ALT setting 6");
+-			}
++			/* Bluetooth USB spec recommends alt 6 (63 bytes), but
++			 * many adapters do not support it.  Alt 1 appears to
++			 * work for all adapters that do not have alt 6, and
++			 * which work with WBS at all.
++			 */
++			new_alts = btusb_find_altsetting(data, 6) ? 6 : 1;
+ 		}
+ 
+ 		if (btusb_switch_alt_setting(hdev, new_alts) < 0)
+@@ -4069,6 +4065,13 @@ static int btusb_setup_qca(struct hci_dev *hdev)
  			info = &qca_devices_table[i];
  	}
  	if (!info) {
@@ -2276,6 +2430,17 @@ index 03b83aa912779..32161dd40ed61 100644
  		bt_dev_err(hdev, "don't support firmware rome 0x%x", ver_rom);
  		return -ENODEV;
  	}
+@@ -4548,10 +4551,6 @@ static int btusb_probe(struct usb_interface *intf,
+ 		 * (DEVICE_REMOTE_WAKEUP)
+ 		 */
+ 		set_bit(BTUSB_WAKEUP_DISABLE, &data->flags);
+-		if (btusb_find_altsetting(data, 1))
+-			set_bit(BTUSB_USE_ALT1_FOR_WBS, &data->flags);
+-		else
+-			bt_dev_err(hdev, "Device does not support ALT setting 1");
+ 	}
+ 
+ 	if (!reset)
 diff --git a/drivers/char/ipmi/ipmi_msghandler.c b/drivers/char/ipmi/ipmi_msghandler.c
 index c44ad18464f15..ca87178200e08 100644
 --- a/drivers/char/ipmi/ipmi_msghandler.c
@@ -3831,6 +3996,92 @@ index c37315226c427..e73e6393403c8 100644
  			/* some signal arrived, stop search */
  			tea->val &= ~TEA575X_BIT_SEARCH;
  			snd_tea575x_set_freq(tea);
+diff --git a/drivers/media/usb/pwc/pwc-if.c b/drivers/media/usb/pwc/pwc-if.c
+index 61869636ec613..5e3339cc31c07 100644
+--- a/drivers/media/usb/pwc/pwc-if.c
++++ b/drivers/media/usb/pwc/pwc-if.c
+@@ -155,16 +155,17 @@ static const struct video_device pwc_template = {
+ /***************************************************************************/
+ /* Private functions */
+ 
+-static void *pwc_alloc_urb_buffer(struct device *dev,
++static void *pwc_alloc_urb_buffer(struct usb_device *dev,
+ 				  size_t size, dma_addr_t *dma_handle)
+ {
++	struct device *dmadev = dev->bus->sysdev;
+ 	void *buffer = kmalloc(size, GFP_KERNEL);
+ 
+ 	if (!buffer)
+ 		return NULL;
+ 
+-	*dma_handle = dma_map_single(dev, buffer, size, DMA_FROM_DEVICE);
+-	if (dma_mapping_error(dev, *dma_handle)) {
++	*dma_handle = dma_map_single(dmadev, buffer, size, DMA_FROM_DEVICE);
++	if (dma_mapping_error(dmadev, *dma_handle)) {
+ 		kfree(buffer);
+ 		return NULL;
+ 	}
+@@ -172,12 +173,14 @@ static void *pwc_alloc_urb_buffer(struct device *dev,
+ 	return buffer;
+ }
+ 
+-static void pwc_free_urb_buffer(struct device *dev,
++static void pwc_free_urb_buffer(struct usb_device *dev,
+ 				size_t size,
+ 				void *buffer,
+ 				dma_addr_t dma_handle)
+ {
+-	dma_unmap_single(dev, dma_handle, size, DMA_FROM_DEVICE);
++	struct device *dmadev = dev->bus->sysdev;
++
++	dma_unmap_single(dmadev, dma_handle, size, DMA_FROM_DEVICE);
+ 	kfree(buffer);
+ }
+ 
+@@ -282,6 +285,7 @@ static void pwc_frame_complete(struct pwc_device *pdev)
+ static void pwc_isoc_handler(struct urb *urb)
+ {
+ 	struct pwc_device *pdev = (struct pwc_device *)urb->context;
++	struct device *dmadev = urb->dev->bus->sysdev;
+ 	int i, fst, flen;
+ 	unsigned char *iso_buf = NULL;
+ 
+@@ -328,7 +332,7 @@ static void pwc_isoc_handler(struct urb *urb)
+ 	/* Reset ISOC error counter. We did get here, after all. */
+ 	pdev->visoc_errors = 0;
+ 
+-	dma_sync_single_for_cpu(&urb->dev->dev,
++	dma_sync_single_for_cpu(dmadev,
+ 				urb->transfer_dma,
+ 				urb->transfer_buffer_length,
+ 				DMA_FROM_DEVICE);
+@@ -379,7 +383,7 @@ static void pwc_isoc_handler(struct urb *urb)
+ 		pdev->vlast_packet_size = flen;
+ 	}
+ 
+-	dma_sync_single_for_device(&urb->dev->dev,
++	dma_sync_single_for_device(dmadev,
+ 				   urb->transfer_dma,
+ 				   urb->transfer_buffer_length,
+ 				   DMA_FROM_DEVICE);
+@@ -461,7 +465,7 @@ static int pwc_isoc_init(struct pwc_device *pdev)
+ 		urb->pipe = usb_rcvisocpipe(udev, pdev->vendpoint);
+ 		urb->transfer_flags = URB_ISO_ASAP | URB_NO_TRANSFER_DMA_MAP;
+ 		urb->transfer_buffer_length = ISO_BUFFER_SIZE;
+-		urb->transfer_buffer = pwc_alloc_urb_buffer(&udev->dev,
++		urb->transfer_buffer = pwc_alloc_urb_buffer(udev,
+ 							    urb->transfer_buffer_length,
+ 							    &urb->transfer_dma);
+ 		if (urb->transfer_buffer == NULL) {
+@@ -524,7 +528,7 @@ static void pwc_iso_free(struct pwc_device *pdev)
+ 		if (urb) {
+ 			PWC_DEBUG_MEMORY("Freeing URB\n");
+ 			if (urb->transfer_buffer)
+-				pwc_free_urb_buffer(&urb->dev->dev,
++				pwc_free_urb_buffer(urb->dev,
+ 						    urb->transfer_buffer_length,
+ 						    urb->transfer_buffer,
+ 						    urb->transfer_dma);
 diff --git a/drivers/mfd/ucb1x00-core.c b/drivers/mfd/ucb1x00-core.c
 index b690796d24d4b..448b13da62b43 100644
 --- a/drivers/mfd/ucb1x00-core.c
@@ -3944,6 +4195,25 @@ index 23fbddd0c1f8e..534ab3b894e2d 100644
  		/* Todo... wait for sync command ... */
  
  		read_register(priv->net_dev, IPW_REG_INTA, &inta);
+diff --git a/drivers/net/xen-netback/netback.c b/drivers/net/xen-netback/netback.c
+index bc3421d145768..423667b837510 100644
+--- a/drivers/net/xen-netback/netback.c
++++ b/drivers/net/xen-netback/netback.c
+@@ -1342,13 +1342,11 @@ int xenvif_tx_action(struct xenvif_queue *queue, int budget)
+ 		return 0;
+ 
+ 	gnttab_batch_copy(queue->tx_copy_ops, nr_cops);
+-	if (nr_mops != 0) {
++	if (nr_mops != 0)
+ 		ret = gnttab_map_refs(queue->tx_map_ops,
+ 				      NULL,
+ 				      queue->pages_to_map,
+ 				      nr_mops);
+-		BUG_ON(ret);
+-	}
+ 
+ 	work_done = xenvif_tx_submit(queue);
+ 
 diff --git a/drivers/parport/ieee1284.c b/drivers/parport/ieee1284.c
 index 4547ac44c8d48..8fa1a7fdf12cc 100644
 --- a/drivers/parport/ieee1284.c
@@ -5459,6 +5729,26 @@ index b0eb5ece9243b..5dc056d31c367 100644
  	if (!x86_match_cpu(intel_powerclamp_ids)) {
  		pr_err("CPU does not support MWAIT\n");
  		return -ENODEV;
+diff --git a/drivers/tty/tty_io.c b/drivers/tty/tty_io.c
+index 816e709afa561..082da38762fc7 100644
+--- a/drivers/tty/tty_io.c
++++ b/drivers/tty/tty_io.c
+@@ -962,11 +962,14 @@ static inline ssize_t do_tty_write(
+ 		if (ret <= 0)
+ 			break;
+ 
++		written += ret;
++		if (ret > size)
++			break;
++
+ 		/* FIXME! Have Al check this! */
+ 		if (ret != size)
+ 			iov_iter_revert(from, size-ret);
+ 
+-		written += ret;
+ 		count -= ret;
+ 		if (!count)
+ 			break;
 diff --git a/drivers/video/fbdev/omap/hwa742.c b/drivers/video/fbdev/omap/hwa742.c
 index cfe63932f8255..71c00ef772a3a 100644
 --- a/drivers/video/fbdev/omap/hwa742.c
@@ -5485,6 +5775,94 @@ index f1551e00eb12f..f0f651e925044 100644
  	}
  
  	pr_debug("%s(): task ending\n", __func__);
+diff --git a/drivers/xen/gntdev.c b/drivers/xen/gntdev.c
+index a36b71286bcf8..5447c5156b2e6 100644
+--- a/drivers/xen/gntdev.c
++++ b/drivers/xen/gntdev.c
+@@ -309,44 +309,47 @@ int gntdev_map_grant_pages(struct gntdev_grant_map *map)
+ 		 * to the kernel linear addresses of the struct pages.
+ 		 * These ptes are completely different from the user ptes dealt
+ 		 * with find_grant_ptes.
++		 * Note that GNTMAP_device_map isn't needed here: The
++		 * dev_bus_addr output field gets consumed only from ->map_ops,
++		 * and by not requesting it when mapping we also avoid needing
++		 * to mirror dev_bus_addr into ->unmap_ops (and holding an extra
++		 * reference to the page in the hypervisor).
+ 		 */
++		unsigned int flags = (map->flags & ~GNTMAP_device_map) |
++				     GNTMAP_host_map;
++
+ 		for (i = 0; i < map->count; i++) {
+ 			unsigned long address = (unsigned long)
+ 				pfn_to_kaddr(page_to_pfn(map->pages[i]));
+ 			BUG_ON(PageHighMem(map->pages[i]));
+ 
+-			gnttab_set_map_op(&map->kmap_ops[i], address,
+-				map->flags | GNTMAP_host_map,
++			gnttab_set_map_op(&map->kmap_ops[i], address, flags,
+ 				map->grants[i].ref,
+ 				map->grants[i].domid);
+ 			gnttab_set_unmap_op(&map->kunmap_ops[i], address,
+-				map->flags | GNTMAP_host_map, -1);
++				flags, -1);
+ 		}
+ 	}
+ 
+ 	pr_debug("map %d+%d\n", map->index, map->count);
+ 	err = gnttab_map_refs(map->map_ops, use_ptemod ? map->kmap_ops : NULL,
+ 			map->pages, map->count);
+-	if (err)
+-		return err;
+ 
+ 	for (i = 0; i < map->count; i++) {
+-		if (map->map_ops[i].status) {
++		if (map->map_ops[i].status == GNTST_okay)
++			map->unmap_ops[i].handle = map->map_ops[i].handle;
++		else if (!err)
+ 			err = -EINVAL;
+-			continue;
+-		}
+ 
+-		map->unmap_ops[i].handle = map->map_ops[i].handle;
+-		if (use_ptemod)
+-			map->kunmap_ops[i].handle = map->kmap_ops[i].handle;
+-#ifdef CONFIG_XEN_GRANT_DMA_ALLOC
+-		else if (map->dma_vaddr) {
+-			unsigned long bfn;
++		if (map->flags & GNTMAP_device_map)
++			map->unmap_ops[i].dev_bus_addr = map->map_ops[i].dev_bus_addr;
+ 
+-			bfn = pfn_to_bfn(page_to_pfn(map->pages[i]));
+-			map->unmap_ops[i].dev_bus_addr = __pfn_to_phys(bfn);
++		if (use_ptemod) {
++			if (map->kmap_ops[i].status == GNTST_okay)
++				map->kunmap_ops[i].handle = map->kmap_ops[i].handle;
++			else if (!err)
++				err = -EINVAL;
+ 		}
+-#endif
+ 	}
+ 	return err;
+ }
+diff --git a/drivers/xen/xen-scsiback.c b/drivers/xen/xen-scsiback.c
+index 862162dca33cf..9cd4fe8ce6803 100644
+--- a/drivers/xen/xen-scsiback.c
++++ b/drivers/xen/xen-scsiback.c
+@@ -386,12 +386,12 @@ static int scsiback_gnttab_data_map_batch(struct gnttab_map_grant_ref *map,
+ 		return 0;
+ 
+ 	err = gnttab_map_refs(map, NULL, pg, cnt);
+-	BUG_ON(err);
+ 	for (i = 0; i < cnt; i++) {
+ 		if (unlikely(map[i].status != GNTST_okay)) {
+ 			pr_err("invalid buffer -- could not remap it\n");
+ 			map[i].handle = SCSIBACK_INVALID_HANDLE;
+-			err = -ENOMEM;
++			if (!err)
++				err = -ENOMEM;
+ 		} else {
+ 			get_page(pg[i]);
+ 		}
 diff --git a/fs/inode.c b/fs/inode.c
 index 6442d97d9a4ab..886fe11ccdaf6 100644
 --- a/fs/inode.c
@@ -6308,6 +6686,18 @@ index 3bac0a8ceab26..f48c5c5da6511 100644
  
  /* Can be ORed in to make sure the process is reverted back to SCHED_NORMAL on fork */
  #define SCHED_RESET_ON_FORK     0x40000000
+diff --git a/include/xen/grant_table.h b/include/xen/grant_table.h
+index b9c937b3a1499..0b1182a3cf412 100644
+--- a/include/xen/grant_table.h
++++ b/include/xen/grant_table.h
+@@ -157,6 +157,7 @@ gnttab_set_map_op(struct gnttab_map_grant_ref *map, phys_addr_t addr,
+ 	map->flags = flags;
+ 	map->ref = ref;
+ 	map->dom = domid;
++	map->status = 1; /* arbitrary positive value */
+ }
+ 
+ static inline void
 diff --git a/init/Kconfig b/init/Kconfig
 index 29ad683250288..34681e662c716 100644
 --- a/init/Kconfig
