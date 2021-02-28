@@ -1065,7 +1065,7 @@ index bfc1b86e3e733..86ed91b72aadb 100644
  F:	tools/testing/selftests/futex/
  
 diff --git a/Makefile b/Makefile
-index de1acaefe87e6..e198450f107a9 100644
+index de1acaefe87e6..9f0cca22e861c 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -1,9 +1,9 @@
@@ -1076,7 +1076,7 @@ index de1acaefe87e6..e198450f107a9 100644
 -EXTRAVERSION =
 -NAME = 💕 Valentine's Day Edition 💕
 +SUBLEVEL = 2
-+EXTRAVERSION = -lqx2
++EXTRAVERSION = -lqx3
 +NAME = 🤗 Hugs & Kisses 😚
  
  # *DOCUMENTATION*
@@ -8950,6 +8950,115 @@ index 1578973c57409..24b3b39f41238 100644
  	/* CPU hotplug need to bind once again when unparking the thread. */
  	to_kthread(p)->cpu = cpu;
  	return p;
+diff --git a/kernel/locking/mutex.c b/kernel/locking/mutex.c
+index 5352ce50a97e3..cc56767124580 100644
+--- a/kernel/locking/mutex.c
++++ b/kernel/locking/mutex.c
+@@ -552,21 +552,31 @@ bool mutex_spin_on_owner(struct mutex *lock, struct task_struct *owner,
+ {
+ 	bool ret = true;
+ 
+-	rcu_read_lock();
+-	while (__mutex_owner(lock) == owner) {
++	for (;;) {
++		unsigned int cpu;
++		bool same_owner;
++
+ 		/*
+-		 * Ensure we emit the owner->on_cpu, dereference _after_
+-		 * checking lock->owner still matches owner. If that fails,
++		 * Ensure lock->owner still matches owner. If that fails,
+ 		 * owner might point to freed memory. If it still matches,
+ 		 * the rcu_read_lock() ensures the memory stays valid.
+ 		 */
+-		barrier();
++		rcu_read_lock();
++		same_owner = __mutex_owner(lock) == owner;
++		if (same_owner) {
++			ret = owner->on_cpu;
++			if (ret)
++				cpu = task_cpu(owner);
++		}
++		rcu_read_unlock();
++
++		if (!ret || !same_owner)
++			break;
+ 
+ 		/*
+ 		 * Use vcpu_is_preempted to detect lock holder preemption issue.
+ 		 */
+-		if (!owner->on_cpu || need_resched() ||
+-				vcpu_is_preempted(task_cpu(owner))) {
++		if (need_resched() || vcpu_is_preempted(cpu)) {
+ 			ret = false;
+ 			break;
+ 		}
+@@ -578,7 +588,6 @@ bool mutex_spin_on_owner(struct mutex *lock, struct task_struct *owner,
+ 
+ 		cpu_relax();
+ 	}
+-	rcu_read_unlock();
+ 
+ 	return ret;
+ }
+diff --git a/kernel/locking/rwsem.c b/kernel/locking/rwsem.c
+index ba67600c7b2c0..462d2dc679637 100644
+--- a/kernel/locking/rwsem.c
++++ b/kernel/locking/rwsem.c
+@@ -674,8 +674,10 @@ rwsem_spin_on_owner(struct rw_semaphore *sem)
+ 	if (state != OWNER_WRITER)
+ 		return state;
+ 
+-	rcu_read_lock();
+ 	for (;;) {
++		bool same_owner;
++
++		rcu_read_lock();
+ 		/*
+ 		 * When a waiting writer set the handoff flag, it may spin
+ 		 * on the owner as well. Once that writer acquires the lock,
+@@ -683,27 +685,32 @@ rwsem_spin_on_owner(struct rw_semaphore *sem)
+ 		 * handoff bit is set.
+ 		 */
+ 		new = rwsem_owner_flags(sem, &new_flags);
+-		if ((new != owner) || (new_flags != flags)) {
+-			state = rwsem_owner_state(new, new_flags);
+-			break;
+-		}
+ 
+ 		/*
+-		 * Ensure we emit the owner->on_cpu, dereference _after_
+-		 * checking sem->owner still matches owner, if that fails,
++		 * Ensure sem->owner still matches owner. If that fails,
+ 		 * owner might point to free()d memory, if it still matches,
+ 		 * the rcu_read_lock() ensures the memory stays valid.
+ 		 */
+-		barrier();
++		same_owner = new == owner && new_flags == flags;
++		if (same_owner && !owner_on_cpu(owner))
++			state = OWNER_NONSPINNABLE;
++		rcu_read_unlock();
+ 
+-		if (need_resched() || !owner_on_cpu(owner)) {
++		if (!same_owner) {
++			state = rwsem_owner_state(new, new_flags);
++			break;
++		}
++
++		if (state == OWNER_NONSPINNABLE)
++			break;
++
++		if (need_resched()) {
+ 			state = OWNER_NONSPINNABLE;
+ 			break;
+ 		}
+ 
+ 		cpu_relax();
+ 	}
+-	rcu_read_unlock();
+ 
+ 	return state;
+ }
 diff --git a/kernel/sched/Makefile b/kernel/sched/Makefile
 index 5fc9c9b70862f..1ff14a21193d8 100644
 --- a/kernel/sched/Makefile
@@ -18950,6 +19059,18 @@ index 91ca9b103ee52..67d4fbd232e66 100644
  	(1<<TRANSPARENT_HUGEPAGE_DEFRAG_KHUGEPAGED_FLAG)|
  	(1<<TRANSPARENT_HUGEPAGE_USE_ZERO_PAGE_FLAG);
  
+diff --git a/mm/internal.h b/mm/internal.h
+index 25d2b2439f19f..d2b3ea79839dd 100644
+--- a/mm/internal.h
++++ b/mm/internal.h
+@@ -198,6 +198,7 @@ extern void prep_compound_page(struct page *page, unsigned int order);
+ extern void post_alloc_hook(struct page *page, unsigned int order,
+ 					gfp_t gfp_flags);
+ extern int user_min_free_kbytes;
++extern atomic_long_t kswapd_waiters;
+ 
+ extern void free_unref_page(struct page *page);
+ extern void free_unref_page_list(struct list_head *list);
 diff --git a/mm/memory.c b/mm/memory.c
 index feff48e1465a6..985dac0958dcf 100644
 --- a/mm/memory.c
@@ -19058,6 +19179,92 @@ index eb34d204d4ee7..8e5f0d328c2a2 100644
  
  /*
   * vm_dirty_bytes starts at 0 (disabled) so that it is a function of
+diff --git a/mm/page_alloc.c b/mm/page_alloc.c
+index 519a60d5b6f7d..acea30ed0e12a 100644
+--- a/mm/page_alloc.c
++++ b/mm/page_alloc.c
+@@ -108,6 +108,8 @@ typedef int __bitwise fpi_t;
+  */
+ #define FPI_TO_TAIL		((__force fpi_t)BIT(1))
+ 
++atomic_long_t kswapd_waiters = ATOMIC_LONG_INIT(0);
++
+ /* prevent >1 _updater_ of zone percpu pageset ->high and ->batch fields */
+ static DEFINE_MUTEX(pcp_batch_high_lock);
+ #define MIN_PERCPU_PAGELIST_FRACTION	(8)
+@@ -321,20 +323,7 @@ compound_page_dtor * const compound_page_dtors[NR_COMPOUND_DTORS] = {
+ 
+ int min_free_kbytes = 1024;
+ int user_min_free_kbytes = -1;
+-#ifdef CONFIG_DISCONTIGMEM
+-/*
+- * DiscontigMem defines memory ranges as separate pg_data_t even if the ranges
+- * are not on separate NUMA nodes. Functionally this works but with
+- * watermark_boost_factor, it can reclaim prematurely as the ranges can be
+- * quite small. By default, do not boost watermarks on discontigmem as in
+- * many cases very high-order allocations like THP are likely to be
+- * unsupported and the premature reclaim offsets the advantage of long-term
+- * fragmentation avoidance.
+- */
+ int watermark_boost_factor __read_mostly;
+-#else
+-int watermark_boost_factor __read_mostly = 15000;
+-#endif
+ int watermark_scale_factor = 10;
+ 
+ static unsigned long nr_kernel_pages __initdata;
+@@ -4668,6 +4657,7 @@ __alloc_pages_slowpath(gfp_t gfp_mask, unsigned int order,
+ 	int no_progress_loops;
+ 	unsigned int cpuset_mems_cookie;
+ 	int reserve_flags;
++	bool woke_kswapd = false;
+ 
+ 	/*
+ 	 * We also sanity check to catch abuse of atomic reserves being used by
+@@ -4701,8 +4691,13 @@ __alloc_pages_slowpath(gfp_t gfp_mask, unsigned int order,
+ 	if (!ac->preferred_zoneref->zone)
+ 		goto nopage;
+ 
+-	if (alloc_flags & ALLOC_KSWAPD)
++	if (alloc_flags & ALLOC_KSWAPD) {
++		if (!woke_kswapd) {
++			atomic_long_inc(&kswapd_waiters);
++			woke_kswapd = true;
++		}
+ 		wake_all_kswapds(order, gfp_mask, ac);
++	}
+ 
+ 	/*
+ 	 * The adjusted alloc_flags might result in immediate success, so try
+@@ -4907,9 +4902,12 @@ __alloc_pages_slowpath(gfp_t gfp_mask, unsigned int order,
+ 		goto retry;
+ 	}
+ fail:
+-	warn_alloc(gfp_mask, ac->nodemask,
+-			"page allocation failure: order:%u", order);
+ got_pg:
++	if (woke_kswapd)
++		atomic_long_dec(&kswapd_waiters);
++	if (!page)
++		warn_alloc(gfp_mask, ac->nodemask,
++				"page allocation failure: order:%u", order);
+ 	return page;
+ }
+ 
+diff --git a/mm/vmscan.c b/mm/vmscan.c
+index b1b574ad199d2..923f0a3813c0d 100644
+--- a/mm/vmscan.c
++++ b/mm/vmscan.c
+@@ -3694,7 +3694,8 @@ static int balance_pgdat(pg_data_t *pgdat, int order, int highest_zoneidx)
+ 		__fs_reclaim_release();
+ 		ret = try_to_freeze();
+ 		__fs_reclaim_acquire();
+-		if (ret || kthread_should_stop())
++		if (ret || kthread_should_stop() ||
++		    !atomic_long_read(&kswapd_waiters))
+ 			break;
+ 
+ 		/*
 diff --git a/net/core/pktgen.c b/net/core/pktgen.c
 index 105978604ffdb..cf509f492abb2 100644
 --- a/net/core/pktgen.c
