@@ -16,9 +16,14 @@ declare -i ksl=$(grep -E '^SUBLEVEL = ' Makefile | sed -r 's/^SUBLEVEL = //')
 
 tag="v$kv.$kpl.$ksl-$ev"
 
+git_message="Cut $tag"
+if [[ "$tag" =~ zen ]]; then
+    git_message="Linux ZEN kernel $tag"
+fi
+
 git add Makefile
-git commit -m "Cut $tag"
-git tag -s "$tag" -m "Cut $tag"
+git commit -m "$git_message"
+git tag -s "$tag" -m "git_message"
 git push origin "$tag"
 
 echo -e "\n"
