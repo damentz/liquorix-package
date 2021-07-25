@@ -23,7 +23,7 @@ fi
 
 git add Makefile
 git commit -m "$git_message"
-git tag -s "$tag" -m "git_message"
+git tag -s "$tag" -m "$git_message"
 git push origin "$tag"
 
 echo -e "\n"
