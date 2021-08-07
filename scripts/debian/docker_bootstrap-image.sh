@@ -48,7 +48,7 @@ declare release_string="liquorix_$arch/$distro/$release"
 if [[ "$(docker image ls)" == *"$release_string"* ]]; then
     echo "[INFO ] $release_string: Docker image already built, performing update."
     declare container_id=$(
-        docker run -d $release_string bash -c \
+        docker run --net='host' -d $release_string bash -c \
         'apt-get update && \
          apt-get dist-upgrade && \
          apt-get clean && \

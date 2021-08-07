@@ -32,7 +32,7 @@ if [[ $fail -eq 1 ]]; then
 fi
 
 echo "[DEBUG] dir_base: $dir_base"
-docker run \
+docker run --net='host' \
     --rm \
     --tmpfs "$dir_build":exec \
     -v "$dir_base":/liquorix-package \

@@ -10,7 +10,7 @@ declare distro='ubuntu'
 
 for release in "${releases_ubuntu[@]}"; do
     echo "[INFO ] Uploading sources for $distro/$release"
-    docker run \
+    docker run --net='host' \
     --rm \
     --tmpfs /build:exec \
     --env LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libeatmydata.so \

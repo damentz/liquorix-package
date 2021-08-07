@@ -32,7 +32,7 @@ if [[ $fail -eq 1 ]]; then
     exit 1
 fi
 
-docker run \
+docker run --net='host' \
     --rm \
     --tmpfs /build:exec \
     -v $dir_base:/liquorix-package \
