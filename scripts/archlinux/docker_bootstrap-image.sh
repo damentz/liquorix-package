@@ -70,7 +70,7 @@ if [[ "$(docker image ls)" == *"$release_string"* ]]; then
     docker container rm "$container_id" > /dev/null
 else
     echo "[INFO ] $release_string: Docker image not found, building with Dockerfile."
-    DOCKER_BUILDKIT=1 docker build --no-cache \
+    DOCKER_BUILDKIT=1 docker build --network="host" --no-cache \
         -f "$dir_scripts/Dockerfile" \
         -t "$release_string" \
         --pull=true \
@@ -82,6 +82,6 @@ else
         --build-arg SECRET="$secret" \
         $dir_base/ || true
 
-        # We don't want the docker build bootstrap script from stopping release
+        # We don't want the docker build --network="host" bootstrap script from stopping release
         # scripts from completing.
 fi
