@@ -25,8 +25,8 @@ source_release='focal'
 # TODO: Reenable "sid" after bug is resolved
 # https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=992098
 #
-# stable => buster, testing => bullseye, unstable => sid
-releases_debian=('buster' 'bullseye')
+# oldstable => buster, stable => bullseye, testing => bookworm, unstable => sid
+releases_debian=('buster' 'bullseye' 'bookworm')
 releases_ubuntu=('bionic' 'focal' 'hirsute' 'impish')
 mirror_debian='http://deb.debian.org/debian'
 mirror_ubuntu='http://archive.ubuntu.com/ubuntu'
