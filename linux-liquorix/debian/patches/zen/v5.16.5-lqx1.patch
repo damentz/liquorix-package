@@ -190,6 +190,19 @@ index c76bafaf98d2..34c43d3bddfd 100644
  
  Example:
  
+diff --git a/Documentation/devicetree/bindings/net/can/tcan4x5x.txt b/Documentation/devicetree/bindings/net/can/tcan4x5x.txt
+index 0968b40aef1e..e3501bfa22e9 100644
+--- a/Documentation/devicetree/bindings/net/can/tcan4x5x.txt
++++ b/Documentation/devicetree/bindings/net/can/tcan4x5x.txt
+@@ -31,7 +31,7 @@ tcan4x5x: tcan4x5x@0 {
+ 		#address-cells = <1>;
+ 		#size-cells = <1>;
+ 		spi-max-frequency = <10000000>;
+-		bosch,mram-cfg = <0x0 0 0 32 0 0 1 1>;
++		bosch,mram-cfg = <0x0 0 0 16 0 0 1 1>;
+ 		interrupt-parent = <&gpio1>;
+ 		interrupts = <14 IRQ_TYPE_LEVEL_LOW>;
+ 		device-state-gpios = <&gpio3 21 GPIO_ACTIVE_HIGH>;
 diff --git a/Documentation/devicetree/bindings/thermal/thermal-zones.yaml b/Documentation/devicetree/bindings/thermal/thermal-zones.yaml
 index a07de5ed0ca6..2d34f3ccb257 100644
 --- a/Documentation/devicetree/bindings/thermal/thermal-zones.yaml
@@ -560,7 +573,7 @@ index 000000000000..a54c5637c455
 + ``max_gen-1`` aren't fully aged and therefore can't be evicted. Use
 + ``nr_to_reclaim`` to limit the number of pages to evict.
 diff --git a/Makefile b/Makefile
-index 08510230b42f..921347351652 100644
+index 08510230b42f..a84883eef5cc 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -1,9 +1,9 @@
@@ -570,8 +583,8 @@ index 08510230b42f..921347351652 100644
 -SUBLEVEL = 0
 -EXTRAVERSION =
 -NAME = Gobble Gobble
-+SUBLEVEL = 4
-+EXTRAVERSION = -lqx2
++SUBLEVEL = 5
++EXTRAVERSION = -lqx1
 +NAME = Super Popcorn Galaxy
  
  # *DOCUMENTATION*
@@ -7074,11 +7087,200 @@ index 1c7306c370fa..1b460e539926 100644
  void svm_free_nested(struct vcpu_svm *svm);
  int svm_allocate_nested(struct vcpu_svm *svm);
  int nested_svm_vmrun(struct kvm_vcpu *vcpu);
+diff --git a/arch/x86/kvm/vmx/evmcs.c b/arch/x86/kvm/vmx/evmcs.c
+index ba6f99f584ac..09fac0ddac8b 100644
+--- a/arch/x86/kvm/vmx/evmcs.c
++++ b/arch/x86/kvm/vmx/evmcs.c
+@@ -12,8 +12,6 @@
+ 
+ DEFINE_STATIC_KEY_FALSE(enable_evmcs);
+ 
+-#if IS_ENABLED(CONFIG_HYPERV)
+-
+ #define EVMCS1_OFFSET(x) offsetof(struct hv_enlightened_vmcs, x)
+ #define EVMCS1_FIELD(number, name, clean_field)[ROL16(number, 6)] = \
+ 		{EVMCS1_OFFSET(name), clean_field}
+@@ -296,6 +294,7 @@ const struct evmcs_field vmcs_field_to_evmcs_1[] = {
+ };
+ const unsigned int nr_evmcs_1_fields = ARRAY_SIZE(vmcs_field_to_evmcs_1);
+ 
++#if IS_ENABLED(CONFIG_HYPERV)
+ __init void evmcs_sanitize_exec_ctrls(struct vmcs_config *vmcs_conf)
+ {
+ 	vmcs_conf->pin_based_exec_ctrl &= ~EVMCS1_UNSUPPORTED_PINCTRL;
+diff --git a/arch/x86/kvm/vmx/evmcs.h b/arch/x86/kvm/vmx/evmcs.h
+index 16731d2cf231..6255fa716772 100644
+--- a/arch/x86/kvm/vmx/evmcs.h
++++ b/arch/x86/kvm/vmx/evmcs.h
+@@ -63,8 +63,6 @@ DECLARE_STATIC_KEY_FALSE(enable_evmcs);
+ #define EVMCS1_UNSUPPORTED_VMENTRY_CTRL (VM_ENTRY_LOAD_IA32_PERF_GLOBAL_CTRL)
+ #define EVMCS1_UNSUPPORTED_VMFUNC (VMX_VMFUNC_EPTP_SWITCHING)
+ 
+-#if IS_ENABLED(CONFIG_HYPERV)
+-
+ struct evmcs_field {
+ 	u16 offset;
+ 	u16 clean_field;
+@@ -73,26 +71,56 @@ struct evmcs_field {
+ extern const struct evmcs_field vmcs_field_to_evmcs_1[];
+ extern const unsigned int nr_evmcs_1_fields;
+ 
+-static __always_inline int get_evmcs_offset(unsigned long field,
+-					    u16 *clean_field)
++static __always_inline int evmcs_field_offset(unsigned long field,
++					      u16 *clean_field)
+ {
+ 	unsigned int index = ROL16(field, 6);
+ 	const struct evmcs_field *evmcs_field;
+ 
+-	if (unlikely(index >= nr_evmcs_1_fields)) {
+-		WARN_ONCE(1, "KVM: accessing unsupported EVMCS field %lx\n",
+-			  field);
++	if (unlikely(index >= nr_evmcs_1_fields))
+ 		return -ENOENT;
+-	}
+ 
+ 	evmcs_field = &vmcs_field_to_evmcs_1[index];
+ 
++	/*
++	 * Use offset=0 to detect holes in eVMCS. This offset belongs to
++	 * 'revision_id' but this field has no encoding and is supposed to
++	 * be accessed directly.
++	 */
++	if (unlikely(!evmcs_field->offset))
++		return -ENOENT;
++
+ 	if (clean_field)
+ 		*clean_field = evmcs_field->clean_field;
+ 
+ 	return evmcs_field->offset;
+ }
+ 
++static inline u64 evmcs_read_any(struct hv_enlightened_vmcs *evmcs,
++				 unsigned long field, u16 offset)
++{
++	/*
++	 * vmcs12_read_any() doesn't care whether the supplied structure
++	 * is 'struct vmcs12' or 'struct hv_enlightened_vmcs' as it takes
++	 * the exact offset of the required field, use it for convenience
++	 * here.
++	 */
++	return vmcs12_read_any((void *)evmcs, field, offset);
++}
++
++#if IS_ENABLED(CONFIG_HYPERV)
++
++static __always_inline int get_evmcs_offset(unsigned long field,
++					    u16 *clean_field)
++{
++	int offset = evmcs_field_offset(field, clean_field);
++
++	WARN_ONCE(offset < 0, "KVM: accessing unsupported EVMCS field %lx\n",
++		  field);
++
++	return offset;
++}
++
+ static __always_inline void evmcs_write64(unsigned long field, u64 value)
+ {
+ 	u16 clean_field;
 diff --git a/arch/x86/kvm/vmx/nested.c b/arch/x86/kvm/vmx/nested.c
-index 9c941535f78c..8bebff82d2c8 100644
+index 9c941535f78c..c605c2c01394 100644
 --- a/arch/x86/kvm/vmx/nested.c
 +++ b/arch/x86/kvm/vmx/nested.c
-@@ -6744,6 +6744,7 @@ __init int nested_vmx_hardware_setup(int (*exit_handlers[])(struct kvm_vcpu *))
+@@ -7,6 +7,7 @@
+ #include <asm/mmu_context.h>
+ 
+ #include "cpuid.h"
++#include "evmcs.h"
+ #include "hyperv.h"
+ #include "mmu.h"
+ #include "nested.h"
+@@ -5074,27 +5075,49 @@ static int handle_vmread(struct kvm_vcpu *vcpu)
+ 	if (!nested_vmx_check_permission(vcpu))
+ 		return 1;
+ 
+-	/*
+-	 * In VMX non-root operation, when the VMCS-link pointer is INVALID_GPA,
+-	 * any VMREAD sets the ALU flags for VMfailInvalid.
+-	 */
+-	if (vmx->nested.current_vmptr == INVALID_GPA ||
+-	    (is_guest_mode(vcpu) &&
+-	     get_vmcs12(vcpu)->vmcs_link_pointer == INVALID_GPA))
+-		return nested_vmx_failInvalid(vcpu);
+-
+ 	/* Decode instruction info and find the field to read */
+ 	field = kvm_register_read(vcpu, (((instr_info) >> 28) & 0xf));
+ 
+-	offset = vmcs_field_to_offset(field);
+-	if (offset < 0)
+-		return nested_vmx_fail(vcpu, VMXERR_UNSUPPORTED_VMCS_COMPONENT);
++	if (!evmptr_is_valid(vmx->nested.hv_evmcs_vmptr)) {
++		/*
++		 * In VMX non-root operation, when the VMCS-link pointer is INVALID_GPA,
++		 * any VMREAD sets the ALU flags for VMfailInvalid.
++		 */
++		if (vmx->nested.current_vmptr == INVALID_GPA ||
++		    (is_guest_mode(vcpu) &&
++		     get_vmcs12(vcpu)->vmcs_link_pointer == INVALID_GPA))
++			return nested_vmx_failInvalid(vcpu);
+ 
+-	if (!is_guest_mode(vcpu) && is_vmcs12_ext_field(field))
+-		copy_vmcs02_to_vmcs12_rare(vcpu, vmcs12);
++		offset = get_vmcs12_field_offset(field);
++		if (offset < 0)
++			return nested_vmx_fail(vcpu, VMXERR_UNSUPPORTED_VMCS_COMPONENT);
++
++		if (!is_guest_mode(vcpu) && is_vmcs12_ext_field(field))
++			copy_vmcs02_to_vmcs12_rare(vcpu, vmcs12);
++
++		/* Read the field, zero-extended to a u64 value */
++		value = vmcs12_read_any(vmcs12, field, offset);
++	} else {
++		/*
++		 * Hyper-V TLFS (as of 6.0b) explicitly states, that while an
++		 * enlightened VMCS is active VMREAD/VMWRITE instructions are
++		 * unsupported. Unfortunately, certain versions of Windows 11
++		 * don't comply with this requirement which is not enforced in
++		 * genuine Hyper-V. Allow VMREAD from an enlightened VMCS as a
++		 * workaround, as misbehaving guests will panic on VM-Fail.
++		 * Note, enlightened VMCS is incompatible with shadow VMCS so
++		 * all VMREADs from L2 should go to L1.
++		 */
++		if (WARN_ON_ONCE(is_guest_mode(vcpu)))
++			return nested_vmx_failInvalid(vcpu);
+ 
+-	/* Read the field, zero-extended to a u64 value */
+-	value = vmcs12_read_any(vmcs12, field, offset);
++		offset = evmcs_field_offset(field, NULL);
++		if (offset < 0)
++			return nested_vmx_fail(vcpu, VMXERR_UNSUPPORTED_VMCS_COMPONENT);
++
++		/* Read the field, zero-extended to a u64 value */
++		value = evmcs_read_any(vmx->nested.hv_evmcs, field, offset);
++	}
+ 
+ 	/*
+ 	 * Now copy part of this value to register or memory, as requested.
+@@ -5189,7 +5212,7 @@ static int handle_vmwrite(struct kvm_vcpu *vcpu)
+ 
+ 	field = kvm_register_read(vcpu, (((instr_info) >> 28) & 0xf));
+ 
+-	offset = vmcs_field_to_offset(field);
++	offset = get_vmcs12_field_offset(field);
+ 	if (offset < 0)
+ 		return nested_vmx_fail(vcpu, VMXERR_UNSUPPORTED_VMCS_COMPONENT);
+ 
+@@ -6435,7 +6458,7 @@ static u64 nested_vmx_calc_vmcs_enum_msr(void)
+ 	max_idx = 0;
+ 	for (i = 0; i < nr_vmcs12_fields; i++) {
+ 		/* The vmcs12 table is very, very sparsely populated. */
+-		if (!vmcs_field_to_offset_table[i])
++		if (!vmcs12_field_offsets[i])
+ 			continue;
+ 
+ 		idx = vmcs_field_index(VMCS12_IDX_TO_ENC(i));
+@@ -6744,6 +6767,7 @@ __init int nested_vmx_hardware_setup(int (*exit_handlers[])(struct kvm_vcpu *))
  }
  
  struct kvm_x86_nested_ops vmx_nested_ops = {
@@ -7182,6 +7384,51 @@ index 1c94783b5a54..46fb83d6a286 100644
  }
  
  bool pi_has_pending_interrupt(struct kvm_vcpu *vcpu)
+diff --git a/arch/x86/kvm/vmx/vmcs12.c b/arch/x86/kvm/vmx/vmcs12.c
+index cab6ba7a5005..2251b60920f8 100644
+--- a/arch/x86/kvm/vmx/vmcs12.c
++++ b/arch/x86/kvm/vmx/vmcs12.c
+@@ -8,7 +8,7 @@
+ 	FIELD(number, name),						\
+ 	[ROL16(number##_HIGH, 6)] = VMCS12_OFFSET(name) + sizeof(u32)
+ 
+-const unsigned short vmcs_field_to_offset_table[] = {
++const unsigned short vmcs12_field_offsets[] = {
+ 	FIELD(VIRTUAL_PROCESSOR_ID, virtual_processor_id),
+ 	FIELD(POSTED_INTR_NV, posted_intr_nv),
+ 	FIELD(GUEST_ES_SELECTOR, guest_es_selector),
+@@ -151,4 +151,4 @@ const unsigned short vmcs_field_to_offset_table[] = {
+ 	FIELD(HOST_RSP, host_rsp),
+ 	FIELD(HOST_RIP, host_rip),
+ };
+-const unsigned int nr_vmcs12_fields = ARRAY_SIZE(vmcs_field_to_offset_table);
++const unsigned int nr_vmcs12_fields = ARRAY_SIZE(vmcs12_field_offsets);
+diff --git a/arch/x86/kvm/vmx/vmcs12.h b/arch/x86/kvm/vmx/vmcs12.h
+index 2a45f026ee11..746129ddd5ae 100644
+--- a/arch/x86/kvm/vmx/vmcs12.h
++++ b/arch/x86/kvm/vmx/vmcs12.h
+@@ -361,10 +361,10 @@ static inline void vmx_check_vmcs12_offsets(void)
+ 	CHECK_OFFSET(guest_pml_index, 996);
+ }
+ 
+-extern const unsigned short vmcs_field_to_offset_table[];
++extern const unsigned short vmcs12_field_offsets[];
+ extern const unsigned int nr_vmcs12_fields;
+ 
+-static inline short vmcs_field_to_offset(unsigned long field)
++static inline short get_vmcs12_field_offset(unsigned long field)
+ {
+ 	unsigned short offset;
+ 	unsigned int index;
+@@ -377,7 +377,7 @@ static inline short vmcs_field_to_offset(unsigned long field)
+ 		return -ENOENT;
+ 
+ 	index = array_index_nospec(index, nr_vmcs12_fields);
+-	offset = vmcs_field_to_offset_table[index];
++	offset = vmcs12_field_offsets[index];
+ 	if (offset == 0)
+ 		return -ENOENT;
+ 	return offset;
 diff --git a/arch/x86/kvm/vmx/vmx.c b/arch/x86/kvm/vmx/vmx.c
 index 0dbf94eb954f..7f4e6f625abc 100644
 --- a/arch/x86/kvm/vmx/vmx.c
@@ -7618,6 +7865,20 @@ index fec18118dc30..30918b0e81c0 100644
  	spin_unlock_irq(&bfqd->lock);
  
  	bfq_update_insert_stats(q, bfqq, idle_timer_disabled,
+diff --git a/block/bio.c b/block/bio.c
+index 15ab0d6d1c06..99cad261ec53 100644
+--- a/block/bio.c
++++ b/block/bio.c
+@@ -569,7 +569,8 @@ static void bio_truncate(struct bio *bio, unsigned new_size)
+ 				offset = new_size - done;
+ 			else
+ 				offset = 0;
+-			zero_user(bv.bv_page, offset, bv.bv_len - offset);
++			zero_user(bv.bv_page, bv.bv_offset + offset,
++				  bv.bv_len - offset);
+ 			truncated = true;
+ 		}
+ 		done += bv.bv_len;
 diff --git a/block/blk-core.c b/block/blk-core.c
 index 1378d084c770..9ebeb9bdf583 100644
 --- a/block/blk-core.c
@@ -20773,6 +21034,48 @@ index daec3309b014..86397522e786 100644
  	gic_data.rdists.has_vlpis &= !!(typer & GICR_TYPER_VLPIS);
  
  	/* RVPEID implies some form of DirectLPI, no matter what the doc says... :-/ */
+diff --git a/drivers/irqchip/irq-realtek-rtl.c b/drivers/irqchip/irq-realtek-rtl.c
+index fd9f275592d2..568614edd88f 100644
+--- a/drivers/irqchip/irq-realtek-rtl.c
++++ b/drivers/irqchip/irq-realtek-rtl.c
+@@ -62,7 +62,7 @@ static struct irq_chip realtek_ictl_irq = {
+ 
+ static int intc_map(struct irq_domain *d, unsigned int irq, irq_hw_number_t hw)
+ {
+-	irq_set_chip_and_handler(hw, &realtek_ictl_irq, handle_level_irq);
++	irq_set_chip_and_handler(irq, &realtek_ictl_irq, handle_level_irq);
+ 
+ 	return 0;
+ }
+@@ -95,7 +95,8 @@ static void realtek_irq_dispatch(struct irq_desc *desc)
+  * SoC interrupts are cascaded to MIPS CPU interrupts according to the
+  * interrupt-map in the device tree. Each SoC interrupt gets 4 bits for
+  * the CPU interrupt in an Interrupt Routing Register. Max 32 SoC interrupts
+- * thus go into 4 IRRs.
++ * thus go into 4 IRRs. A routing value of '0' means the interrupt is left
++ * disconnected. Routing values {1..15} connect to output lines {0..14}.
+  */
+ static int __init map_interrupts(struct device_node *node, struct irq_domain *domain)
+ {
+@@ -134,7 +135,7 @@ static int __init map_interrupts(struct device_node *node, struct irq_domain *do
+ 		of_node_put(cpu_ictl);
+ 
+ 		cpu_int = be32_to_cpup(imap + 2);
+-		if (cpu_int > 7)
++		if (cpu_int > 7 || cpu_int < 2)
+ 			return -EINVAL;
+ 
+ 		if (!(mips_irqs_set & BIT(cpu_int))) {
+@@ -143,7 +144,8 @@ static int __init map_interrupts(struct device_node *node, struct irq_domain *do
+ 			mips_irqs_set |= BIT(cpu_int);
+ 		}
+ 
+-		regs[(soc_int * 4) / 32] |= cpu_int << (soc_int * 4) % 32;
++		/* Use routing values (1..6) for CPU interrupts (2..7) */
++		regs[(soc_int * 4) / 32] |= (cpu_int - 1) << (soc_int * 4) % 32;
+ 		imap += 3;
+ 	}
+ 
 diff --git a/drivers/leds/leds-lp55xx-common.c b/drivers/leds/leds-lp55xx-common.c
 index d1657c46ee2f..9fdfc1b9a1a0 100644
 --- a/drivers/leds/leds-lp55xx-common.c
@@ -24347,6 +24650,18 @@ index 0e9d426fe4f2..b18861bdcdc8 100644
  };
  
  static const struct jz_soc_info jz4725b_soc_info = {
+diff --git a/drivers/mtd/nand/raw/mpc5121_nfc.c b/drivers/mtd/nand/raw/mpc5121_nfc.c
+index cb293c50acb8..5b9271b9c326 100644
+--- a/drivers/mtd/nand/raw/mpc5121_nfc.c
++++ b/drivers/mtd/nand/raw/mpc5121_nfc.c
+@@ -291,7 +291,6 @@ static int ads5121_chipselect_init(struct mtd_info *mtd)
+ /* Control chips select signal on ADS5121 board */
+ static void ads5121_select_chip(struct nand_chip *nand, int chip)
+ {
+-	struct mtd_info *mtd = nand_to_mtd(nand);
+ 	struct mpc5121_nfc_prv *prv = nand_get_controller_data(nand);
+ 	u8 v;
+ 
 diff --git a/drivers/mtd/nand/raw/nand_base.c b/drivers/mtd/nand/raw/nand_base.c
 index a130320de412..d5a2110eb38e 100644
 --- a/drivers/mtd/nand/raw/nand_base.c
@@ -36091,10 +36406,26 @@ index 17c59b0d6978..21207df680cc 100644
  	val = readl_relaxed(port->base + PCIE_RST_CTRL_REG);
  	val |= PCIE_MAC_RSTB | PCIE_PHY_RSTB | PCIE_BRG_RSTB | PCIE_PE_RSTB;
 diff --git a/drivers/pci/controller/pcie-mt7621.c b/drivers/pci/controller/pcie-mt7621.c
-index b60dfb45ef7b..73b91315c165 100644
+index b60dfb45ef7b..6ec53aa81b92 100644
 --- a/drivers/pci/controller/pcie-mt7621.c
 +++ b/drivers/pci/controller/pcie-mt7621.c
-@@ -598,3 +598,5 @@ static struct platform_driver mt7621_pci_driver = {
+@@ -109,15 +109,6 @@ static inline void pcie_write(struct mt7621_pcie *pcie, u32 val, u32 reg)
+ 	writel_relaxed(val, pcie->base + reg);
+ }
+ 
+-static inline void pcie_rmw(struct mt7621_pcie *pcie, u32 reg, u32 clr, u32 set)
+-{
+-	u32 val = readl_relaxed(pcie->base + reg);
+-
+-	val &= ~clr;
+-	val |= set;
+-	writel_relaxed(val, pcie->base + reg);
+-}
+-
+ static inline u32 pcie_port_read(struct mt7621_pcie_port *port, u32 reg)
+ {
+ 	return readl_relaxed(port->base + reg);
+@@ -598,3 +589,5 @@ static struct platform_driver mt7621_pci_driver = {
  	},
  };
  builtin_platform_driver(mt7621_pci_driver);
@@ -42742,11 +43073,15 @@ index 3cb01cdd02c2..b81a9e1c1315 100644
  		}
  	}
 diff --git a/drivers/usb/dwc3/dwc3-xilinx.c b/drivers/usb/dwc3/dwc3-xilinx.c
-index 9cc3ad701a29..e14ac15e24c3 100644
+index 9cc3ad701a29..a6f3a9b38789 100644
 --- a/drivers/usb/dwc3/dwc3-xilinx.c
 +++ b/drivers/usb/dwc3/dwc3-xilinx.c
-@@ -102,14 +102,26 @@ static int dwc3_xlnx_init_zynqmp(struct dwc3_xlnx *priv_data)
- 	int			ret;
+@@ -99,17 +99,29 @@ static int dwc3_xlnx_init_zynqmp(struct dwc3_xlnx *priv_data)
+ 	struct device		*dev = priv_data->dev;
+ 	struct reset_control	*crst, *hibrst, *apbrst;
+ 	struct phy		*usb3_phy;
+-	int			ret;
++	int			ret = 0;
  	u32			reg;
  
 -	usb3_phy = devm_phy_get(dev, "usb3-phy");
@@ -48440,11 +48775,19 @@ index eddd66d426ca..016de5776b6d 100644
  #endif /* !CONFIG_PM */
  
 diff --git a/include/linux/psi.h b/include/linux/psi.h
-index 65eb1476ac70..74f7148dfb9f 100644
+index 65eb1476ac70..57823b30c2d3 100644
 --- a/include/linux/psi.h
 +++ b/include/linux/psi.h
-@@ -32,7 +32,7 @@ void cgroup_move_task(struct task_struct *p, struct css_set *to);
+@@ -24,18 +24,17 @@ void psi_memstall_enter(unsigned long *flags);
+ void psi_memstall_leave(unsigned long *flags);
  
+ int psi_show(struct seq_file *s, struct psi_group *group, enum psi_res res);
+-
+-#ifdef CONFIG_CGROUPS
+-int psi_cgroup_alloc(struct cgroup *cgrp);
+-void psi_cgroup_free(struct cgroup *cgrp);
+-void cgroup_move_task(struct task_struct *p, struct css_set *to);
+-
  struct psi_trigger *psi_trigger_create(struct psi_group *group,
  			char *buf, size_t nbytes, enum psi_res res);
 -void psi_trigger_replace(void **trigger_ptr, struct psi_trigger *t);
@@ -48452,6 +48795,14 @@ index 65eb1476ac70..74f7148dfb9f 100644
  
  __poll_t psi_trigger_poll(void **trigger_ptr, struct file *file,
  			poll_table *wait);
++
++#ifdef CONFIG_CGROUPS
++int psi_cgroup_alloc(struct cgroup *cgrp);
++void psi_cgroup_free(struct cgroup *cgrp);
++void cgroup_move_task(struct task_struct *p, struct css_set *to);
+ #endif
+ 
+ #else /* CONFIG_PSI */
 diff --git a/include/linux/psi_types.h b/include/linux/psi_types.h
 index 0a23300d49af..6f190002a202 100644
 --- a/include/linux/psi_types.h
@@ -50107,7 +50458,7 @@ index 5f84e6cdb78e..4d40dcce7604 100644
  		return atomic_pool_kernel;
  	}
 diff --git a/kernel/events/core.c b/kernel/events/core.c
-index 30d94f68c5bd..a0064dd70653 100644
+index 30d94f68c5bd..6ed890480c4a 100644
 --- a/kernel/events/core.c
 +++ b/kernel/events/core.c
 @@ -674,6 +674,23 @@ perf_event_set_state(struct perf_event *event, enum perf_event_state state)
@@ -50341,7 +50692,20 @@ index 30d94f68c5bd..a0064dd70653 100644
  		ctx->is_active = 0;
  		ctx->rotate_necessary = 0;
  		if (ctx->task) {
-@@ -2478,40 +2548,6 @@ void perf_event_disable_inatomic(struct perf_event *event)
+@@ -2388,7 +2458,11 @@ static void perf_remove_from_context(struct perf_event *event, unsigned long fla
+ 	 * event_function_call() user.
+ 	 */
+ 	raw_spin_lock_irq(&ctx->lock);
+-	if (!ctx->is_active) {
++	/*
++	 * Cgroup events are per-cpu events, and must IPI because of
++	 * cgrp_cpuctx_list.
++	 */
++	if (!ctx->is_active && !is_cgroup_event(event)) {
+ 		__perf_remove_from_context(event, __get_cpu_context(ctx),
+ 					   ctx, (void *)flags);
+ 		raw_spin_unlock_irq(&ctx->lock);
+@@ -2478,40 +2552,6 @@ void perf_event_disable_inatomic(struct perf_event *event)
  	irq_work_queue(&event->pending);
  }
  
@@ -50382,7 +50746,7 @@ index 30d94f68c5bd..a0064dd70653 100644
  #define MAX_INTERRUPTS (~0ULL)
  
  static void perf_log_throttle(struct perf_event *event, int enable);
-@@ -2552,8 +2588,6 @@ event_sched_in(struct perf_event *event,
+@@ -2552,8 +2592,6 @@ event_sched_in(struct perf_event *event,
  
  	perf_pmu_disable(event->pmu);
  
@@ -50391,7 +50755,23 @@ index 30d94f68c5bd..a0064dd70653 100644
  	perf_log_itrace_start(event);
  
  	if (event->pmu->add(event, PERF_EF_START)) {
-@@ -3247,16 +3281,6 @@ static void ctx_sched_out(struct perf_event_context *ctx,
+@@ -2857,11 +2895,14 @@ perf_install_in_context(struct perf_event_context *ctx,
+ 	 * perf_event_attr::disabled events will not run and can be initialized
+ 	 * without IPI. Except when this is the first event for the context, in
+ 	 * that case we need the magic of the IPI to set ctx->is_active.
++	 * Similarly, cgroup events for the context also needs the IPI to
++	 * manipulate the cgrp_cpuctx_list.
+ 	 *
+ 	 * The IOC_ENABLE that is sure to follow the creation of a disabled
+ 	 * event will issue the IPI and reprogram the hardware.
+ 	 */
+-	if (__perf_effective_state(event) == PERF_EVENT_STATE_OFF && ctx->nr_events) {
++	if (__perf_effective_state(event) == PERF_EVENT_STATE_OFF &&
++	    ctx->nr_events && !is_cgroup_event(event)) {
+ 		raw_spin_lock_irq(&ctx->lock);
+ 		if (ctx->task == TASK_TOMBSTONE) {
+ 			raw_spin_unlock_irq(&ctx->lock);
+@@ -3247,16 +3288,6 @@ static void ctx_sched_out(struct perf_event_context *ctx,
  		return;
  	}
  
@@ -50408,7 +50788,7 @@ index 30d94f68c5bd..a0064dd70653 100644
  	/*
  	 * Always update time if it was set; not only when it changes.
  	 * Otherwise we can 'forget' to update time for any but the last
-@@ -3270,7 +3294,22 @@ static void ctx_sched_out(struct perf_event_context *ctx,
+@@ -3270,7 +3301,22 @@ static void ctx_sched_out(struct perf_event_context *ctx,
  	if (is_active & EVENT_TIME) {
  		/* update (and stop) ctx time */
  		update_context_time(ctx);
@@ -50432,7 +50812,7 @@ index 30d94f68c5bd..a0064dd70653 100644
  	}
  
  	is_active ^= ctx->is_active; /* changed bits */
-@@ -3707,13 +3746,19 @@ static noinline int visit_groups_merge(struct perf_cpu_context *cpuctx,
+@@ -3707,13 +3753,19 @@ static noinline int visit_groups_merge(struct perf_cpu_context *cpuctx,
  	return 0;
  }
  
@@ -50453,7 +50833,7 @@ index 30d94f68c5bd..a0064dd70653 100644
  	perf_event_update_userpage(event);
  
  	return true;
-@@ -3797,13 +3842,23 @@ ctx_sched_in(struct perf_event_context *ctx,
+@@ -3797,13 +3849,23 @@ ctx_sched_in(struct perf_event_context *ctx,
  	     struct task_struct *task)
  {
  	int is_active = ctx->is_active;
@@ -50478,7 +50858,7 @@ index 30d94f68c5bd..a0064dd70653 100644
  	ctx->is_active |= (event_type | EVENT_TIME);
  	if (ctx->task) {
  		if (!is_active)
-@@ -3814,13 +3869,6 @@ ctx_sched_in(struct perf_event_context *ctx,
+@@ -3814,13 +3876,6 @@ ctx_sched_in(struct perf_event_context *ctx,
  
  	is_active ^= ctx->is_active; /* changed bits */
  
@@ -50492,7 +50872,7 @@ index 30d94f68c5bd..a0064dd70653 100644
  	/*
  	 * First go through the list and put on any pinned groups
  	 * in order to give them the best chance of going on.
-@@ -4414,6 +4462,18 @@ static inline u64 perf_event_count(struct perf_event *event)
+@@ -4414,6 +4469,18 @@ static inline u64 perf_event_count(struct perf_event *event)
  	return local64_read(&event->count) + atomic64_read(&event->child_count);
  }
  
@@ -50511,7 +50891,7 @@ index 30d94f68c5bd..a0064dd70653 100644
  /*
   * NMI-safe method to read a local event, that is an event that
   * is:
-@@ -4473,10 +4533,9 @@ int perf_event_read_local(struct perf_event *event, u64 *value,
+@@ -4473,10 +4540,9 @@ int perf_event_read_local(struct perf_event *event, u64 *value,
  
  	*value = local64_read(&event->count);
  	if (enabled || running) {
@@ -50524,7 +50904,7 @@ index 30d94f68c5bd..a0064dd70653 100644
  		if (enabled)
  			*enabled = __enabled;
  		if (running)
-@@ -5798,18 +5857,6 @@ static int perf_event_index(struct perf_event *event)
+@@ -5798,18 +5864,6 @@ static int perf_event_index(struct perf_event *event)
  	return event->pmu->event_idx(event);
  }
  
@@ -50543,7 +50923,7 @@ index 30d94f68c5bd..a0064dd70653 100644
  static void perf_event_init_userpage(struct perf_event *event)
  {
  	struct perf_event_mmap_page *userpg;
-@@ -6349,7 +6396,6 @@ static int perf_mmap(struct file *file, struct vm_area_struct *vma)
+@@ -6349,7 +6403,6 @@ static int perf_mmap(struct file *file, struct vm_area_struct *vma)
  		ring_buffer_attach(event, rb);
  
  		perf_event_update_time(event);
@@ -50551,7 +50931,7 @@ index 30d94f68c5bd..a0064dd70653 100644
  		perf_event_init_userpage(event);
  		perf_event_update_userpage(event);
  	} else {
-@@ -6526,18 +6572,25 @@ static void perf_pending_event(struct irq_work *entry)
+@@ -6526,18 +6579,25 @@ static void perf_pending_event(struct irq_work *entry)
   * Later on, we might change it to a list if there is
   * another virtualization implementation supporting the callbacks.
   */
@@ -60267,7 +60647,7 @@ index e06071bf3472..5865f14714a9 100644
  static inline int
  update_thermal_load_avg(u64 now, struct rq *rq, u64 capacity)
 diff --git a/kernel/sched/psi.c b/kernel/sched/psi.c
-index 1652f2bb54b7..ab460f8b77d1 100644
+index 1652f2bb54b7..422f3b0445cf 100644
 --- a/kernel/sched/psi.c
 +++ b/kernel/sched/psi.c
 @@ -34,13 +34,19 @@
@@ -60382,7 +60762,52 @@ index 1652f2bb54b7..ab460f8b77d1 100644
  
  	rq_unlock_irq(rq, &rf);
  }
-@@ -1151,7 +1162,6 @@ struct psi_trigger *psi_trigger_create(struct psi_group *group,
+@@ -1071,44 +1082,6 @@ int psi_show(struct seq_file *m, struct psi_group *group, enum psi_res res)
+ 	return 0;
+ }
+ 
+-static int psi_io_show(struct seq_file *m, void *v)
+-{
+-	return psi_show(m, &psi_system, PSI_IO);
+-}
+-
+-static int psi_memory_show(struct seq_file *m, void *v)
+-{
+-	return psi_show(m, &psi_system, PSI_MEM);
+-}
+-
+-static int psi_cpu_show(struct seq_file *m, void *v)
+-{
+-	return psi_show(m, &psi_system, PSI_CPU);
+-}
+-
+-static int psi_open(struct file *file, int (*psi_show)(struct seq_file *, void *))
+-{
+-	if (file->f_mode & FMODE_WRITE && !capable(CAP_SYS_RESOURCE))
+-		return -EPERM;
+-
+-	return single_open(file, psi_show, NULL);
+-}
+-
+-static int psi_io_open(struct inode *inode, struct file *file)
+-{
+-	return psi_open(file, psi_io_show);
+-}
+-
+-static int psi_memory_open(struct inode *inode, struct file *file)
+-{
+-	return psi_open(file, psi_memory_show);
+-}
+-
+-static int psi_cpu_open(struct inode *inode, struct file *file)
+-{
+-	return psi_open(file, psi_cpu_show);
+-}
+-
+ struct psi_trigger *psi_trigger_create(struct psi_group *group,
+ 			char *buf, size_t nbytes, enum psi_res res)
+ {
+@@ -1151,7 +1124,6 @@ struct psi_trigger *psi_trigger_create(struct psi_group *group,
  	t->event = 0;
  	t->last_event_time = 0;
  	init_waitqueue_head(&t->event_wait);
@@ -60390,7 +60815,7 @@ index 1652f2bb54b7..ab460f8b77d1 100644
  
  	mutex_lock(&group->trigger_lock);
  
-@@ -1180,15 +1190,19 @@ struct psi_trigger *psi_trigger_create(struct psi_group *group,
+@@ -1180,15 +1152,19 @@ struct psi_trigger *psi_trigger_create(struct psi_group *group,
  	return t;
  }
  
@@ -60414,7 +60839,7 @@ index 1652f2bb54b7..ab460f8b77d1 100644
  	/*
  	 * Wakeup waiters to stop polling. Can happen if cgroup is deleted
  	 * from under a polling process.
-@@ -1224,9 +1238,9 @@ static void psi_trigger_destroy(struct kref *ref)
+@@ -1224,9 +1200,9 @@ static void psi_trigger_destroy(struct kref *ref)
  	mutex_unlock(&group->trigger_lock);
  
  	/*
@@ -60427,7 +60852,7 @@ index 1652f2bb54b7..ab460f8b77d1 100644
  	 */
  	synchronize_rcu();
  	/*
-@@ -1243,18 +1257,6 @@ static void psi_trigger_destroy(struct kref *ref)
+@@ -1243,18 +1219,6 @@ static void psi_trigger_destroy(struct kref *ref)
  	kfree(t);
  }
  
@@ -60446,7 +60871,7 @@ index 1652f2bb54b7..ab460f8b77d1 100644
  __poll_t psi_trigger_poll(void **trigger_ptr,
  				struct file *file, poll_table *wait)
  {
-@@ -1264,24 +1266,15 @@ __poll_t psi_trigger_poll(void **trigger_ptr,
+@@ -1264,27 +1228,57 @@ __poll_t psi_trigger_poll(void **trigger_ptr,
  	if (static_branch_likely(&psi_disabled))
  		return DEFAULT_POLLMASK | EPOLLERR | EPOLLPRI;
  
@@ -60473,7 +60898,49 @@ index 1652f2bb54b7..ab460f8b77d1 100644
  	return ret;
  }
  
-@@ -1305,14 +1298,24 @@ static ssize_t psi_write(struct file *file, const char __user *user_buf,
++#ifdef CONFIG_PROC_FS
++static int psi_io_show(struct seq_file *m, void *v)
++{
++	return psi_show(m, &psi_system, PSI_IO);
++}
++
++static int psi_memory_show(struct seq_file *m, void *v)
++{
++	return psi_show(m, &psi_system, PSI_MEM);
++}
++
++static int psi_cpu_show(struct seq_file *m, void *v)
++{
++	return psi_show(m, &psi_system, PSI_CPU);
++}
++
++static int psi_open(struct file *file, int (*psi_show)(struct seq_file *, void *))
++{
++	if (file->f_mode & FMODE_WRITE && !capable(CAP_SYS_RESOURCE))
++		return -EPERM;
++
++	return single_open(file, psi_show, NULL);
++}
++
++static int psi_io_open(struct inode *inode, struct file *file)
++{
++	return psi_open(file, psi_io_show);
++}
++
++static int psi_memory_open(struct inode *inode, struct file *file)
++{
++	return psi_open(file, psi_memory_show);
++}
++
++static int psi_cpu_open(struct inode *inode, struct file *file)
++{
++	return psi_open(file, psi_cpu_show);
++}
++
+ static ssize_t psi_write(struct file *file, const char __user *user_buf,
+ 			 size_t nbytes, enum psi_res res)
+ {
+@@ -1305,14 +1299,24 @@ static ssize_t psi_write(struct file *file, const char __user *user_buf,
  
  	buf[buf_size - 1] = '\0';
  
@@ -60503,7 +60970,7 @@ index 1652f2bb54b7..ab460f8b77d1 100644
  	mutex_unlock(&seq->lock);
  
  	return nbytes;
-@@ -1347,7 +1350,7 @@ static int psi_fop_release(struct inode *inode, struct file *file)
+@@ -1347,7 +1351,7 @@ static int psi_fop_release(struct inode *inode, struct file *file)
  {
  	struct seq_file *seq = file->private_data;
  
@@ -60512,6 +60979,12 @@ index 1652f2bb54b7..ab460f8b77d1 100644
  	return single_release(inode, file);
  }
  
+@@ -1389,3 +1393,5 @@ static int __init psi_proc_init(void)
+ 	return 0;
+ }
+ module_init(psi_proc_init);
++
++#endif /* CONFIG_PROC_FS */
 diff --git a/kernel/sched/rt.c b/kernel/sched/rt.c
 index b48baaba2fc2..7b4f4fbbb404 100644
 --- a/kernel/sched/rt.c
@@ -70151,238 +70624,11 @@ index fe98e4f475ba..6661b1d6520f 100644
  		}
  	} else if (OPTIONS_MPTCP_MPC & opts->suboptions) {
  		u8 len, flag = MPTCP_CAP_HMAC_SHA256;
-diff --git a/net/mptcp/pm.c b/net/mptcp/pm.c
-index 6ab386ff3294..332ac6eda3ba 100644
---- a/net/mptcp/pm.c
-+++ b/net/mptcp/pm.c
-@@ -370,6 +370,7 @@ void mptcp_pm_data_init(struct mptcp_sock *msk)
- 	WRITE_ONCE(msk->pm.accept_subflow, false);
- 	WRITE_ONCE(msk->pm.remote_deny_join_id0, false);
- 	msk->pm.status = 0;
-+	bitmap_fill(msk->pm.id_avail_bitmap, MPTCP_PM_MAX_ADDR_ID + 1);
- 
- 	spin_lock_init(&msk->pm.lock);
- 	INIT_LIST_HEAD(&msk->pm.anno_list);
 diff --git a/net/mptcp/pm_netlink.c b/net/mptcp/pm_netlink.c
-index f523051f5aef..14e6d6f74518 100644
+index f523051f5aef..65764c8171b3 100644
 --- a/net/mptcp/pm_netlink.c
 +++ b/net/mptcp/pm_netlink.c
-@@ -38,9 +38,6 @@ struct mptcp_pm_add_entry {
- 	u8			retrans_times;
- };
- 
--#define MAX_ADDR_ID		255
--#define BITMAP_SZ DIV_ROUND_UP(MAX_ADDR_ID + 1, BITS_PER_LONG)
--
- struct pm_nl_pernet {
- 	/* protects pernet updates */
- 	spinlock_t		lock;
-@@ -52,14 +49,14 @@ struct pm_nl_pernet {
- 	unsigned int		local_addr_max;
- 	unsigned int		subflows_max;
- 	unsigned int		next_id;
--	unsigned long		id_bitmap[BITMAP_SZ];
-+	DECLARE_BITMAP(id_bitmap, MPTCP_PM_MAX_ADDR_ID + 1);
- };
- 
- #define MPTCP_PM_ADDR_MAX	8
- #define ADD_ADDR_RETRANS_MAX	3
- 
- static bool addresses_equal(const struct mptcp_addr_info *a,
--			    struct mptcp_addr_info *b, bool use_port)
-+			    const struct mptcp_addr_info *b, bool use_port)
- {
- 	bool addr_equals = false;
- 
-@@ -173,6 +170,9 @@ select_local_address(const struct pm_nl_pernet *pernet,
- 		if (!(entry->flags & MPTCP_PM_ADDR_FLAG_SUBFLOW))
- 			continue;
- 
-+		if (!test_bit(entry->addr.id, msk->pm.id_avail_bitmap))
-+			continue;
-+
- 		if (entry->addr.family != sk->sk_family) {
- #if IS_ENABLED(CONFIG_MPTCP_IPV6)
- 			if ((entry->addr.family == AF_INET &&
-@@ -183,23 +183,17 @@ select_local_address(const struct pm_nl_pernet *pernet,
- 				continue;
- 		}
- 
--		/* avoid any address already in use by subflows and
--		 * pending join
--		 */
--		if (!lookup_subflow_by_saddr(&msk->conn_list, &entry->addr)) {
--			ret = entry;
--			break;
--		}
-+		ret = entry;
-+		break;
- 	}
- 	rcu_read_unlock();
- 	return ret;
- }
- 
- static struct mptcp_pm_addr_entry *
--select_signal_address(struct pm_nl_pernet *pernet, unsigned int pos)
-+select_signal_address(struct pm_nl_pernet *pernet, struct mptcp_sock *msk)
- {
- 	struct mptcp_pm_addr_entry *entry, *ret = NULL;
--	int i = 0;
- 
- 	rcu_read_lock();
- 	/* do not keep any additional per socket state, just signal
-@@ -208,12 +202,14 @@ select_signal_address(struct pm_nl_pernet *pernet, unsigned int pos)
- 	 * can lead to additional addresses not being announced.
- 	 */
- 	list_for_each_entry_rcu(entry, &pernet->local_addr_list, list) {
-+		if (!test_bit(entry->addr.id, msk->pm.id_avail_bitmap))
-+			continue;
-+
- 		if (!(entry->flags & MPTCP_PM_ADDR_FLAG_SIGNAL))
- 			continue;
--		if (i++ == pos) {
--			ret = entry;
--			break;
--		}
-+
-+		ret = entry;
-+		break;
- 	}
- 	rcu_read_unlock();
- 	return ret;
-@@ -257,9 +253,11 @@ EXPORT_SYMBOL_GPL(mptcp_pm_get_local_addr_max);
- 
- static void check_work_pending(struct mptcp_sock *msk)
- {
--	if (msk->pm.add_addr_signaled == mptcp_pm_get_add_addr_signal_max(msk) &&
--	    (msk->pm.local_addr_used == mptcp_pm_get_local_addr_max(msk) ||
--	     msk->pm.subflows == mptcp_pm_get_subflows_max(msk)))
-+	struct pm_nl_pernet *pernet = net_generic(sock_net((struct sock *)msk), pm_nl_pernet_id);
-+
-+	if (msk->pm.subflows == mptcp_pm_get_subflows_max(msk) ||
-+	    (find_next_and_bit(pernet->id_bitmap, msk->pm.id_avail_bitmap,
-+			       MPTCP_PM_MAX_ADDR_ID + 1, 0) == MPTCP_PM_MAX_ADDR_ID + 1))
- 		WRITE_ONCE(msk->pm.work_pending, false);
- }
- 
-@@ -459,6 +457,49 @@ static unsigned int fill_remote_addresses_vec(struct mptcp_sock *msk, bool fullm
- 	return i;
- }
- 
-+static struct mptcp_pm_addr_entry *
-+__lookup_addr_by_id(struct pm_nl_pernet *pernet, unsigned int id)
-+{
-+	struct mptcp_pm_addr_entry *entry;
-+
-+	list_for_each_entry(entry, &pernet->local_addr_list, list) {
-+		if (entry->addr.id == id)
-+			return entry;
-+	}
-+	return NULL;
-+}
-+
-+static struct mptcp_pm_addr_entry *
-+__lookup_addr(struct pm_nl_pernet *pernet, const struct mptcp_addr_info *info,
-+	      bool lookup_by_id)
-+{
-+	struct mptcp_pm_addr_entry *entry;
-+
-+	list_for_each_entry(entry, &pernet->local_addr_list, list) {
-+		if ((!lookup_by_id && addresses_equal(&entry->addr, info, true)) ||
-+		    (lookup_by_id && entry->addr.id == info->id))
-+			return entry;
-+	}
-+	return NULL;
-+}
-+
-+static int
-+lookup_id_by_addr(struct pm_nl_pernet *pernet, const struct mptcp_addr_info *addr)
-+{
-+	struct mptcp_pm_addr_entry *entry;
-+	int ret = -1;
-+
-+	rcu_read_lock();
-+	list_for_each_entry(entry, &pernet->local_addr_list, list) {
-+		if (addresses_equal(&entry->addr, addr, entry->addr.port)) {
-+			ret = entry->addr.id;
-+			break;
-+		}
-+	}
-+	rcu_read_unlock();
-+	return ret;
-+}
-+
- static void mptcp_pm_create_subflow_or_signal_addr(struct mptcp_sock *msk)
- {
- 	struct sock *sk = (struct sock *)msk;
-@@ -474,6 +515,19 @@ static void mptcp_pm_create_subflow_or_signal_addr(struct mptcp_sock *msk)
- 	local_addr_max = mptcp_pm_get_local_addr_max(msk);
- 	subflows_max = mptcp_pm_get_subflows_max(msk);
- 
-+	/* do lazy endpoint usage accounting for the MPC subflows */
-+	if (unlikely(!(msk->pm.status & BIT(MPTCP_PM_MPC_ENDPOINT_ACCOUNTED))) && msk->first) {
-+		struct mptcp_addr_info local;
-+		int mpc_id;
-+
-+		local_address((struct sock_common *)msk->first, &local);
-+		mpc_id = lookup_id_by_addr(pernet, &local);
-+		if (mpc_id < 0)
-+			__clear_bit(mpc_id, msk->pm.id_avail_bitmap);
-+
-+		msk->pm.status |= BIT(MPTCP_PM_MPC_ENDPOINT_ACCOUNTED);
-+	}
-+
- 	pr_debug("local %d:%d signal %d:%d subflows %d:%d\n",
- 		 msk->pm.local_addr_used, local_addr_max,
- 		 msk->pm.add_addr_signaled, add_addr_signal_max,
-@@ -481,21 +535,16 @@ static void mptcp_pm_create_subflow_or_signal_addr(struct mptcp_sock *msk)
- 
- 	/* check first for announce */
- 	if (msk->pm.add_addr_signaled < add_addr_signal_max) {
--		local = select_signal_address(pernet,
--					      msk->pm.add_addr_signaled);
-+		local = select_signal_address(pernet, msk);
- 
- 		if (local) {
- 			if (mptcp_pm_alloc_anno_list(msk, local)) {
-+				__clear_bit(local->addr.id, msk->pm.id_avail_bitmap);
- 				msk->pm.add_addr_signaled++;
- 				mptcp_pm_announce_addr(msk, &local->addr, false);
- 				mptcp_pm_nl_addr_send_ack(msk);
- 			}
--		} else {
--			/* pick failed, avoid fourther attempts later */
--			msk->pm.local_addr_used = add_addr_signal_max;
- 		}
--
--		check_work_pending(msk);
- 	}
- 
- 	/* check if should create a new subflow */
-@@ -509,19 +558,16 @@ static void mptcp_pm_create_subflow_or_signal_addr(struct mptcp_sock *msk)
- 			int i, nr;
- 
- 			msk->pm.local_addr_used++;
--			check_work_pending(msk);
- 			nr = fill_remote_addresses_vec(msk, fullmesh, addrs);
-+			if (nr)
-+				__clear_bit(local->addr.id, msk->pm.id_avail_bitmap);
- 			spin_unlock_bh(&msk->pm.lock);
- 			for (i = 0; i < nr; i++)
- 				__mptcp_subflow_connect(sk, &local->addr, &addrs[i]);
- 			spin_lock_bh(&msk->pm.lock);
--			return;
- 		}
--
--		/* lookup failed, avoid fourther attempts later */
--		msk->pm.local_addr_used = local_addr_max;
--		check_work_pending(msk);
- 	}
-+	check_work_pending(msk);
- }
- 
- static void mptcp_pm_nl_fully_established(struct mptcp_sock *msk)
-@@ -710,6 +756,8 @@ static void mptcp_pm_nl_rm_addr_or_subflow(struct mptcp_sock *msk,
+@@ -710,6 +710,8 @@ static void mptcp_pm_nl_rm_addr_or_subflow(struct mptcp_sock *msk,
  		return;
  
  	for (i = 0; i < rm_list->nr; i++) {
@@ -70391,7 +70637,7 @@ index f523051f5aef..14e6d6f74518 100644
  		list_for_each_entry_safe(subflow, tmp, &msk->conn_list, node) {
  			struct sock *ssk = mptcp_subflow_tcp_sock(subflow);
  			int how = RCV_SHUTDOWN | SEND_SHUTDOWN;
-@@ -729,15 +777,20 @@ static void mptcp_pm_nl_rm_addr_or_subflow(struct mptcp_sock *msk,
+@@ -729,15 +731,19 @@ static void mptcp_pm_nl_rm_addr_or_subflow(struct mptcp_sock *msk,
  			mptcp_close_ssk(sk, ssk, subflow);
  			spin_lock_bh(&msk->pm.lock);
  
@@ -70405,7 +70651,6 @@ index f523051f5aef..14e6d6f74518 100644
  			msk->pm.subflows--;
  			__MPTCP_INC_STATS(sock_net(sk), rm_type);
  		}
-+		__set_bit(rm_list->ids[i], msk->pm.id_avail_bitmap);
 +		if (!removed)
 +			continue;
 +
@@ -70418,137 +70663,8 @@ index f523051f5aef..14e6d6f74518 100644
  	}
  }
  
-@@ -758,6 +811,9 @@ void mptcp_pm_nl_work(struct mptcp_sock *msk)
- 
- 	msk_owned_by_me(msk);
- 
-+	if (!(pm->status & MPTCP_PM_WORK_MASK))
-+		return;
-+
- 	spin_lock_bh(&msk->pm.lock);
- 
- 	pr_debug("msk=%p status=%x", msk, pm->status);
-@@ -803,7 +859,7 @@ static int mptcp_pm_nl_append_new_local_addr(struct pm_nl_pernet *pernet,
- 	/* to keep the code simple, don't do IDR-like allocation for address ID,
- 	 * just bail when we exceed limits
- 	 */
--	if (pernet->next_id == MAX_ADDR_ID)
-+	if (pernet->next_id == MPTCP_PM_MAX_ADDR_ID)
- 		pernet->next_id = 1;
- 	if (pernet->addrs >= MPTCP_PM_ADDR_MAX)
- 		goto out;
-@@ -823,16 +879,15 @@ static int mptcp_pm_nl_append_new_local_addr(struct pm_nl_pernet *pernet,
- 	if (!entry->addr.id) {
- find_next:
- 		entry->addr.id = find_next_zero_bit(pernet->id_bitmap,
--						    MAX_ADDR_ID + 1,
-+						    MPTCP_PM_MAX_ADDR_ID + 1,
- 						    pernet->next_id);
--		if ((!entry->addr.id || entry->addr.id > MAX_ADDR_ID) &&
--		    pernet->next_id != 1) {
-+		if (!entry->addr.id && pernet->next_id != 1) {
- 			pernet->next_id = 1;
- 			goto find_next;
- 		}
- 	}
- 
--	if (!entry->addr.id || entry->addr.id > MAX_ADDR_ID)
-+	if (!entry->addr.id)
- 		goto out;
- 
- 	__set_bit(entry->addr.id, pernet->id_bitmap);
-@@ -1191,18 +1246,6 @@ static int mptcp_nl_cmd_add_addr(struct sk_buff *skb, struct genl_info *info)
- 	return 0;
- }
- 
--static struct mptcp_pm_addr_entry *
--__lookup_addr_by_id(struct pm_nl_pernet *pernet, unsigned int id)
--{
--	struct mptcp_pm_addr_entry *entry;
--
--	list_for_each_entry(entry, &pernet->local_addr_list, list) {
--		if (entry->addr.id == id)
--			return entry;
--	}
--	return NULL;
--}
--
- int mptcp_pm_get_flags_and_ifindex_by_id(struct net *net, unsigned int id,
- 					 u8 *flags, int *ifindex)
- {
-@@ -1461,7 +1504,7 @@ static int mptcp_nl_cmd_flush_addrs(struct sk_buff *skb, struct genl_info *info)
- 	list_splice_init(&pernet->local_addr_list, &free_list);
- 	__reset_counters(pernet);
- 	pernet->next_id = 1;
--	bitmap_zero(pernet->id_bitmap, MAX_ADDR_ID + 1);
-+	bitmap_zero(pernet->id_bitmap, MPTCP_PM_MAX_ADDR_ID + 1);
- 	spin_unlock_bh(&pernet->lock);
- 	mptcp_nl_remove_addrs_list(sock_net(skb->sk), &free_list);
- 	synchronize_rcu();
-@@ -1571,7 +1614,7 @@ static int mptcp_nl_cmd_dump_addrs(struct sk_buff *msg,
- 	pernet = net_generic(net, pm_nl_pernet_id);
- 
- 	spin_lock_bh(&pernet->lock);
--	for (i = id; i < MAX_ADDR_ID + 1; i++) {
-+	for (i = id; i < MPTCP_PM_MAX_ADDR_ID + 1; i++) {
- 		if (test_bit(i, pernet->id_bitmap)) {
- 			entry = __lookup_addr_by_id(pernet, i);
- 			if (!entry)
-@@ -1705,31 +1748,40 @@ static int mptcp_nl_addr_backup(struct net *net,
- 
- static int mptcp_nl_cmd_set_flags(struct sk_buff *skb, struct genl_info *info)
- {
-+	struct mptcp_pm_addr_entry addr = { .addr = { .family = AF_UNSPEC }, }, *entry;
- 	struct nlattr *attr = info->attrs[MPTCP_PM_ATTR_ADDR];
- 	struct pm_nl_pernet *pernet = genl_info_pm_nl(info);
--	struct mptcp_pm_addr_entry addr, *entry;
- 	struct net *net = sock_net(skb->sk);
--	u8 bkup = 0;
-+	u8 bkup = 0, lookup_by_id = 0;
- 	int ret;
- 
--	ret = mptcp_pm_parse_addr(attr, info, true, &addr);
-+	ret = mptcp_pm_parse_addr(attr, info, false, &addr);
- 	if (ret < 0)
- 		return ret;
- 
- 	if (addr.flags & MPTCP_PM_ADDR_FLAG_BACKUP)
- 		bkup = 1;
-+	if (addr.addr.family == AF_UNSPEC) {
-+		lookup_by_id = 1;
-+		if (!addr.addr.id)
-+			return -EOPNOTSUPP;
-+	}
- 
--	list_for_each_entry(entry, &pernet->local_addr_list, list) {
--		if (addresses_equal(&entry->addr, &addr.addr, true)) {
--			mptcp_nl_addr_backup(net, &entry->addr, bkup);
--
--			if (bkup)
--				entry->flags |= MPTCP_PM_ADDR_FLAG_BACKUP;
--			else
--				entry->flags &= ~MPTCP_PM_ADDR_FLAG_BACKUP;
--		}
-+	spin_lock_bh(&pernet->lock);
-+	entry = __lookup_addr(pernet, &addr.addr, lookup_by_id);
-+	if (!entry) {
-+		spin_unlock_bh(&pernet->lock);
-+		return -EINVAL;
- 	}
- 
-+	if (bkup)
-+		entry->flags |= MPTCP_PM_ADDR_FLAG_BACKUP;
-+	else
-+		entry->flags &= ~MPTCP_PM_ADDR_FLAG_BACKUP;
-+	addr = *entry;
-+	spin_unlock_bh(&pernet->lock);
-+
-+	mptcp_nl_addr_backup(net, &addr.addr, bkup);
- 	return 0;
- }
- 
 diff --git a/net/mptcp/protocol.c b/net/mptcp/protocol.c
-index 54613f5b7521..70a3cac85f7b 100644
+index 54613f5b7521..0cd55e4c30fa 100644
 --- a/net/mptcp/protocol.c
 +++ b/net/mptcp/protocol.c
 @@ -972,7 +972,9 @@ static void __mptcp_mem_reclaim_partial(struct sock *sk)
@@ -70562,55 +70678,6 @@ index 54613f5b7521..70a3cac85f7b 100644
  	sk_mem_reclaim_partial(sk);
  }
  
-@@ -2414,8 +2416,7 @@ static void mptcp_worker(struct work_struct *work)
- 
- 	mptcp_check_fastclose(msk);
- 
--	if (msk->pm.status)
--		mptcp_pm_nl_work(msk);
-+	mptcp_pm_nl_work(msk);
- 
- 	if (test_and_clear_bit(MPTCP_WORK_EOF, &msk->flags))
- 		mptcp_check_for_eof(msk);
-diff --git a/net/mptcp/protocol.h b/net/mptcp/protocol.h
-index d87cc040352e..0387ad9fb43f 100644
---- a/net/mptcp/protocol.h
-+++ b/net/mptcp/protocol.h
-@@ -174,16 +174,25 @@ enum mptcp_pm_status {
- 	MPTCP_PM_ADD_ADDR_SEND_ACK,
- 	MPTCP_PM_RM_ADDR_RECEIVED,
- 	MPTCP_PM_ESTABLISHED,
--	MPTCP_PM_ALREADY_ESTABLISHED,	/* persistent status, set after ESTABLISHED event */
- 	MPTCP_PM_SUBFLOW_ESTABLISHED,
-+	MPTCP_PM_ALREADY_ESTABLISHED,	/* persistent status, set after ESTABLISHED event */
-+	MPTCP_PM_MPC_ENDPOINT_ACCOUNTED /* persistent status, set after MPC local address is
-+					 * accounted int id_avail_bitmap
-+					 */
- };
- 
-+/* Status bits below MPTCP_PM_ALREADY_ESTABLISHED need pm worker actions */
-+#define MPTCP_PM_WORK_MASK ((1 << MPTCP_PM_ALREADY_ESTABLISHED) - 1)
-+
- enum mptcp_addr_signal_status {
- 	MPTCP_ADD_ADDR_SIGNAL,
- 	MPTCP_ADD_ADDR_ECHO,
- 	MPTCP_RM_ADDR_SIGNAL,
- };
- 
-+/* max value of mptcp_addr_info.id */
-+#define MPTCP_PM_MAX_ADDR_ID		U8_MAX
-+
- struct mptcp_pm_data {
- 	struct mptcp_addr_info local;
- 	struct mptcp_addr_info remote;
-@@ -202,6 +211,7 @@ struct mptcp_pm_data {
- 	u8		local_addr_used;
- 	u8		subflows;
- 	u8		status;
-+	DECLARE_BITMAP(id_avail_bitmap, MPTCP_PM_MAX_ADDR_ID + 1);
- 	struct mptcp_rm_list rm_list_tx;
- 	struct mptcp_rm_list rm_list_rx;
- };
 diff --git a/net/netfilter/nf_conntrack_core.c b/net/netfilter/nf_conntrack_core.c
 index 4712a90a1820..7f7997460764 100644
 --- a/net/netfilter/nf_conntrack_core.c
@@ -74593,6 +74660,27 @@ index 9c4126731457..34cb0a12ba18 100755
  	def test_no_tests_json(self):
  		result = self._json_for('test_is_test_passed-no_tests_run_with_header.log')
  		self.assertEqual(0, len(result['sub_groups']))
+diff --git a/tools/testing/scatterlist/linux/mm.h b/tools/testing/scatterlist/linux/mm.h
+index 16ec895bbe5f..5bd9e6e80625 100644
+--- a/tools/testing/scatterlist/linux/mm.h
++++ b/tools/testing/scatterlist/linux/mm.h
+@@ -74,7 +74,7 @@ static inline unsigned long page_to_phys(struct page *page)
+ 	      __UNIQUE_ID(min1_), __UNIQUE_ID(min2_),   \
+ 	      x, y)
+ 
+-#define preemptible() (1)
++#define pagefault_disabled() (0)
+ 
+ static inline void *kmap(struct page *page)
+ {
+@@ -127,6 +127,7 @@ kmalloc_array(unsigned int n, unsigned int size, unsigned int flags)
+ #define kmemleak_free(a)
+ 
+ #define PageSlab(p) (0)
++#define flush_dcache_page(p)
+ 
+ #define MAX_ERRNO	4095
+ 
 diff --git a/tools/testing/selftests/bpf/btf_helpers.c b/tools/testing/selftests/bpf/btf_helpers.c
 index b5b6b013a245..3d1a748d09d8 100644
 --- a/tools/testing/selftests/bpf/btf_helpers.c
@@ -74944,48 +75032,6 @@ index d0fe2fdce58c..db2a17559c3d 100644
  			run_guest(svm->vmcb, svm->vmcb_gpa);
  		} else {
  			vmlaunch();
-diff --git a/tools/testing/selftests/net/mptcp/mptcp_join.sh b/tools/testing/selftests/net/mptcp/mptcp_join.sh
-index 7ef639a9d4a6..d188ea0a5fc5 100755
---- a/tools/testing/selftests/net/mptcp/mptcp_join.sh
-+++ b/tools/testing/selftests/net/mptcp/mptcp_join.sh
-@@ -75,6 +75,7 @@ init()
- 
- 		# let $ns2 reach any $ns1 address from any interface
- 		ip -net "$ns2" route add default via 10.0.$i.1 dev ns2eth$i metric 10$i
-+		ip -net "$ns2" route add default via dead:beef:$i::1 dev ns2eth$i metric 10$i
- 	done
- }
- 
-@@ -1071,7 +1072,10 @@ signal_address_tests()
- 	ip netns exec $ns2 ./pm_nl_ctl add 10.0.3.2 flags signal
- 	ip netns exec $ns2 ./pm_nl_ctl add 10.0.4.2 flags signal
- 	run_tests $ns1 $ns2 10.0.1.1
--	chk_add_nr 4 4
-+
-+	# the server will not signal the address terminating
-+	# the MPC subflow
-+	chk_add_nr 3 3
- }
- 
- link_failure_tests()
-@@ -1386,7 +1390,7 @@ ipv6_tests()
- 	reset
- 	ip netns exec $ns1 ./pm_nl_ctl limits 0 1
- 	ip netns exec $ns2 ./pm_nl_ctl limits 0 1
--	ip netns exec $ns2 ./pm_nl_ctl add dead:beef:3::2 flags subflow
-+	ip netns exec $ns2 ./pm_nl_ctl add dead:beef:3::2 dev ns2eth3 flags subflow
- 	run_tests $ns1 $ns2 dead:beef:1::1 0 0 0 slow
- 	chk_join_nr "single subflow IPv6" 1 1 1
- 
-@@ -1421,7 +1425,7 @@ ipv6_tests()
- 	ip netns exec $ns1 ./pm_nl_ctl limits 0 2
- 	ip netns exec $ns1 ./pm_nl_ctl add dead:beef:2::1 flags signal
- 	ip netns exec $ns2 ./pm_nl_ctl limits 1 2
--	ip netns exec $ns2 ./pm_nl_ctl add dead:beef:3::2 flags subflow
-+	ip netns exec $ns2 ./pm_nl_ctl add dead:beef:3::2 dev ns2eth3 flags subflow
- 	run_tests $ns1 $ns2 dead:beef:1::1 0 -1 -1 slow
- 	chk_join_nr "remove subflow and signal IPv6" 2 2 2
- 	chk_add_nr 1 1
 diff --git a/tools/testing/selftests/powerpc/security/spectre_v2.c b/tools/testing/selftests/powerpc/security/spectre_v2.c
 index adc2b7294e5f..83647b8277e7 100644
 --- a/tools/testing/selftests/powerpc/security/spectre_v2.c
@@ -75335,10 +75381,10 @@ index d3d0d108924d..70a02301f4c2 100644
  echo "Method is $method"
  
 diff --git a/usr/include/Makefile b/usr/include/Makefile
-index 1c2ae1368079..dbaa4ddbe8a4 100644
+index 1c2ae1368079..adc6cb258736 100644
 --- a/usr/include/Makefile
 +++ b/usr/include/Makefile
-@@ -28,6 +28,7 @@ no-header-test += linux/am437x-vpfe.h
+@@ -28,13 +28,13 @@ no-header-test += linux/am437x-vpfe.h
  no-header-test += linux/android/binder.h
  no-header-test += linux/android/binderfs.h
  no-header-test += linux/coda.h
@@ -75346,6 +75392,13 @@ index 1c2ae1368079..dbaa4ddbe8a4 100644
  no-header-test += linux/errqueue.h
  no-header-test += linux/fsmap.h
  no-header-test += linux/hdlc/ioctl.h
+ no-header-test += linux/ivtv.h
+ no-header-test += linux/kexec.h
+ no-header-test += linux/matroxfb.h
+-no-header-test += linux/nfc.h
+ no-header-test += linux/omap3isp.h
+ no-header-test += linux/omapfb.h
+ no-header-test += linux/patchkey.h
 diff --git a/virt/kvm/kvm_main.c b/virt/kvm/kvm_main.c
 index 72c4e6b39389..71ddc7a8bc30 100644
 --- a/virt/kvm/kvm_main.c
