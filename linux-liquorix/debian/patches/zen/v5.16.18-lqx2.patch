@@ -928,7 +928,7 @@ index 000000000000..a54c5637c455
 + ``max_gen-1`` aren't fully aged and therefore can't be evicted. Use
 + ``nr_to_reclaim`` to limit the number of pages to evict.
 diff --git a/Makefile b/Makefile
-index 08510230b42f..2a3c6a237c2a 100644
+index 08510230b42f..7a9c9f1df775 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -1,9 +1,9 @@
@@ -939,7 +939,7 @@ index 08510230b42f..2a3c6a237c2a 100644
 -EXTRAVERSION =
 -NAME = Gobble Gobble
 +SUBLEVEL = 18
-+EXTRAVERSION = -lqx1
++EXTRAVERSION = -lqx2
 +NAME = Super Popcorn Galaxy
  
  # *DOCUMENTATION*
@@ -84962,34 +84962,23 @@ index 2e5565067355..554454cb8693 100644
  #endif
  
 diff --git a/include/linux/sched.h b/include/linux/sched.h
-index 78c351e35fec..1b70b425b524 100644
+index 78c351e35fec..8294c39f06db 100644
 --- a/include/linux/sched.h
 +++ b/include/linux/sched.h
-@@ -748,8 +748,14 @@ struct task_struct {
+@@ -748,7 +748,12 @@ struct task_struct {
  	unsigned int			ptrace;
  
  #ifdef CONFIG_SMP
--	int				on_cpu;
- 	struct __call_single_node	wake_entry;
++	struct __call_single_node	wake_entry;
 +#endif
 +#if defined(CONFIG_SMP) || defined(CONFIG_SCHED_ALT)
-+	int				on_cpu;
+ 	int				on_cpu;
 +#endif
-+
-+#ifdef CONFIG_SMP
-+#ifndef CONFIG_SCHED_ALT
++#if defined(CONFIG_SMP) && !defined(CONFIG_SCHED_ALT)
+ 	struct __call_single_node	wake_entry;
  	unsigned int			wakee_flips;
  	unsigned long			wakee_flip_decay_ts;
- 	struct task_struct		*last_wakee;
-@@ -763,6 +769,7 @@ struct task_struct {
- 	 */
- 	int				recent_used_cpu;
- 	int				wake_cpu;
-+#endif /* !CONFIG_SCHED_ALT */
- #endif
- 	int				on_rq;
- 
-@@ -771,6 +778,20 @@ struct task_struct {
+@@ -771,6 +776,20 @@ struct task_struct {
  	int				normal_prio;
  	unsigned int			rt_priority;
  
@@ -85010,7 +84999,7 @@ index 78c351e35fec..1b70b425b524 100644
  	struct sched_entity		se;
  	struct sched_rt_entity		rt;
  	struct sched_dl_entity		dl;
-@@ -781,6 +802,7 @@ struct task_struct {
+@@ -781,6 +800,7 @@ struct task_struct {
  	unsigned long			core_cookie;
  	unsigned int			core_occupation;
  #endif
@@ -85018,7 +85007,7 @@ index 78c351e35fec..1b70b425b524 100644
  
  #ifdef CONFIG_CGROUP_SCHED
  	struct task_group		*sched_task_group;
-@@ -909,6 +931,10 @@ struct task_struct {
+@@ -909,6 +929,10 @@ struct task_struct {
  #ifdef CONFIG_MEMCG
  	unsigned			in_user_fault:1;
  #endif
@@ -85029,7 +85018,7 @@ index 78c351e35fec..1b70b425b524 100644
  #ifdef CONFIG_COMPAT_BRK
  	unsigned			brk_randomized:1;
  #endif
-@@ -1501,6 +1527,15 @@ struct task_struct {
+@@ -1501,6 +1525,15 @@ struct task_struct {
  	 */
  };
  
@@ -85045,7 +85034,7 @@ index 78c351e35fec..1b70b425b524 100644
  static inline struct pid *task_pid(struct task_struct *task)
  {
  	return task->thread_pid;
-@@ -1672,7 +1707,6 @@ extern struct pid *cad_pid;
+@@ -1672,7 +1705,6 @@ extern struct pid *cad_pid;
  #define PF_MEMALLOC		0x00000800	/* Allocating memory */
  #define PF_NPROC_EXCEEDED	0x00001000	/* set_user() noticed that RLIMIT_NPROC was exceeded */
  #define PF_USED_MATH		0x00002000	/* If unset the fpu must be initialized before use */
@@ -90581,10 +90570,10 @@ index c7421f2d05e1..9b32442ff2ca 100644
  obj-$(CONFIG_CPU_FREQ_GOV_SCHEDUTIL) += cpufreq_schedutil.o
 diff --git a/kernel/sched/alt_core.c b/kernel/sched/alt_core.c
 new file mode 100644
-index 000000000000..a3db2abb029c
+index 000000000000..64301ead1358
 --- /dev/null
 +++ b/kernel/sched/alt_core.c
-@@ -0,0 +1,7780 @@
+@@ -0,0 +1,7799 @@
 +/*
 + *  kernel/sched/alt_core.c
 + *
@@ -90615,7 +90604,6 @@ index 000000000000..a3db2abb029c
 +#include <linux/kprobes.h>
 +#include <linux/mmu_context.h>
 +#include <linux/nmi.h>
-+#include <linux/profile.h>
 +#include <linux/rcupdate_wait.h>
 +#include <linux/security.h>
 +#include <linux/syscalls.h>
@@ -90654,7 +90642,7 @@ index 000000000000..a3db2abb029c
 +#define sched_feat(x)	(0)
 +#endif /* CONFIG_SCHED_DEBUG */
 +
-+#define ALT_SCHED_VERSION "v5.15-r1"
++#define ALT_SCHED_VERSION "v5.16-r1"
 +
 +/* rt_prio(prio) defined in include/linux/sched/rt.h */
 +#define rt_task(p)		rt_prio((p)->prio)
@@ -91377,6 +91365,25 @@ index 000000000000..a3db2abb029c
 +	return task_on_rq_queued(p);
 +}
 +
++unsigned long get_wchan(struct task_struct *p)
++{
++	unsigned long ip = 0;
++	unsigned int state;
++
++	if (!p || p == current)
++		return 0;
++
++	/* Only get wchan if task is blocked and we can keep it that way. */
++	raw_spin_lock_irq(&p->pi_lock);
++	state = READ_ONCE(p->__state);
++	smp_rmb(); /* see try_to_wake_up() */
++	if (state != TASK_RUNNING && state != TASK_WAKING && !p->on_rq)
++		ip = __get_wchan(p);
++	raw_spin_unlock_irq(&p->pi_lock);
++
++	return ip;
++}
++
 +/*
 + * Add/Remove/Requeue task to/from the runqueue routines
 + * Context: rq->lock
@@ -91416,25 +91423,6 @@ index 000000000000..a3db2abb029c
 +#endif
 +
 +	sched_update_tick_dependency(rq);
-+}
-+
-+unsigned long get_wchan(struct task_struct *p)
-+{
-+	unsigned long ip = 0;
-+	unsigned int state;
-+
-+	if (!p || p == current)
-+		return 0;
-+
-+	/* Only get wchan if task is blocked and we can keep it that way. */
-+	raw_spin_lock_irq(&p->pi_lock);
-+	state = READ_ONCE(p->__state);
-+	smp_rmb(); /* see try_to_wake_up() */
-+	if (state != TASK_RUNNING && state != TASK_WAKING && !p->on_rq)
-+		ip = __get_wchan(p);
-+	raw_spin_unlock_irq(&p->pi_lock);
-+
-+	return ip;
 +}
 +
 +static inline void enqueue_task(struct task_struct *p, struct rq *rq, int flags)
@@ -92004,6 +91992,7 @@ index 000000000000..a3db2abb029c
 +	 * per-task data have been completed by this moment.
 +	 */
 +	smp_wmb();
++
 +	WRITE_ONCE(task_thread_info(p)->cpu, cpu);
 +#endif
 +}
@@ -92578,7 +92567,7 @@ index 000000000000..a3db2abb029c
 +#endif
 +	    sched_rq_watermark_and(&tmp, &chk_mask, 0, false) ||
 +	    sched_rq_watermark_and(&tmp, &chk_mask,
-+			SCHED_BITS - task_sched_prio(p), false))
++			SCHED_BITS - task_sched_prio(p) - 1, false))
 +		return best_mask_cpu(task_cpu(p), &tmp);
 +
 +	return best_mask_cpu(task_cpu(p), &chk_mask);
@@ -92921,9 +92910,10 @@ index 000000000000..a3db2abb029c
 +	rq = this_rq();
 +
 +#ifdef CONFIG_SMP
-+	if (cpu == rq->cpu)
++	if (cpu == rq->cpu) {
 +		__schedstat_inc(rq->ttwu_local);
-+	else {
++		__schedstat_inc(p->stats.nr_wakeups_local);
++	} else {
 +		/** Alt schedule FW ToDo:
 +		 * How to do ttwu_wake_remote
 +		 */
@@ -92931,6 +92921,7 @@ index 000000000000..a3db2abb029c
 +#endif /* CONFIG_SMP */
 +
 +	__schedstat_inc(rq->ttwu_count);
++	__schedstat_inc(p->stats.nr_wakeups);
 +}
 +
 +/*
@@ -93121,7 +93112,7 @@ index 000000000000..a3db2abb029c
 +	raw_spin_lock_irqsave(&rq->lock, flags);
 +	if (is_idle_task(rq->curr))
 +		resched_curr(rq);
-+	/* Else CPU is not idle, do nothing here: */
++	/* Else CPU is not idle, do nothing here */
 +	raw_spin_unlock_irqrestore(&rq->lock, flags);
 +
 +out:
@@ -93541,9 +93532,9 @@ index 000000000000..a3db2abb029c
 +
 +	/*
 +	 * At this point the task is pinned; either:
-+	 *  - blocked and we're holding off wakeups	 (pi->lock)
-+	 *  - woken, and we're holding off enqueue	 (rq->lock)
-+	 *  - queued, and we're holding off schedule	 (rq->lock)
++	 *  - blocked and we're holding off wakeups      (pi->lock)
++	 *  - woken, and we're holding off enqueue       (rq->lock)
++	 *  - queued, and we're holding off schedule     (rq->lock)
 +	 *  - running, and we're holding off de-schedule (rq->lock)
 +	 *
 +	 * The called function (@func) can use: task_curr(), p->on_rq and
@@ -93593,6 +93584,11 @@ index 000000000000..a3db2abb029c
 +	p->utime			= 0;
 +	p->stime			= 0;
 +	p->sched_time			= 0;
++
++#ifdef CONFIG_SCHEDSTATS
++	/* Even if schedstat is disabled, there should not be garbage */
++	memset(&p->stats, 0, sizeof(p->stats));
++#endif
 +
 +#ifdef CONFIG_PREEMPT_NOTIFIERS
 +	INIT_HLIST_HEAD(&p->preempt_notifiers);
@@ -93662,11 +93658,8 @@ index 000000000000..a3db2abb029c
 +	struct rq *rq;
 +
 +	/*
-+	 * The child is not yet in the pid-hash so no cgroup attach races,
-+	 * and the cgroup is pinned to this child due to cgroup_fork()
-+	 * is ran before sched_fork().
-+	 *
-+	 * Silence PROVE_RCU.
++	 * Because we're not yet on the pid-hash, p->pi_lock isn't strictly
++	 * required yet, but lockdep gets upset if rules are violated.
 +	 */
 +	raw_spin_lock_irqsave(&p->pi_lock, flags);
 +	/*
@@ -93701,9 +93694,6 @@ index 000000000000..a3db2abb029c
 +
 +void sched_post_fork(struct task_struct *p)
 +{
-+#ifdef CONFIG_UCLAMP_TASK
-+       uclamp_post_fork(p);
-+#endif
 +}
 +
 +#ifdef CONFIG_SCHEDSTATS
@@ -96886,9 +96876,7 @@ index 000000000000..a3db2abb029c
 +
 +	if (spin_needbreak(lock) || resched) {
 +		spin_unlock(lock);
-+		if (resched)
-+			preempt_schedule_common();
-+		else
++		if (!_cond_resched())
 +			cpu_relax();
 +		ret = 1;
 +		spin_lock(lock);
@@ -96906,9 +96894,7 @@ index 000000000000..a3db2abb029c
 +
 +	if (rwlock_needbreak(lock) || resched) {
 +		read_unlock(lock);
-+		if (resched)
-+			preempt_schedule_common();
-+		else
++		if (!_cond_resched())
 +			cpu_relax();
 +		ret = 1;
 +		read_lock(lock);
@@ -96926,9 +96912,7 @@ index 000000000000..a3db2abb029c
 +
 +	if (rwlock_needbreak(lock) || resched) {
 +		write_unlock(lock);
-+		if (resched)
-+			preempt_schedule_common();
-+		else
++		if (!_cond_resched())
 +			cpu_relax();
 +		ret = 1;
 +		write_lock(lock);
@@ -97953,12 +97937,6 @@ index 000000000000..a3db2abb029c
 +}
 +
 +#ifdef CONFIG_DEBUG_ATOMIC_SLEEP
-+static inline int preempt_count_equals(int preempt_offset)
-+{
-+	int nested = preempt_count() + rcu_preempt_depth();
-+
-+	return (nested == preempt_offset);
-+}
 +
 +void __might_sleep(const char *file, int line)
 +{
@@ -97978,7 +97956,28 @@ index 000000000000..a3db2abb029c
 +}
 +EXPORT_SYMBOL(__might_sleep);
 +
-+void __might_resched(const char *file, int line, int preempt_offset)
++static void print_preempt_disable_ip(int preempt_offset, unsigned long ip)
++{
++	if (!IS_ENABLED(CONFIG_DEBUG_PREEMPT))
++		return;
++
++	if (preempt_count() == preempt_offset)
++		return;
++
++	pr_err("Preemption disabled at:");
++	print_ip_sym(KERN_ERR, ip);
++}
++
++static inline bool resched_offsets_ok(unsigned int offsets)
++{
++	unsigned int nested = preempt_count();
++
++	nested += rcu_preempt_depth() << MIGHT_RESCHED_RCU_SHIFT;
++
++	return nested == offsets;
++}
++
++void __might_resched(const char *file, int line, unsigned int offsets)
 +{
 +	/* Ratelimiting timestamp: */
 +	static unsigned long prev_jiffy;
@@ -97988,7 +97987,7 @@ index 000000000000..a3db2abb029c
 +	/* WARN_ON_ONCE() by default, no rate limit required: */
 +	rcu_sleep_check();
 +
-+	if ((preempt_count_equals(preempt_offset) && !irqs_disabled() &&
++	if ((resched_offsets_ok(offsets) && !irqs_disabled() &&
 +	     !is_idle_task(current) && !current->non_block_count) ||
 +	    system_state == SYSTEM_BOOTING || system_state > SYSTEM_RUNNING ||
 +	    oops_in_progress)
@@ -98005,6 +98004,13 @@ index 000000000000..a3db2abb029c
 +	pr_err("in_atomic(): %d, irqs_disabled(): %d, non_block: %d, pid: %d, name: %s\n",
 +	       in_atomic(), irqs_disabled(), current->non_block_count,
 +	       current->pid, current->comm);
++	pr_err("preempt_count: %x, expected: %x\n", preempt_count(),
++	       offsets & MIGHT_RESCHED_PREEMPT_MASK);
++
++	if (IS_ENABLED(CONFIG_PREEMPT_RCU)) {
++		pr_err("RCU nest depth: %d, expected: %u\n",
++		       rcu_preempt_depth(), offsets >> MIGHT_RESCHED_RCU_SHIFT);
++	}
 +
 +	if (task_stack_end_corrupted(current))
 +		pr_emerg("Thread overran stack, or stack corrupted\n");
@@ -98012,12 +98018,10 @@ index 000000000000..a3db2abb029c
 +	debug_show_held_locks(current);
 +	if (irqs_disabled())
 +		print_irqtrace_events(current);
-+#ifdef CONFIG_DEBUG_PREEMPT
-+	if (!preempt_count_equals(preempt_offset)) {
-+		pr_err("Preemption disabled at:");
-+		print_ip_sym(KERN_ERR, preempt_disable_ip);
-+	}
-+#endif
++
++	print_preempt_disable_ip(offsets & MIGHT_RESCHED_PREEMPT_MASK,
++				 preempt_disable_ip);
++
 +	dump_stack();
 +	add_taint(TAINT_WARN, LOCKDEP_STILL_OK);
 +}
@@ -98104,6 +98108,10 @@ index 000000000000..a3db2abb029c
 +		if (p->flags & PF_KTHREAD)
 +			continue;
 +
++		schedstat_set(p->stats.wait_start,  0);
++		schedstat_set(p->stats.sleep_start, 0);
++		schedstat_set(p->stats.block_start, 0);
++
 +		if (!rt_task(p)) {
 +			/*
 +			 * Renice negative nice level userspace
@@ -98175,9 +98183,9 @@ index 000000000000..a3db2abb029c
 +	kmem_cache_free(task_group_cache, tg);
 +}
 +
-+static void sched_free_group_rcu(struct rcu_head *rcu)
++static void sched_free_group_rcu(struct rcu_head *rhp)
 +{
-+	sched_free_group(container_of(rcu, struct task_group, rcu));
++	sched_free_group(container_of(rhp, struct task_group, rcu));
 +}
 +
 +static void sched_unregister_group(struct task_group *tg)
@@ -98208,13 +98216,13 @@ index 000000000000..a3db2abb029c
 +/* rcu callback to free various structures associated with a task group */
 +static void sched_unregister_group_rcu(struct rcu_head *rhp)
 +{
-+	/* Now it should be safe to free those cfs_rqs */
++	/* Now it should be safe to free those cfs_rqs: */
 +	sched_unregister_group(container_of(rhp, struct task_group, rcu));
 +}
 +
 +void sched_destroy_group(struct task_group *tg)
 +{
-+	/* Wait for possible concurrent references to cfs_rqs complete */
++	/* Wait for possible concurrent references to cfs_rqs complete: */
 +	call_rcu(&tg->rcu, sched_unregister_group_rcu);
 +}
 +
@@ -98404,10 +98412,10 @@ index 000000000000..1212a031700e
 +{}
 diff --git a/kernel/sched/alt_sched.h b/kernel/sched/alt_sched.h
 new file mode 100644
-index 000000000000..6ff979a299ab
+index 000000000000..f2b9e686d6a6
 --- /dev/null
 +++ b/kernel/sched/alt_sched.h
-@@ -0,0 +1,662 @@
+@@ -0,0 +1,667 @@
 +#ifndef ALT_SCHED_H
 +#define ALT_SCHED_H
 +
@@ -98757,6 +98765,11 @@ index 000000000000..6ff979a299ab
 +	return SCHED_CAPACITY_SCALE;
 +}
 +#endif
++
++static inline u64 __rq_clock_broken(struct rq *rq)
++{
++	return READ_ONCE(rq->clock);
++}
 +
 +static inline u64 rq_clock(struct rq *rq)
 +{
@@ -100471,22 +100484,22 @@ index 07dde2928c79..6a6edc730dce 100644
  	}
  	return 0;
 diff --git a/kernel/sched/stats.h b/kernel/sched/stats.h
-index cfb0893a83d4..39df2b235944 100644
+index cfb0893a83d4..d80520eca556 100644
 --- a/kernel/sched/stats.h
 +++ b/kernel/sched/stats.h
-@@ -94,6 +94,7 @@ struct sched_entity_stats {
- } __no_randomize_layout;
- #endif
+@@ -87,6 +87,7 @@ static inline void rq_sched_info_depart  (struct rq *rq, unsigned long long delt
+ 
+ #endif /* CONFIG_SCHEDSTATS */
  
 +#ifndef CONFIG_SCHED_ALT
- static inline struct sched_statistics *
- __schedstats_from_se(struct sched_entity *se)
- {
+ #ifdef CONFIG_FAIR_GROUP_SCHED
+ struct sched_entity_stats {
+ 	struct sched_entity     se;
 @@ -103,6 +104,7 @@ __schedstats_from_se(struct sched_entity *se)
  #endif
  	return &task_of(se)->stats;
  }
-+#endif
++#endif /* CONFIG_SCHED_ALT */
  
  #ifdef CONFIG_PSI
  /*
