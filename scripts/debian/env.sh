@@ -24,7 +24,7 @@ source_release='focal'
 
 # oldstable => buster, stable => bullseye, testing => bookworm, unstable => sid
 releases_debian=('buster' 'bullseye' 'bookworm' 'sid')
-releases_ubuntu=('bionic' 'focal' 'impish' 'jammy')
+releases_ubuntu=('bionic' 'focal' 'impish' 'jammy' 'kinetic')
 mirror_debian='http://deb.debian.org/debian'
 mirror_ubuntu='http://archive.ubuntu.com/ubuntu'
 
