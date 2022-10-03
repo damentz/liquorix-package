@@ -22,9 +22,9 @@ source_arch='amd64'
 source_distro='ubuntu'
 source_release='focal'
 
-# oldstable => buster, stable => bullseye, testing => bookworm, unstable => sid
-releases_debian=('buster' 'bullseye' 'bookworm' 'sid')
-releases_ubuntu=('bionic' 'focal' 'jammy' 'kinetic')
+# stable => bullseye, testing => bookworm, unstable => sid
+releases_debian=('bullseye' 'bookworm' 'sid')
+releases_ubuntu=('focal' 'jammy' 'kinetic')
 mirror_debian='http://deb.debian.org/debian'
 mirror_ubuntu='http://archive.ubuntu.com/ubuntu'
 
