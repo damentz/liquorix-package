@@ -27,8 +27,8 @@ debian)
 
     repo_file="/etc/apt/sources.list.d/liquorix.list"
     repo_code="$(lsb_release -cs)"
-    echo "deb https://liquorix.net/debian $repo_code main"      > $repo_file
-    echo "deb-src https://liquorix.net/debian $repo_code main" >> $repo_file
+    echo "deb [arch=amd64] https://liquorix.net/debian $repo_code main"      > $repo_file
+    echo "deb-src [arch=amd64] https://liquorix.net/debian $repo_code main" >> $repo_file
 
     apt-get update -y
     apt-get install -y linux-image-liquorix-amd64 linux-headers-liquorix-amd64
