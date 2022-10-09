@@ -2,23 +2,18 @@
 
 set -euo pipefail
 
-if [[ "$(id -u)" -ne 0 ]]; then
+if [ "$(id -u)" -ne 0 ]; then
     echo "[ERROR] You must run this script as root!"
-    exit 0
+    exit 1
 fi
 
-case $(uname -m) in
-x86_64)
-    ARCH=x64  # or AMD64 or Intel64 or whatever
-    ;;
-*)
-    echo "ERROR: Architecture not supported."
-    exit
-    ;;
-esac
+if [ $(uname -m) != x86_64 ]; then
+    echo "[ERROR] Architecture not supported"
+    exit 1
+fi
 
-dist=$(grep '^ID' /etc/os-release | sed 's/ID=//' | head -1)
-if [ "$dist" = "debian" ]; then
+case $(grep '^ID' /etc/os-release | sed 's/ID=//' | head -1) in
+debian)
     # Install debian repo
     apt-get install lsb-release -y
     mkdir -p /etc/apt/{sources.list.d,trusted.gpg.d}
@@ -36,26 +31,24 @@ if [ "$dist" = "debian" ]; then
     echo "deb-src https://liquorix.net/debian $repo_code main" >> $repo_file
 
     apt-get update -y
-    if [ $ARCH = "x64" ]; then
-        sudo apt-get install -y linux-image-liquorix-amd64 linux-headers-liquorix-amd64
-    fi
+    apt-get install -y linux-image-liquorix-amd64 linux-headers-liquorix-amd64
 
     echo ""
-    echo "[INFO] Liquorix repository added successfully to $repo_file"
+    echo "[INFO ] Liquorix repository added successfully to $repo_file"
     echo ""
-elif [ "$dist" = "ubuntu" ]; then
+    ;;
+ubuntu)
     echo "Distribution is $dist"
 
-    sudo add-apt-repository ppa:damentz/liquorix && sudo apt-get update
-    if [ $ARCH = "x64" ]; then
-        sudo apt-get install -y linux-image-liquorix-amd64 linux-headers-liquorix-amd64
-    fi
+    add-apt-repository ppa:damentz/liquorix && apt-get update
+    apt-get install -y linux-image-liquorix-amd64 linux-headers-liquorix-amd64
 
     echo ""
-    echo "[INFO] Liquorix PPA repository added successfully"
+    echo "[INFO ] Liquorix PPA repository added successfully"
     echo ""
-else
-    echo "ERROR: This distribution is not supported at this time."
-    exit
-fi
-
+    ;;
+*)
+    echo "[ERROR] This distribution is not supported at this time"
+    exit 1
+    ;;
+esac
