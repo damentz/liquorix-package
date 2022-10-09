@@ -2,46 +2,53 @@
 
 set -euo pipefail
 
-if [[ "$(id -u)" -ne 0 ]]; then
+if [ "$(id -u)" -ne 0 ]; then
     echo "[ERROR] You must run this script as root!"
-    exit 0
+    exit 1
 fi
 
-apt-get install lsb-release -y
-codename="$(lsb_release -cs)"
-
-if [[ -z "$codename" ]]; then
-    echo "[ERROR] Unable to detect system code name!"
-    exit 0
+if [ $(uname -m) != x86_64 ]; then
+    echo "[ERROR] Architecture not supported"
+    exit 1
 fi
 
-mkdir -p /etc/apt/{sources.list.d,trusted.gpg.d}
+case $(grep '^ID' /etc/os-release | sed 's/ID=//' | head -1) in
+debian)
+    # Install debian repo
+    apt-get install lsb-release -y
+    mkdir -p /etc/apt/{sources.list.d,trusted.gpg.d}
+    curl -o /etc/apt/trusted.gpg.d/liquorix-keyring.gpg \
+        'https://liquorix.net/liquorix-keyring.gpg'
+    echo ""
+    echo "[INFO ] Liquorix keyring added to /etc/apt/trusted.gpg.d/liquorix-keyring.gpg"
+    echo ""
 
-apt-get install curl -y
-curl -o /etc/apt/trusted.gpg.d/liquorix-keyring.gpg \
-    'https://liquorix.net/liquorix-keyring.gpg'
+    apt-get install apt-transport-https -y
 
-echo ""
-echo "[INFO ] Liquorix keyring added to /etc/apt/trusted.gpg.d/liquorix-keyring.gpg"
-echo ""
+    repo_file="/etc/apt/sources.list.d/liquorix.list"
+    repo_code="$(lsb_release -cs)"
+    echo "deb [arch=amd64] https://liquorix.net/debian $repo_code main"      > $repo_file
+    echo "deb-src [arch=amd64] https://liquorix.net/debian $repo_code main" >> $repo_file
 
-apt-get install apt-transport-https -y
+    apt-get update -y
+    apt-get install -y linux-image-liquorix-amd64 linux-headers-liquorix-amd64
 
-repo_file="/etc/apt/sources.list.d/liquorix.list"
-echo "deb http://liquorix.net/debian $codename main
-deb-src http://liquorix.net/debian $codename main
+    echo ""
+    echo "[INFO ] Liquorix repository added successfully to $repo_file"
+    echo ""
+    ;;
+ubuntu)
+    echo "Distribution is $dist"
 
-# Mirrors:
-#
-# Unit193 - France
-# deb http://mirror.unit193.net/liquorix $codename main
-# deb-src http://mirror.unit193.net/liquorix $codename main" > \
-    $repo_file
+    add-apt-repository ppa:damentz/liquorix && apt-get update
+    apt-get install -y linux-image-liquorix-amd64 linux-headers-liquorix-amd64
 
-apt-get update
-
-echo ""
-echo "[INFO ] Liquorix repository added successfully to $repo_file"
-echo ""
-echo "[INFO ] You can now install Liquorix with:"
-echo "[INFO ] sudo apt-get install linux-image-liquorix-amd64 linux-headers-liquorix-amd64"
+    echo ""
+    echo "[INFO ] Liquorix PPA repository added successfully"
+    echo ""
+    ;;
+*)
+    echo "[ERROR] This distribution is not supported at this time"
+    exit 1
+    ;;
+esac
