@@ -12,6 +12,9 @@ if [ $(uname -m) != x86_64 ]; then
     exit 1
 fi
 
+export DEBIAN_FRONTEND="noninteractive" # `curl <URL> | sudo bash` suppresses stdin
+export NEEDRESTART_SUSPEND="*" # suspend needrestart or it will restart services automatically
+
 case $(grep '^ID' /etc/os-release | sed 's/ID=//' | head -1) in
 debian)
     # Install debian repo
