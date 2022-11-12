@@ -717,7 +717,7 @@ index 68ae4411285b8..e335789d7e26c 100644
  並不支持C標準中的部分定義。比如long long類型的大數除法和浮點運算就不允許
  使用。有時候確實很難弄清楚內核對工具鏈的要求和它所使用的擴展，不幸的是目
 diff --git a/Makefile b/Makefile
-index 8478e13e9424a..34d1b770b684f 100644
+index 8478e13e9424a..0c2781b6461ac 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -1,9 +1,9 @@
@@ -728,7 +728,7 @@ index 8478e13e9424a..34d1b770b684f 100644
 -EXTRAVERSION =
 -NAME = Hurr durr I'ma ninja sloth
 +SUBLEVEL = 8
-+EXTRAVERSION = -lqx1
++EXTRAVERSION = -lqx2
 +NAME = Sparkling Hot Fudge
  
  # *DOCUMENTATION*
@@ -3622,11 +3622,57 @@ index d6579ec3ea324..4c7b1f50e3b7d 100644
 +EXPORT_SYMBOL(memory_add_physaddr_to_nid);
  #endif
  #endif
+diff --git a/arch/m68k/include/uapi/asm/bootinfo-virt.h b/arch/m68k/include/uapi/asm/bootinfo-virt.h
+index b091ee9b06e05..7dbcd7bec1034 100644
+--- a/arch/m68k/include/uapi/asm/bootinfo-virt.h
++++ b/arch/m68k/include/uapi/asm/bootinfo-virt.h
+@@ -13,13 +13,8 @@
+ #define BI_VIRT_VIRTIO_BASE	0x8004
+ #define BI_VIRT_CTRL_BASE	0x8005
+ 
+-/*
+- * A random seed used to initialize the RNG. Record format:
+- *
+- *   - length       [ 2 bytes, 16-bit big endian ]
+- *   - seed data    [ `length` bytes, padded to preserve 2-byte alignment ]
+- */
+-#define BI_VIRT_RNG_SEED	0x8006
++/* No longer used -- replaced with BI_RNG_SEED -- but don't reuse this index:
++ * #define BI_VIRT_RNG_SEED	0x8006 */
+ 
+ #define VIRT_BOOTI_VERSION	MK_BI_VERSION(2, 0)
+ 
+diff --git a/arch/m68k/include/uapi/asm/bootinfo.h b/arch/m68k/include/uapi/asm/bootinfo.h
+index 95ecf3ae4c49f..024e87d7095f8 100644
+--- a/arch/m68k/include/uapi/asm/bootinfo.h
++++ b/arch/m68k/include/uapi/asm/bootinfo.h
+@@ -64,6 +64,13 @@ struct mem_info {
+ 					/* (struct mem_info) */
+ #define BI_COMMAND_LINE		0x0007	/* kernel command line parameters */
+ 					/* (string) */
++/*
++ * A random seed used to initialize the RNG. Record format:
++ *
++ *   - length       [ 2 bytes, 16-bit big endian ]
++ *   - seed data    [ `length` bytes, padded to preserve 4-byte struct alignment ]
++ */
++#define BI_RNG_SEED		0x0008
+ 
+ 
+     /*
 diff --git a/arch/m68k/kernel/setup_mm.c b/arch/m68k/kernel/setup_mm.c
-index e62fa8f2149b3..7e7ef67cff8b2 100644
+index e62fa8f2149b3..e45cc99237030 100644
 --- a/arch/m68k/kernel/setup_mm.c
 +++ b/arch/m68k/kernel/setup_mm.c
-@@ -109,10 +109,9 @@ extern void paging_init(void);
+@@ -25,6 +25,7 @@
+ #include <linux/module.h>
+ #include <linux/nvram.h>
+ #include <linux/initrd.h>
++#include <linux/random.h>
+ 
+ #include <asm/bootinfo.h>
+ #include <asm/byteorder.h>
+@@ -109,10 +110,9 @@ extern void paging_init(void);
  
  static void __init m68k_parse_bootinfo(const struct bi_record *record)
  {
@@ -3638,7 +3684,25 @@ index e62fa8f2149b3..7e7ef67cff8b2 100644
  	while ((tag = be16_to_cpu(record->tag)) != BI_LAST) {
  		int unknown = 0;
  		const void *data = record->data;
-@@ -182,6 +181,8 @@ static void __init m68k_parse_bootinfo(const struct bi_record *record)
+@@ -152,6 +152,17 @@ static void __init m68k_parse_bootinfo(const struct bi_record *record)
+ 				sizeof(m68k_command_line));
+ 			break;
+ 
++		case BI_RNG_SEED: {
++			u16 len = be16_to_cpup(data);
++			add_bootloader_randomness(data + 2, len);
++			/*
++			 * Zero the data to preserve forward secrecy, and zero the
++			 * length to prevent kexec from using it.
++			 */
++			memzero_explicit((void *)data, len + 2);
++			break;
++		}
++
+ 		default:
+ 			if (MACH_IS_AMIGA)
+ 				unknown = amiga_parse_bootinfo(record);
+@@ -182,6 +193,8 @@ static void __init m68k_parse_bootinfo(const struct bi_record *record)
  		record = (struct bi_record *)((unsigned long)record + size);
  	}
  
@@ -3656,6 +3720,35 @@ index b1f3940bc2981..5ccf925567da0 100644
  449	common  futex_waitv                     sys_futex_waitv
  450	common	set_mempolicy_home_node		sys_set_mempolicy_home_node
 +451	common	pmadv_ksm			sys_pmadv_ksm
+diff --git a/arch/m68k/virt/config.c b/arch/m68k/virt/config.c
+index 4ab22946ff68f..632ba200ad425 100644
+--- a/arch/m68k/virt/config.c
++++ b/arch/m68k/virt/config.c
+@@ -2,7 +2,6 @@
+ 
+ #include <linux/reboot.h>
+ #include <linux/serial_core.h>
+-#include <linux/random.h>
+ #include <clocksource/timer-goldfish.h>
+ 
+ #include <asm/bootinfo.h>
+@@ -93,16 +92,6 @@ int __init virt_parse_bootinfo(const struct bi_record *record)
+ 		data += 4;
+ 		virt_bi_data.virtio.irq = be32_to_cpup(data);
+ 		break;
+-	case BI_VIRT_RNG_SEED: {
+-		u16 len = be16_to_cpup(data);
+-		add_bootloader_randomness(data + 2, len);
+-		/*
+-		 * Zero the data to preserve forward secrecy, and zero the
+-		 * length to prevent kexec from using it.
+-		 */
+-		memzero_explicit((void *)data, len + 2);
+-		break;
+-	}
+ 	default:
+ 		unknown = 1;
+ 		break;
 diff --git a/arch/microblaze/kernel/syscalls/syscall.tbl b/arch/microblaze/kernel/syscalls/syscall.tbl
 index 820145e473501..6b76208597f3c 100644
 --- a/arch/microblaze/kernel/syscalls/syscall.tbl
@@ -12346,7 +12439,7 @@ index bffde862de0bf..e7556864ea808 100644
  
  /*
 diff --git a/drivers/cxl/core/region.c b/drivers/cxl/core/region.c
-index 4011480169784..6b7fb955a05ac 100644
+index 4011480169784..78344e4d4215b 100644
 --- a/drivers/cxl/core/region.c
 +++ b/drivers/cxl/core/region.c
 @@ -657,6 +657,9 @@ static struct cxl_region_ref *alloc_region_ref(struct cxl_port *port,
@@ -12379,12 +12472,12 @@ index 4011480169784..6b7fb955a05ac 100644
  		put_device(&cxlr->dev);
  	}
 +}
-+
+ 
 +static void free_region_ref(struct cxl_region_ref *cxl_rr)
 +{
 +	struct cxl_port *port = cxl_rr->port;
 +	struct cxl_region *cxlr = cxl_rr->region;
- 
++
 +	cxl_rr_free_decoder(cxl_rr);
  	xa_erase(&port->regions, (unsigned long)cxlr);
  	xa_destroy(&cxl_rr->endpoints);
@@ -12482,7 +12575,32 @@ index 4011480169784..6b7fb955a05ac 100644
  		for (i = 0; i < cxl_rr->nr_targets_set; i++)
  			if (ep->dport == cxlsd->target[i]) {
  				rc = check_last_peer(cxled, ep, cxl_rr,
-@@ -1538,8 +1563,19 @@ static struct cxl_region *to_cxl_region(struct device *dev)
+@@ -1508,9 +1533,24 @@ static const struct attribute_group *region_groups[] = {
+ 
+ static void cxl_region_release(struct device *dev)
+ {
++	struct cxl_root_decoder *cxlrd = to_cxl_root_decoder(dev->parent);
+ 	struct cxl_region *cxlr = to_cxl_region(dev);
++	int id = atomic_read(&cxlrd->region_id);
++
++	/*
++	 * Try to reuse the recently idled id rather than the cached
++	 * next id to prevent the region id space from increasing
++	 * unnecessarily.
++	 */
++	if (cxlr->id < id)
++		if (atomic_try_cmpxchg(&cxlrd->region_id, &id, cxlr->id)) {
++			memregion_free(id);
++			goto out;
++		}
+ 
+ 	memregion_free(cxlr->id);
++out:
++	put_device(dev->parent);
+ 	kfree(cxlr);
+ }
+ 
+@@ -1538,8 +1578,19 @@ static struct cxl_region *to_cxl_region(struct device *dev)
  static void unregister_region(void *dev)
  {
  	struct cxl_region *cxlr = to_cxl_region(dev);
@@ -12502,6 +12620,18 @@ index 4011480169784..6b7fb955a05ac 100644
  	cxl_region_iomem_release(cxlr);
  	put_device(dev);
  }
+@@ -1561,6 +1612,11 @@ static struct cxl_region *cxl_region_alloc(struct cxl_root_decoder *cxlrd, int i
+ 	device_initialize(dev);
+ 	lockdep_set_class(&dev->mutex, &cxl_region_key);
+ 	dev->parent = &cxlrd->cxlsd.cxld.dev;
++	/*
++	 * Keep root decoder pinned through cxl_region_release to fixup
++	 * region id allocations
++	 */
++	get_device(dev->parent);
+ 	device_set_pm_not_required(dev);
+ 	dev->bus = &cxl_bus_type;
+ 	dev->type = &cxl_region_type;
 diff --git a/drivers/cxl/cxl.h b/drivers/cxl/cxl.h
 index f680450f0b16c..ac75554b5d763 100644
 --- a/drivers/cxl/cxl.h
@@ -14654,6 +14784,100 @@ index 007a3db69df13..ecb4c3abc6297 100644
  	return 0;
  }
  
+diff --git a/drivers/gpu/drm/amd/amdkfd/kfd_migrate.c b/drivers/gpu/drm/amd/amdkfd/kfd_migrate.c
+index b059a77b6081d..5b5a79ccb716a 100644
+--- a/drivers/gpu/drm/amd/amdkfd/kfd_migrate.c
++++ b/drivers/gpu/drm/amd/amdkfd/kfd_migrate.c
+@@ -886,7 +886,7 @@ svm_migrate_to_vram(struct svm_range *prange, uint32_t best_loc,
+ static vm_fault_t svm_migrate_to_ram(struct vm_fault *vmf)
+ {
+ 	unsigned long addr = vmf->address;
+-	struct vm_area_struct *vma;
++	struct svm_range_bo *svm_bo;
+ 	enum svm_work_list_ops op;
+ 	struct svm_range *parent;
+ 	struct svm_range *prange;
+@@ -894,29 +894,42 @@ static vm_fault_t svm_migrate_to_ram(struct vm_fault *vmf)
+ 	struct mm_struct *mm;
+ 	int r = 0;
+ 
+-	vma = vmf->vma;
+-	mm = vma->vm_mm;
++	svm_bo = vmf->page->zone_device_data;
++	if (!svm_bo) {
++		pr_debug("failed get device page at addr 0x%lx\n", addr);
++		return VM_FAULT_SIGBUS;
++	}
++	if (!mmget_not_zero(svm_bo->eviction_fence->mm)) {
++		pr_debug("addr 0x%lx of process mm is detroyed\n", addr);
++		return VM_FAULT_SIGBUS;
++	}
+ 
+-	p = kfd_lookup_process_by_mm(vma->vm_mm);
++	mm = svm_bo->eviction_fence->mm;
++	if (mm != vmf->vma->vm_mm)
++		pr_debug("addr 0x%lx is COW mapping in child process\n", addr);
++
++	p = kfd_lookup_process_by_mm(mm);
+ 	if (!p) {
+ 		pr_debug("failed find process at fault address 0x%lx\n", addr);
+-		return VM_FAULT_SIGBUS;
++		r = VM_FAULT_SIGBUS;
++		goto out_mmput;
+ 	}
+ 	if (READ_ONCE(p->svms.faulting_task) == current) {
+ 		pr_debug("skipping ram migration\n");
+-		kfd_unref_process(p);
+-		return 0;
++		r = 0;
++		goto out_unref_process;
+ 	}
+-	addr >>= PAGE_SHIFT;
++
+ 	pr_debug("CPU page fault svms 0x%p address 0x%lx\n", &p->svms, addr);
++	addr >>= PAGE_SHIFT;
+ 
+ 	mutex_lock(&p->svms.lock);
+ 
+ 	prange = svm_range_from_addr(&p->svms, addr, &parent);
+ 	if (!prange) {
+-		pr_debug("cannot find svm range at 0x%lx\n", addr);
++		pr_debug("failed get range svms 0x%p addr 0x%lx\n", &p->svms, addr);
+ 		r = -EFAULT;
+-		goto out;
++		goto out_unlock_svms;
+ 	}
+ 
+ 	mutex_lock(&parent->migrate_mutex);
+@@ -940,8 +953,8 @@ static vm_fault_t svm_migrate_to_ram(struct vm_fault *vmf)
+ 
+ 	r = svm_migrate_vram_to_ram(prange, mm, KFD_MIGRATE_TRIGGER_PAGEFAULT_CPU);
+ 	if (r)
+-		pr_debug("failed %d migrate 0x%p [0x%lx 0x%lx] to ram\n", r,
+-			 prange, prange->start, prange->last);
++		pr_debug("failed %d migrate svms 0x%p range 0x%p [0x%lx 0x%lx]\n",
++			 r, prange->svms, prange, prange->start, prange->last);
+ 
+ 	/* xnack on, update mapping on GPUs with ACCESS_IN_PLACE */
+ 	if (p->xnack_enabled && parent == prange)
+@@ -955,12 +968,13 @@ static vm_fault_t svm_migrate_to_ram(struct vm_fault *vmf)
+ 	if (prange != parent)
+ 		mutex_unlock(&prange->migrate_mutex);
+ 	mutex_unlock(&parent->migrate_mutex);
+-out:
++out_unlock_svms:
+ 	mutex_unlock(&p->svms.lock);
+-	kfd_unref_process(p);
+-
++out_unref_process:
+ 	pr_debug("CPU fault svms 0x%p address 0x%lx done\n", &p->svms, addr);
+-
++	kfd_unref_process(p);
++out_mmput:
++	mmput(mm);
+ 	return r ? VM_FAULT_SIGBUS : 0;
+ }
+ 
 diff --git a/drivers/gpu/drm/amd/amdkfd/kfd_mqd_manager_v11.c b/drivers/gpu/drm/amd/amdkfd/kfd_mqd_manager_v11.c
 index 3ae350220d42e..5c3d216a26633 100644
 --- a/drivers/gpu/drm/amd/amdkfd/kfd_mqd_manager_v11.c
@@ -14976,6 +15200,134 @@ index 897105d1c111e..ef0795b14a1fd 100644
  		break;
  
  	default: //DCN_ZSTATE_SUPPORT_UNKNOWN
+diff --git a/drivers/gpu/drm/amd/display/dc/clk_mgr/dcn32/dcn32_clk_mgr.c b/drivers/gpu/drm/amd/display/dc/clk_mgr/dcn32/dcn32_clk_mgr.c
+index f0f3f66629cc0..e7f1d5f8166f9 100644
+--- a/drivers/gpu/drm/amd/display/dc/clk_mgr/dcn32/dcn32_clk_mgr.c
++++ b/drivers/gpu/drm/amd/display/dc/clk_mgr/dcn32/dcn32_clk_mgr.c
+@@ -156,7 +156,8 @@ void dcn32_init_clocks(struct clk_mgr *clk_mgr_base)
+ {
+ 	struct clk_mgr_internal *clk_mgr = TO_CLK_MGR_INTERNAL(clk_mgr_base);
+ 	unsigned int num_levels;
+-	unsigned int num_dcfclk_levels, num_dtbclk_levels, num_dispclk_levels;
++	struct clk_limit_num_entries *num_entries_per_clk = &clk_mgr_base->bw_params->clk_table.num_entries_per_clk;
++	unsigned int i;
+ 
+ 	memset(&(clk_mgr_base->clks), 0, sizeof(struct dc_clocks));
+ 	clk_mgr_base->clks.p_state_change_support = true;
+@@ -180,42 +181,42 @@ void dcn32_init_clocks(struct clk_mgr *clk_mgr_base)
+ 	/* DCFCLK */
+ 	dcn32_init_single_clock(clk_mgr, PPCLK_DCFCLK,
+ 			&clk_mgr_base->bw_params->clk_table.entries[0].dcfclk_mhz,
+-			&num_levels);
+-	num_dcfclk_levels = num_levels;
++			&num_entries_per_clk->num_dcfclk_levels);
+ 
+ 	/* SOCCLK */
+ 	dcn32_init_single_clock(clk_mgr, PPCLK_SOCCLK,
+ 					&clk_mgr_base->bw_params->clk_table.entries[0].socclk_mhz,
+-					&num_levels);
++					&num_entries_per_clk->num_socclk_levels);
++
+ 	/* DTBCLK */
+ 	if (!clk_mgr->base.ctx->dc->debug.disable_dtb_ref_clk_switch)
+ 		dcn32_init_single_clock(clk_mgr, PPCLK_DTBCLK,
+ 				&clk_mgr_base->bw_params->clk_table.entries[0].dtbclk_mhz,
+-				&num_levels);
+-	num_dtbclk_levels = num_levels;
++				&num_entries_per_clk->num_dtbclk_levels);
+ 
+ 	/* DISPCLK */
+ 	dcn32_init_single_clock(clk_mgr, PPCLK_DISPCLK,
+ 			&clk_mgr_base->bw_params->clk_table.entries[0].dispclk_mhz,
+-			&num_levels);
+-	num_dispclk_levels = num_levels;
++			&num_entries_per_clk->num_dispclk_levels);
++	num_levels = num_entries_per_clk->num_dispclk_levels;
+ 
+-	if (num_dcfclk_levels && num_dtbclk_levels && num_dispclk_levels)
++	if (num_entries_per_clk->num_dcfclk_levels &&
++			num_entries_per_clk->num_dtbclk_levels &&
++			num_entries_per_clk->num_dispclk_levels)
+ 		clk_mgr->dpm_present = true;
+ 
+ 	if (clk_mgr_base->ctx->dc->debug.min_disp_clk_khz) {
+-		unsigned int i;
+-
+ 		for (i = 0; i < num_levels; i++)
+ 			if (clk_mgr_base->bw_params->clk_table.entries[i].dispclk_mhz
+ 					< khz_to_mhz_ceil(clk_mgr_base->ctx->dc->debug.min_disp_clk_khz))
+ 				clk_mgr_base->bw_params->clk_table.entries[i].dispclk_mhz
+ 					= khz_to_mhz_ceil(clk_mgr_base->ctx->dc->debug.min_disp_clk_khz);
+ 	}
++	for (i = 0; i < num_levels; i++)
++		if (clk_mgr_base->bw_params->clk_table.entries[i].dispclk_mhz > 1950)
++			clk_mgr_base->bw_params->clk_table.entries[i].dispclk_mhz = 1950;
+ 
+ 	if (clk_mgr_base->ctx->dc->debug.min_dpp_clk_khz) {
+-		unsigned int i;
+-
+ 		for (i = 0; i < num_levels; i++)
+ 			if (clk_mgr_base->bw_params->clk_table.entries[i].dppclk_mhz
+ 					< khz_to_mhz_ceil(clk_mgr_base->ctx->dc->debug.min_dpp_clk_khz))
+@@ -370,7 +371,7 @@ static void dcn32_update_clocks(struct clk_mgr *clk_mgr_base,
+ 			/* to disable P-State switching, set UCLK min = max */
+ 			if (!clk_mgr_base->clks.p_state_change_support)
+ 				dcn32_smu_set_hard_min_by_freq(clk_mgr, PPCLK_UCLK,
+-						clk_mgr_base->bw_params->clk_table.entries[clk_mgr_base->bw_params->clk_table.num_entries - 1].memclk_mhz);
++						clk_mgr_base->bw_params->clk_table.entries[clk_mgr_base->bw_params->clk_table.num_entries_per_clk.num_memclk_levels - 1].memclk_mhz);
+ 		}
+ 
+ 		if (should_update_pstate_support(safe_to_lower, fclk_p_state_change_support, clk_mgr_base->clks.fclk_p_state_change_support) &&
+@@ -632,7 +633,7 @@ static void dcn32_set_hard_min_memclk(struct clk_mgr *clk_mgr_base, bool current
+ 					khz_to_mhz_ceil(clk_mgr_base->clks.dramclk_khz));
+ 		else
+ 			dcn32_smu_set_hard_min_by_freq(clk_mgr, PPCLK_UCLK,
+-					clk_mgr_base->bw_params->clk_table.entries[clk_mgr_base->bw_params->clk_table.num_entries - 1].memclk_mhz);
++					clk_mgr_base->bw_params->clk_table.entries[clk_mgr_base->bw_params->clk_table.num_entries_per_clk.num_memclk_levels - 1].memclk_mhz);
+ 	} else {
+ 		dcn32_smu_set_hard_min_by_freq(clk_mgr, PPCLK_UCLK,
+ 				clk_mgr_base->bw_params->clk_table.entries[0].memclk_mhz);
+@@ -648,22 +649,37 @@ static void dcn32_set_hard_max_memclk(struct clk_mgr *clk_mgr_base)
+ 		return;
+ 
+ 	dcn30_smu_set_hard_max_by_freq(clk_mgr, PPCLK_UCLK,
+-			clk_mgr_base->bw_params->clk_table.entries[clk_mgr_base->bw_params->clk_table.num_entries - 1].memclk_mhz);
++			clk_mgr_base->bw_params->clk_table.entries[clk_mgr_base->bw_params->clk_table.num_entries_per_clk.num_memclk_levels - 1].memclk_mhz);
+ }
+ 
+ /* Get current memclk states, update bounding box */
+ static void dcn32_get_memclk_states_from_smu(struct clk_mgr *clk_mgr_base)
+ {
+ 	struct clk_mgr_internal *clk_mgr = TO_CLK_MGR_INTERNAL(clk_mgr_base);
++	struct clk_limit_num_entries *num_entries_per_clk = &clk_mgr_base->bw_params->clk_table.num_entries_per_clk;
+ 	unsigned int num_levels;
+ 
+ 	if (!clk_mgr->smu_present)
+ 		return;
+ 
+-	/* Refresh memclk states */
++	/* Refresh memclk and fclk states */
+ 	dcn32_init_single_clock(clk_mgr, PPCLK_UCLK,
+ 			&clk_mgr_base->bw_params->clk_table.entries[0].memclk_mhz,
+-			&num_levels);
++			&num_entries_per_clk->num_memclk_levels);
++
++	/* memclk must have at least one level */
++	num_entries_per_clk->num_memclk_levels = num_entries_per_clk->num_memclk_levels ? num_entries_per_clk->num_memclk_levels : 1;
++
++	dcn32_init_single_clock(clk_mgr, PPCLK_FCLK,
++			&clk_mgr_base->bw_params->clk_table.entries[0].fclk_mhz,
++			&num_entries_per_clk->num_fclk_levels);
++
++	if (num_entries_per_clk->num_memclk_levels >= num_entries_per_clk->num_fclk_levels) {
++		num_levels = num_entries_per_clk->num_memclk_levels;
++	} else {
++		num_levels = num_entries_per_clk->num_fclk_levels;
++	}
++
+ 	clk_mgr_base->bw_params->clk_table.num_entries = num_levels ? num_levels : 1;
+ 
+ 	if (clk_mgr->dpm_present && !num_levels)
 diff --git a/drivers/gpu/drm/amd/display/dc/core/dc.c b/drivers/gpu/drm/amd/display/dc/core/dc.c
 index fb22c3d70528e..18d6ee666297b 100644
 --- a/drivers/gpu/drm/amd/display/dc/core/dc.c
@@ -15316,6 +15668,35 @@ index c87091683b5dc..aa976fe4d426d 100644
  		}
  
  		if ((int)(dcn3_21_soc.dram_clock_change_latency_us * 1000)
+diff --git a/drivers/gpu/drm/amd/display/dc/inc/hw/clk_mgr.h b/drivers/gpu/drm/amd/display/dc/inc/hw/clk_mgr.h
+index d9f1b0a4fbd4a..591ab1389e3b3 100644
+--- a/drivers/gpu/drm/amd/display/dc/inc/hw/clk_mgr.h
++++ b/drivers/gpu/drm/amd/display/dc/inc/hw/clk_mgr.h
+@@ -95,10 +95,23 @@ struct clk_limit_table_entry {
+ 	unsigned int wck_ratio;
+ };
+ 
++struct clk_limit_num_entries {
++	unsigned int num_dcfclk_levels;
++	unsigned int num_fclk_levels;
++	unsigned int num_memclk_levels;
++	unsigned int num_socclk_levels;
++	unsigned int num_dtbclk_levels;
++	unsigned int num_dispclk_levels;
++	unsigned int num_dppclk_levels;
++	unsigned int num_phyclk_levels;
++	unsigned int num_phyclk_d18_levels;
++};
++
+ /* This table is contiguous */
+ struct clk_limit_table {
+ 	struct clk_limit_table_entry entries[MAX_NUM_DPM_LVL];
+-	unsigned int num_entries;
++	struct clk_limit_num_entries num_entries_per_clk;
++	unsigned int num_entries; /* highest populated dpm level for back compatibility */
+ };
+ 
+ struct wm_range_table_entry {
 diff --git a/drivers/gpu/drm/amd/display/dc/inc/hw_sequencer.h b/drivers/gpu/drm/amd/display/dc/inc/hw_sequencer.h
 index ccb3c719fc4de..ac94dba72c18b 100644
 --- a/drivers/gpu/drm/amd/display/dc/inc/hw_sequencer.h
@@ -16230,7 +16611,7 @@ index 6e80162632ddf..86a22c3766e52 100644
  		 * Clamp to max_cdclk_freq in case pixel rate is higher,
  		 * in order not to break an 8K, but still leave W/A at place.
 diff --git a/drivers/gpu/drm/i915/display/intel_dp.c b/drivers/gpu/drm/i915/display/intel_dp.c
-index 3ed7eeacc706b..d4492b6d23d25 100644
+index 3ed7eeacc706b..21ba510716b6c 100644
 --- a/drivers/gpu/drm/i915/display/intel_dp.c
 +++ b/drivers/gpu/drm/i915/display/intel_dp.c
 @@ -3923,6 +3923,8 @@ intel_dp_handle_hdmi_link_status_change(struct intel_dp *intel_dp)
@@ -16242,8 +16623,112 @@ index 3ed7eeacc706b..d4492b6d23d25 100644
  		/* Restart FRL training or fall back to TMDS mode */
  		intel_dp_check_frl_training(intel_dp);
  	}
+@@ -5231,7 +5233,7 @@ static bool intel_edp_init_connector(struct intel_dp *intel_dp,
+ 			      encoder->devdata, IS_ERR(edid) ? NULL : edid);
+ 
+ 	intel_panel_add_edid_fixed_modes(intel_connector,
+-					 intel_connector->panel.vbt.drrs_type != DRRS_TYPE_NONE,
++					 intel_connector->panel.vbt.drrs_type != DRRS_TYPE_NONE ||
+ 					 intel_vrr_is_capable(intel_connector));
+ 
+ 	/* MSO requires information from the EDID */
+diff --git a/drivers/gpu/drm/i915/display/intel_lvds.c b/drivers/gpu/drm/i915/display/intel_lvds.c
+index 730480ac3300d..c0bec3e0f0ae9 100644
+--- a/drivers/gpu/drm/i915/display/intel_lvds.c
++++ b/drivers/gpu/drm/i915/display/intel_lvds.c
+@@ -972,8 +972,7 @@ void intel_lvds_init(struct drm_i915_private *dev_priv)
+ 
+ 	/* Try EDID first */
+ 	intel_panel_add_edid_fixed_modes(intel_connector,
+-					 intel_connector->panel.vbt.drrs_type != DRRS_TYPE_NONE,
+-					 false);
++					 intel_connector->panel.vbt.drrs_type != DRRS_TYPE_NONE);
+ 
+ 	/* Failed to get EDID, what about VBT? */
+ 	if (!intel_panel_preferred_fixed_mode(intel_connector))
+diff --git a/drivers/gpu/drm/i915/display/intel_panel.c b/drivers/gpu/drm/i915/display/intel_panel.c
+index 237a40623dd7b..1e008922b95d3 100644
+--- a/drivers/gpu/drm/i915/display/intel_panel.c
++++ b/drivers/gpu/drm/i915/display/intel_panel.c
+@@ -81,15 +81,14 @@ static bool is_alt_drrs_mode(const struct drm_display_mode *mode,
+ 		mode->clock != preferred_mode->clock;
+ }
+ 
+-static bool is_alt_vrr_mode(const struct drm_display_mode *mode,
+-			    const struct drm_display_mode *preferred_mode)
++static bool is_alt_fixed_mode(const struct drm_display_mode *mode,
++			      const struct drm_display_mode *preferred_mode)
+ {
+ 	return drm_mode_match(mode, preferred_mode,
+ 			      DRM_MODE_MATCH_FLAGS |
+ 			      DRM_MODE_MATCH_3D_FLAGS) &&
+ 		mode->hdisplay == preferred_mode->hdisplay &&
+-		mode->vdisplay == preferred_mode->vdisplay &&
+-		mode->clock != preferred_mode->clock;
++		mode->vdisplay == preferred_mode->vdisplay;
+ }
+ 
+ const struct drm_display_mode *
+@@ -172,19 +171,7 @@ int intel_panel_compute_config(struct intel_connector *connector,
+ 	return 0;
+ }
+ 
+-static bool is_alt_fixed_mode(const struct drm_display_mode *mode,
+-			      const struct drm_display_mode *preferred_mode,
+-			      bool has_vrr)
+-{
+-	/* is_alt_drrs_mode() is a subset of is_alt_vrr_mode() */
+-	if (has_vrr)
+-		return is_alt_vrr_mode(mode, preferred_mode);
+-	else
+-		return is_alt_drrs_mode(mode, preferred_mode);
+-}
+-
+-static void intel_panel_add_edid_alt_fixed_modes(struct intel_connector *connector,
+-						 bool has_vrr)
++static void intel_panel_add_edid_alt_fixed_modes(struct intel_connector *connector)
+ {
+ 	struct drm_i915_private *dev_priv = to_i915(connector->base.dev);
+ 	const struct drm_display_mode *preferred_mode =
+@@ -192,7 +179,7 @@ static void intel_panel_add_edid_alt_fixed_modes(struct intel_connector *connect
+ 	struct drm_display_mode *mode, *next;
+ 
+ 	list_for_each_entry_safe(mode, next, &connector->base.probed_modes, head) {
+-		if (!is_alt_fixed_mode(mode, preferred_mode, has_vrr))
++		if (!is_alt_fixed_mode(mode, preferred_mode))
+ 			continue;
+ 
+ 		drm_dbg_kms(&dev_priv->drm,
+@@ -251,11 +238,11 @@ static void intel_panel_destroy_probed_modes(struct intel_connector *connector)
+ }
+ 
+ void intel_panel_add_edid_fixed_modes(struct intel_connector *connector,
+-				      bool has_drrs, bool has_vrr)
++				      bool use_alt_fixed_modes)
+ {
+ 	intel_panel_add_edid_preferred_mode(connector);
+-	if (intel_panel_preferred_fixed_mode(connector) && (has_drrs || has_vrr))
+-		intel_panel_add_edid_alt_fixed_modes(connector, has_vrr);
++	if (intel_panel_preferred_fixed_mode(connector) && use_alt_fixed_modes)
++		intel_panel_add_edid_alt_fixed_modes(connector);
+ 	intel_panel_destroy_probed_modes(connector);
+ }
+ 
+diff --git a/drivers/gpu/drm/i915/display/intel_panel.h b/drivers/gpu/drm/i915/display/intel_panel.h
+index b087c0c3cc6db..4a94bd0eae3bf 100644
+--- a/drivers/gpu/drm/i915/display/intel_panel.h
++++ b/drivers/gpu/drm/i915/display/intel_panel.h
+@@ -41,7 +41,7 @@ int intel_panel_fitting(struct intel_crtc_state *crtc_state,
+ int intel_panel_compute_config(struct intel_connector *connector,
+ 			       struct drm_display_mode *adjusted_mode);
+ void intel_panel_add_edid_fixed_modes(struct intel_connector *connector,
+-				      bool has_drrs, bool has_vrr);
++				      bool use_alt_fixed_modes);
+ void intel_panel_add_vbt_lfp_fixed_mode(struct intel_connector *connector);
+ void intel_panel_add_vbt_sdvo_fixed_mode(struct intel_connector *connector);
+ void intel_panel_add_encoder_fixed_mode(struct intel_connector *connector,
 diff --git a/drivers/gpu/drm/i915/display/intel_sdvo.c b/drivers/gpu/drm/i915/display/intel_sdvo.c
-index 19122bc6d2aba..b5f65b093c106 100644
+index 19122bc6d2aba..6b471fc297bd6 100644
 --- a/drivers/gpu/drm/i915/display/intel_sdvo.c
 +++ b/drivers/gpu/drm/i915/display/intel_sdvo.c
 @@ -2747,13 +2747,10 @@ intel_sdvo_dvi_init(struct intel_sdvo *intel_sdvo, int device)
@@ -16302,7 +16787,21 @@ index 19122bc6d2aba..b5f65b093c106 100644
  
  	if (intel_sdvo_connector_init(intel_sdvo_connector, intel_sdvo) < 0) {
  		kfree(intel_sdvo_connector);
-@@ -2926,16 +2916,39 @@ intel_sdvo_lvds_init(struct intel_sdvo *intel_sdvo, int device)
+@@ -2910,8 +2900,12 @@ intel_sdvo_lvds_init(struct intel_sdvo *intel_sdvo, int device)
+ 	intel_panel_add_vbt_sdvo_fixed_mode(intel_connector);
+ 
+ 	if (!intel_panel_preferred_fixed_mode(intel_connector)) {
++		mutex_lock(&i915->drm.mode_config.mutex);
++
+ 		intel_ddc_get_modes(connector, &intel_sdvo->ddc);
+-		intel_panel_add_edid_fixed_modes(intel_connector, false, false);
++		intel_panel_add_edid_fixed_modes(intel_connector, false);
++
++		mutex_unlock(&i915->drm.mode_config.mutex);
+ 	}
+ 
+ 	intel_panel_init(intel_connector);
+@@ -2926,16 +2920,39 @@ intel_sdvo_lvds_init(struct intel_sdvo *intel_sdvo, int device)
  	return false;
  }
  
@@ -16344,7 +16843,7 @@ index 19122bc6d2aba..b5f65b093c106 100644
  		if (!intel_sdvo_dvi_init(intel_sdvo, 1))
  			return false;
  
-@@ -2956,7 +2969,7 @@ intel_sdvo_output_setup(struct intel_sdvo *intel_sdvo, u16 flags)
+@@ -2956,7 +2973,7 @@ intel_sdvo_output_setup(struct intel_sdvo *intel_sdvo, u16 flags)
  		if (!intel_sdvo_analog_init(intel_sdvo, 0))
  			return false;
  
@@ -16353,7 +16852,7 @@ index 19122bc6d2aba..b5f65b093c106 100644
  		if (!intel_sdvo_analog_init(intel_sdvo, 1))
  			return false;
  
-@@ -2964,14 +2977,13 @@ intel_sdvo_output_setup(struct intel_sdvo *intel_sdvo, u16 flags)
+@@ -2964,14 +2981,13 @@ intel_sdvo_output_setup(struct intel_sdvo *intel_sdvo, u16 flags)
  		if (!intel_sdvo_lvds_init(intel_sdvo, 0))
  			return false;
  
@@ -16370,7 +16869,7 @@ index 19122bc6d2aba..b5f65b093c106 100644
  		memcpy(bytes, &intel_sdvo->caps.output_flags, 2);
  		DRM_DEBUG_KMS("%s: Unknown SDVO output type (0x%02x%02x)\n",
  			      SDVO_NAME(intel_sdvo),
-@@ -3383,8 +3395,6 @@ bool intel_sdvo_init(struct drm_i915_private *dev_priv,
+@@ -3383,8 +3399,6 @@ bool intel_sdvo_init(struct drm_i915_private *dev_priv,
  	 */
  	intel_sdvo->base.cloneable = 0;
  
@@ -16812,6 +17311,20 @@ index 3e91f44829e92..fe179146d51b9 100644
  			 ce->guc_id.id, ce->engine->name);
  	}
  }
+diff --git a/drivers/gpu/drm/i915/gvt/kvmgt.c b/drivers/gpu/drm/i915/gvt/kvmgt.c
+index e3cd589464777..de89946c4817f 100644
+--- a/drivers/gpu/drm/i915/gvt/kvmgt.c
++++ b/drivers/gpu/drm/i915/gvt/kvmgt.c
+@@ -1595,6 +1595,9 @@ static void intel_vgpu_remove(struct mdev_device *mdev)
+ 
+ 	if (WARN_ON_ONCE(vgpu->attached))
+ 		return;
++
++	vfio_unregister_group_dev(&vgpu->vfio_device);
++	vfio_uninit_group_dev(&vgpu->vfio_device);
+ 	intel_gvt_destroy_vgpu(vgpu);
+ }
+ 
 diff --git a/drivers/gpu/drm/i915/i915_scatterlist.h b/drivers/gpu/drm/i915/i915_scatterlist.h
 index 9ddb3e743a3e5..b0a1db44f8950 100644
 --- a/drivers/gpu/drm/i915/i915_scatterlist.h
@@ -39406,6 +39919,52 @@ index 77d7f07ca075f..e7851c9265382 100644
  	ret = device_add(&sw->dev);
  	if (ret) {
  		dev_err(&sw->dev, "failed to add device: %d\n", ret);
+diff --git a/drivers/thunderbolt/tb.c b/drivers/thunderbolt/tb.c
+index 9853f6c7e81d7..583c22df40403 100644
+--- a/drivers/thunderbolt/tb.c
++++ b/drivers/thunderbolt/tb.c
+@@ -105,6 +105,32 @@ static void tb_remove_dp_resources(struct tb_switch *sw)
+ 	}
+ }
+ 
++static void tb_discover_dp_resource(struct tb *tb, struct tb_port *port)
++{
++	struct tb_cm *tcm = tb_priv(tb);
++	struct tb_port *p;
++
++	list_for_each_entry(p, &tcm->dp_resources, list) {
++		if (p == port)
++			return;
++	}
++
++	tb_port_dbg(port, "DP %s resource available discovered\n",
++		    tb_port_is_dpin(port) ? "IN" : "OUT");
++	list_add_tail(&port->list, &tcm->dp_resources);
++}
++
++static void tb_discover_dp_resources(struct tb *tb)
++{
++	struct tb_cm *tcm = tb_priv(tb);
++	struct tb_tunnel *tunnel;
++
++	list_for_each_entry(tunnel, &tcm->tunnel_list, list) {
++		if (tb_tunnel_is_dp(tunnel))
++			tb_discover_dp_resource(tb, tunnel->dst_port);
++	}
++}
++
+ static void tb_switch_discover_tunnels(struct tb_switch *sw,
+ 				       struct list_head *list,
+ 				       bool alloc_hopids)
+@@ -1446,6 +1472,8 @@ static int tb_start(struct tb *tb)
+ 	tb_scan_switch(tb->root_switch);
+ 	/* Find out tunnels created by the boot firmware */
+ 	tb_discover_tunnels(tb);
++	/* Add DP resources from the DP tunnels created by the boot firmware */
++	tb_discover_dp_resources(tb);
+ 	/*
+ 	 * If the boot firmware did not create USB 3.x tunnels create them
+ 	 * now for the whole topology.
 diff --git a/drivers/thunderbolt/tb.h b/drivers/thunderbolt/tb.h
 index 5db76de40cc1c..332159f984fc5 100644
 --- a/drivers/thunderbolt/tb.h
@@ -79911,7 +80470,7 @@ index fa73353f7e560..be8a364a469b9 100644
  
      def __get_string_vector_per_line_content(self, buff):
 diff --git a/virt/kvm/kvm_main.c b/virt/kvm/kvm_main.c
-index 584a5bab3af39..4c5259828efdc 100644
+index 584a5bab3af39..b76c775f61f99 100644
 --- a/virt/kvm/kvm_main.c
 +++ b/virt/kvm/kvm_main.c
 @@ -4834,6 +4834,12 @@ struct compat_kvm_clear_dirty_log {
@@ -79939,6 +80498,35 @@ index 584a5bab3af39..4c5259828efdc 100644
  	switch (ioctl) {
  #ifdef CONFIG_KVM_GENERIC_DIRTYLOG_READ_PROTECT
  	case KVM_CLEAR_DIRTY_LOG: {
+@@ -5393,6 +5404,7 @@ static int kvm_debugfs_open(struct inode *inode, struct file *file,
+ 			   int (*get)(void *, u64 *), int (*set)(void *, u64),
+ 			   const char *fmt)
+ {
++	int ret;
+ 	struct kvm_stat_data *stat_data = (struct kvm_stat_data *)
+ 					  inode->i_private;
+ 
+@@ -5404,15 +5416,13 @@ static int kvm_debugfs_open(struct inode *inode, struct file *file,
+ 	if (!kvm_get_kvm_safe(stat_data->kvm))
+ 		return -ENOENT;
+ 
+-	if (simple_attr_open(inode, file, get,
+-		    kvm_stats_debugfs_mode(stat_data->desc) & 0222
+-		    ? set : NULL,
+-		    fmt)) {
++	ret = simple_attr_open(inode, file, get,
++			       kvm_stats_debugfs_mode(stat_data->desc) & 0222
++			       ? set : NULL, fmt);
++	if (ret)
+ 		kvm_put_kvm(stat_data->kvm);
+-		return -ENOMEM;
+-	}
+ 
+-	return 0;
++	return ret;
+ }
+ 
+ static int kvm_debugfs_release(struct inode *inode, struct file *file)
 diff --git a/virt/kvm/pfncache.c b/virt/kvm/pfncache.c
 index 68ff41d395452..346e47f155724 100644
 --- a/virt/kvm/pfncache.c
