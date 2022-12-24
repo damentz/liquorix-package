@@ -71,6 +71,29 @@ ubuntu)
     log INFO "Liquorix kernel installed successfully"
     echo ""
     ;;
+arch)
+
+    gpg_key='9AE4078033F8024D'
+    sudo pacman-key --keyserver hkps://keyserver.ubuntu.com --recv-keys $gpg_key
+    sudo pacman-key --lsign-key $gpg_key
+    log INFO "Liquorix keyring added to pacman-key"
+
+    repo_file='/etc/pacman.conf'
+    if ! grep -q 'liquorix.net/archlinux' /etc/pacman.conf; then
+        echo -e '\n[liquorix]\nServer = https://liquorix.net/archlinux/$repo/$arch' |\
+            sudo tee -a $repo_file
+        log INFO "Liquorix repository added successfully to $repo_file"
+    else
+        echo "Liquorix repo already configured in $repo_file, skipped add step"
+    fi
+
+    if ! pacman -Q | grep -q linux-lqx; then
+        sudo pacman -Syu linux-lqx linux-lqx-headers
+        log INFO "Liquorix kernel installed successfully"
+    else
+        log INFO "Liquorix kernel already installed"
+    fi
+    ;;
 *)
     log ERROR "This distribution is not supported at this time"
     exit 1
