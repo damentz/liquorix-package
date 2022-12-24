@@ -84,7 +84,7 @@ arch)
             sudo tee -a $repo_file
         log INFO "Liquorix repository added successfully to $repo_file"
     else
-        echo "Liquorix repo already configured in $repo_file, skipped add step"
+        log INFO "Liquorix repo already configured in $repo_file, skipped add step"
     fi
 
     if ! pacman -Q | grep -q linux-lqx; then
