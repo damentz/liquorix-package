@@ -88,7 +88,7 @@ arch)
     fi
 
     if ! pacman -Q | grep -q linux-lqx; then
-        sudo pacman -Syu linux-lqx linux-lqx-headers
+        sudo pacman -Sy linux-lqx linux-lqx-headers
         log INFO "Liquorix kernel installed successfully"
     else
         log INFO "Liquorix kernel already installed"
