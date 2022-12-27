@@ -34,7 +34,7 @@ fi
 log INFO "Distribution is $dist"
 
 case "$dist" in
-ubuntu)
+*ubuntu*)
     add-apt-repository ppa:damentz/liquorix && apt-get update
 
     echo ""
@@ -47,7 +47,7 @@ ubuntu)
     log INFO "Liquorix kernel installed successfully"
     echo ""
     ;;
-debian)
+*debian*)
     # Install debian repo
     mkdir -p /etc/apt/{sources.list.d,trusted.gpg.d}
     curl -o /etc/apt/trusted.gpg.d/liquorix-keyring.gpg \
@@ -75,7 +75,7 @@ debian)
     log INFO "Liquorix kernel installed successfully"
     echo ""
     ;;
-arch)
+*arch*)
 
     gpg_key='9AE4078033F8024D'
     sudo pacman-key --keyserver hkps://keyserver.ubuntu.com --recv-keys $gpg_key
