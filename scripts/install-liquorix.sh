@@ -26,7 +26,11 @@ fi
 export DEBIAN_FRONTEND="noninteractive" # `curl <URL> | sudo bash` suppresses stdin
 export NEEDRESTART_SUSPEND="*" # suspend needrestart or it will restart services automatically
 
-dist="$(grep '^ID' /etc/os-release | sed 's/ID=//' | head -1)"
+dist="$(grep '^ID_LIKE=' /etc/os-release | sed 's/ID_LIKE=//' | head -1)"
+if [ -z "$dist" ]; then
+    dist="$(grep '^ID=' /etc/os-release | sed 's/ID=//' | head -1)"
+fi
+
 log INFO "Distribution is $dist"
 
 case "$dist" in
