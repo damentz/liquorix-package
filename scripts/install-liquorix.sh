@@ -34,6 +34,19 @@ fi
 log INFO "Distribution is $dist"
 
 case "$dist" in
+ubuntu)
+    add-apt-repository ppa:damentz/liquorix && apt-get update
+
+    echo ""
+    log INFO "Liquorix PPA repository added successfully"
+    echo ""
+
+    apt-get install -y linux-image-liquorix-amd64 linux-headers-liquorix-amd64
+
+    echo ""
+    log INFO "Liquorix kernel installed successfully"
+    echo ""
+    ;;
 debian)
     # Install debian repo
     mkdir -p /etc/apt/{sources.list.d,trusted.gpg.d}
@@ -54,19 +67,6 @@ debian)
 
     echo ""
     log INFO "Liquorix repository added successfully to $repo_file"
-    echo ""
-
-    apt-get install -y linux-image-liquorix-amd64 linux-headers-liquorix-amd64
-
-    echo ""
-    log INFO "Liquorix kernel installed successfully"
-    echo ""
-    ;;
-ubuntu)
-    add-apt-repository ppa:damentz/liquorix && apt-get update
-
-    echo ""
-    log INFO "Liquorix PPA repository added successfully"
     echo ""
 
     apt-get install -y linux-image-liquorix-amd64 linux-headers-liquorix-amd64
