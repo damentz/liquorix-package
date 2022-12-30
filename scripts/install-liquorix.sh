@@ -29,6 +29,8 @@ export NEEDRESTART_SUSPEND="*" # suspend needrestart or it will restart services
 # Smash all possible distributions into one line and simply try testing most
 # esoteric distribution to most generic.
 dists="$(grep -P '^ID.*=' /etc/os-release | cut -f2 -d= | tr '\n' ' ')"
+dists="${dists//'"'}"   # strip double quotes
+dists="${dists//"'''"}" # strip single quotes
 log INFO "Possible distributions: $dists"
 
 case "$dists" in
