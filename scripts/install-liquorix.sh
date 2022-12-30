@@ -26,14 +26,20 @@ fi
 export DEBIAN_FRONTEND="noninteractive" # `curl <URL> | sudo bash` suppresses stdin
 export NEEDRESTART_SUSPEND="*" # suspend needrestart or it will restart services automatically
 
+dist="$(grep -Po '(?<=^ID=).*$' /etc/os-release | sed "s/['\"]//g" | xargs)"
+dist_like="$(grep -Po '(?<=^ID_LIKE=).*$' /etc/os-release | sed "s/['\"]//g" | xargs)"
+
+if [ -n "$dist" ]; then
+    log INFO "Distribution is '$dist'"
+fi
+
+if [ -n "$dist_like" ]; then
+    log INFO "The distribution is derived from '$dist_like'"
+fi
+
 # Smash all possible distributions into one line and simply try testing most
 # esoteric distribution to most generic.
-dists="$(grep -P '^ID.*=' /etc/os-release | cut -f2 -d= | tr '\n' ' ')"
-dists="${dists//'"'}"   # strip double quotes
-dists="${dists//"'''"}" # strip single quotes
-log INFO "Possible distributions: $dists"
-
-case "$dists" in
+case "$dist $dist_like" in
 *ubuntu*)
     add-apt-repository ppa:damentz/liquorix && apt-get update
 
