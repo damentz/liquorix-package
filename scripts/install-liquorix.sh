@@ -26,14 +26,12 @@ fi
 export DEBIAN_FRONTEND="noninteractive" # `curl <URL> | sudo bash` suppresses stdin
 export NEEDRESTART_SUSPEND="*" # suspend needrestart or it will restart services automatically
 
-dist="$(grep '^ID_LIKE=' /etc/os-release | sed 's/ID_LIKE=//' | head -1)"
-if [ -z "$dist" ]; then
-    dist="$(grep '^ID=' /etc/os-release | sed 's/ID=//' | head -1)"
-fi
+# Smash all possible distributions into one line and simply try testing most
+# esoteric distribution to most generic.
+dists="$(grep -P '^ID.*=' /etc/os-release | cut -f2 -d= | tr '\n' ' ')"
+log INFO "Possible distributions: $dists"
 
-log INFO "Distribution is $dist"
-
-case "$dist" in
+case "$dists" in
 *ubuntu*)
     add-apt-repository ppa:damentz/liquorix && apt-get update
 
