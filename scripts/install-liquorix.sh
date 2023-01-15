@@ -37,7 +37,7 @@ log INFO "Possible distributions: $dists"
 
 case "$dists" in
 *ubuntu*)
-    add-apt-repository ppa:damentz/liquorix && apt-get update
+    add-apt-repository -y ppa:damentz/liquorix
 
     echo ""
     log INFO "Liquorix PPA repository added successfully"
