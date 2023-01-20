@@ -53,8 +53,6 @@ case "$dists" in
     echo ""
     ;;
 *debian*)
-    # Install debian repo
-
     apt-get update && apt-get install -y --no-install-recommends \
         curl gpg ca-certificates
 
@@ -91,7 +89,6 @@ case "$dists" in
     echo ""
     ;;
 *arch*)
-
     gpg_key='9AE4078033F8024D'
     sudo pacman-key --keyserver hkps://keyserver.ubuntu.com --recv-keys $gpg_key
     sudo pacman-key --lsign-key $gpg_key
