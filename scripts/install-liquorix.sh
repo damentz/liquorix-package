@@ -51,19 +51,29 @@ case "$dists" in
     ;;
 *debian*)
     # Install debian repo
-    mkdir -p /etc/apt/{sources.list.d,trusted.gpg.d}
-    curl -o /etc/apt/trusted.gpg.d/liquorix-keyring.gpg \
-        'https://liquorix.net/liquorix-keyring.gpg'
+
+    apt-get update && apt-get install -y --no-install-recommends \
+        curl gpg ca-certificates
+
+    mkdir -p /etc/apt/{sources.list.d,keyrings}
+    chmod 0755 /etc/apt/{sources.list.d,keyrings}
+
+    keyring_url='https://liquorix.net/liquorix-keyring.gpg'
+    keyring_path='/etc/apt/keyrings/liquorix-keyring.gpg'
+    curl "$keyring_url" | gpg --batch --yes --output "$keyring_path" --dearmor
+    chmod 0644 "$keyring_path"
+
     echo ""
-    log INFO "Liquorix keyring added to /etc/apt/trusted.gpg.d/liquorix-keyring.gpg"
+    log INFO "Liquorix keyring added to $keyring_path"
     echo ""
 
     apt-get install apt-transport-https lsb-release -y
 
     repo_file="/etc/apt/sources.list.d/liquorix.list"
     repo_code="$(lsb_release -cs)"
-    echo "deb [arch=amd64] https://liquorix.net/debian $repo_code main"      > $repo_file
-    echo "deb-src [arch=amd64] https://liquorix.net/debian $repo_code main" >> $repo_file
+    repo_line="[arch=amd64 signed-by=$keyring_path] https://liquorix.net/debian $repo_code main"
+    echo "deb $repo_line"      > $repo_file
+    echo "deb-src $repo_line" >> $repo_file
 
     apt-get update -y
 
