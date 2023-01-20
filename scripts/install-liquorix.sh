@@ -37,6 +37,9 @@ log INFO "Possible distributions: $dists"
 
 case "$dists" in
 *ubuntu*)
+    apt-get update && apt-get install -y --no-install-recommends \
+        gpg gpg-agent software-properties-common
+
     add-apt-repository -y ppa:damentz/liquorix
 
     echo ""
