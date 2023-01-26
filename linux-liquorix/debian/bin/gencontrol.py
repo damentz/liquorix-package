@@ -118,7 +118,7 @@ class Gencontrol(Base):
 
         if self.version.linux_modifier is None:
             try:
-                abiname_part = '-%s' % self.config['abi', arch]['abiname']
+                abiname_part = '.%s' % self.config['abi', arch]['abiname']
             except KeyError:
                 abiname_part = self.abiname_part
             makeflags['ABINAME'] = vars['abiname'] = \
@@ -435,7 +435,7 @@ class Gencontrol(Base):
         if self.version.linux_modifier is not None:
             self.abiname_part = ''
         else:
-            self.abiname_part = '-%s' % self.config['abi', ]['abiname']
+            self.abiname_part = '.%s' % self.config['abi', ]['abiname']
         self.vars = {
             'upstreamversion': self.version.linux_upstream,
             'version': self.version.linux_version,
