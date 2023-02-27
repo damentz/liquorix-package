@@ -104,7 +104,7 @@ case "$dists" in
     fi
 
     if ! pacman -Q | grep -q linux-lqx; then
-        sudo pacman -Sy linux-lqx linux-lqx-headers
+        sudo pacman -Sy --noconfirm linux-lqx linux-lqx-headers
         log INFO "Liquorix kernel installed successfully"
     else
         log INFO "Liquorix kernel already installed"
