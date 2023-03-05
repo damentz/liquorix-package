@@ -47,6 +47,14 @@ case "$dists" in
     echo ""
 
     apt-get install -y linux-image-liquorix-amd64 linux-headers-liquorix-amd64
+    
+    if [[ "$(dpkg --list)" == *nvidia-driver* ]]; then
+    log "You currently have nvidia proprietry drivers installed, installing nvidia-dkms"
+    # From here https://stackoverflow.com/questions/73107995/how-do-i-delete-everything-after-the-3rd-4rth-occurrence-of-a-character-using-se
+    latestnvidiadriver="$(apt-cache search 'nvidia-dkms-' |grep nvidia-dkms| grep -oE "^nvidia-dkms-?([^-]*){1}" |sort -nr|head -n1| tr -s [:space:] | tr -d '\012\015')"
+    apt install $latestnvidiadriver
+   fi
+
 
     echo ""
     log INFO "Liquorix kernel installed successfully"
