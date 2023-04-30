@@ -19,6 +19,8 @@ fi
 
 "$dir_scripts"/docker_bootstrap.sh "$procs"
 "$dir_scripts"/docker_build-source_all.sh "$procs" "$build"
+
+"$dir_scripts"/delete-ppa-packages.py
 "$dir_scripts"/docker_submit-ppa-sources.sh "$build"
 
 # We build only one kernel at a time since each build uses all CPU resources
