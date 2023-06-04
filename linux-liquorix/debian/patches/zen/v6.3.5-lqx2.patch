@@ -299,7 +299,7 @@ index 000000000000..05c84eec0f31
 +priority boost from unblocking while background threads that do most of the
 +processing receive the priority penalty for using their entire timeslice.
 diff --git a/Makefile b/Makefile
-index f5543eef4f82..fe64a88aa052 100644
+index f5543eef4f82..fbc19211970d 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -1,9 +1,9 @@
@@ -310,7 +310,7 @@ index f5543eef4f82..fe64a88aa052 100644
 -EXTRAVERSION =
 -NAME = Hurr durr I'ma ninja sloth
 +SUBLEVEL = 5
-+EXTRAVERSION = -lqx1
++EXTRAVERSION = -lqx2
 +NAME = Finding Humor In Nothing
  
  # *DOCUMENTATION*
@@ -8175,39 +8175,6 @@ index 24909069f872..757a188b952f 100644
  }
  
  /*
-diff --git a/crypto/Kconfig b/crypto/Kconfig
-index 9c86f7045157..1585a0648a6e 100644
---- a/crypto/Kconfig
-+++ b/crypto/Kconfig
-@@ -774,6 +774,16 @@ config CRYPTO_XTS
- 	  implementation currently can't handle a sectorsize which is not a
- 	  multiple of 16 bytes.
- 
-+config CRYPTO_XTS_AES_SYNC
-+	tristate "XTS AES synchronous implementation"
-+	depends on X86 && 64BIT
-+	select CRYPTO_AES
-+	select CRYPTO_AES_NI_INTEL
-+	help
-+	  A synchronous AES-XTS implementaion, which uses AES NI as a
-+	  backend implementation and falls back to generic implementation,
-+	  when FPU is not usable.
-+
- config CRYPTO_NHPOLY1305
- 	tristate
- 	select CRYPTO_HASH
-diff --git a/crypto/Makefile b/crypto/Makefile
-index d0126c915834..6c20ec52e8d9 100644
---- a/crypto/Makefile
-+++ b/crypto/Makefile
-@@ -92,6 +92,7 @@ obj-$(CONFIG_CRYPTO_PCBC) += pcbc.o
- obj-$(CONFIG_CRYPTO_CTS) += cts.o
- obj-$(CONFIG_CRYPTO_LRW) += lrw.o
- obj-$(CONFIG_CRYPTO_XTS) += xts.o
-+obj-$(CONFIG_CRYPTO_XTS_AES_SYNC) += xtsproxy.o
- obj-$(CONFIG_CRYPTO_CTR) += ctr.o
- obj-$(CONFIG_CRYPTO_XCTR) += xctr.o
- obj-$(CONFIG_CRYPTO_HCTR2) += hctr2.o
 diff --git a/crypto/algapi.c b/crypto/algapi.c
 index d08f864f08be..60b98d2c400e 100644
 --- a/crypto/algapi.c
@@ -9261,143 +9228,6 @@ index c91e93ece20b..b160eeb12c8e 100644
  
  		err = test_skcipher_vec_cfg(ENCRYPT, &vec, vec_name,
  					    cfg, req, tsgls);
-diff --git a/crypto/xtsproxy.c b/crypto/xtsproxy.c
-new file mode 100644
-index 000000000000..51ecfb7b4891
---- /dev/null
-+++ b/crypto/xtsproxy.c
-@@ -0,0 +1,131 @@
-+#include <linux/module.h>
-+#include <linux/crypto.h>
-+#include <linux/err.h>
-+#include <crypto/internal/skcipher.h>
-+#include <crypto/aes.h>
-+#include <asm/fpu/api.h>
-+
-+struct xtsproxy_ctx {
-+	struct crypto_skcipher *xts_aesni;
-+	struct crypto_skcipher *xts_generic;
-+};
-+
-+static int xtsproxy_skcipher_init(struct crypto_skcipher *tfm)
-+{
-+	struct xtsproxy_ctx *ctx = crypto_skcipher_ctx(tfm);
-+
-+	/* AESNI based XTS implementation, requires FPU to be available */
-+	ctx->xts_aesni = crypto_alloc_skcipher("__xts-aes-aesni", CRYPTO_ALG_INTERNAL, 0);
-+	if (IS_ERR(ctx->xts_aesni))
-+		return PTR_ERR(ctx->xts_aesni);
-+
-+	/* generic XTS implementation based on generic FPU-less AES */
-+	/* there is also aes-aesni implementation, which falls back to aes-generic */
-+	/* but we're doing FPU checks in our code, so no need to repeat those */
-+	/* as we will always fallback to aes-generic in this case */
-+	ctx->xts_generic = crypto_alloc_skcipher("xts(ecb(aes-generic))", 0, 0);
-+	if (IS_ERR(ctx->xts_generic))
-+		return PTR_ERR(ctx->xts_generic);
-+
-+	/* make sure we allocate enough request memory for both implementations */
-+	crypto_skcipher_set_reqsize(tfm, max(crypto_skcipher_reqsize(ctx->xts_aesni), crypto_skcipher_reqsize(ctx->xts_generic)));
-+
-+	return 0;
-+}
-+
-+static void xtsproxy_skcipher_exit(struct crypto_skcipher *tfm)
-+{
-+	struct xtsproxy_ctx *ctx = crypto_skcipher_ctx(tfm);
-+
-+	if (!IS_ERR_OR_NULL(ctx->xts_generic)) {
-+		crypto_free_skcipher(ctx->xts_generic);
-+		ctx->xts_generic = NULL;
-+	}
-+
-+	if (!IS_ERR_OR_NULL(ctx->xts_aesni)) {
-+		crypto_free_skcipher(ctx->xts_aesni);
-+		ctx->xts_aesni = NULL;
-+	}
-+}
-+
-+static int xtsproxy_setkey(struct crypto_skcipher *tfm, const u8 *key,
-+			    unsigned int keylen)
-+{
-+	struct xtsproxy_ctx *ctx = crypto_skcipher_ctx(tfm);
-+	int err;
-+
-+	err = crypto_skcipher_setkey(ctx->xts_aesni, key, keylen);
-+	if (err)
-+		return err;
-+
-+	return crypto_skcipher_setkey(ctx->xts_generic, key, keylen);
-+}
-+
-+static int xtsproxy_encrypt(struct skcipher_request *req)
-+{
-+	struct xtsproxy_ctx *ctx = crypto_skcipher_ctx(crypto_skcipher_reqtfm(req));
-+
-+	if (irq_fpu_usable())
-+		skcipher_request_set_tfm(req, ctx->xts_aesni);
-+	else
-+		skcipher_request_set_tfm(req, ctx->xts_generic);
-+
-+	/* underlying implementations should not try to sleep */
-+	req->base.flags &= ~(CRYPTO_TFM_REQ_MAY_SLEEP | CRYPTO_TFM_REQ_MAY_BACKLOG);
-+
-+	return crypto_skcipher_encrypt(req);
-+}
-+
-+static int xtsproxy_decrypt(struct skcipher_request *req)
-+{
-+	struct xtsproxy_ctx *ctx = crypto_skcipher_ctx(crypto_skcipher_reqtfm(req));
-+
-+	if (irq_fpu_usable())
-+		skcipher_request_set_tfm(req, ctx->xts_aesni);
-+	else
-+		skcipher_request_set_tfm(req, ctx->xts_generic);
-+
-+	/* underlying implementations should not try to sleep */
-+	req->base.flags &= ~(CRYPTO_TFM_REQ_MAY_SLEEP | CRYPTO_TFM_REQ_MAY_BACKLOG);
-+
-+	return crypto_skcipher_decrypt(req);
-+}
-+
-+static struct skcipher_alg xtsproxy_skcipher = {
-+	.base = {
-+		.cra_name			= "xts(aes)",
-+		.cra_driver_name	= "xts-aes-xtsproxy",
-+		/* make sure we don't use it unless requested explicitly */
-+		.cra_priority		= 0,
-+		/* .cra_flags			= CRYPTO_ALG_INTERNAL, */
-+		.cra_blocksize		= AES_BLOCK_SIZE,
-+		.cra_ctxsize		= sizeof(struct xtsproxy_ctx),
-+		.cra_module			= THIS_MODULE,
-+	},
-+	.min_keysize	= 2 * AES_MIN_KEY_SIZE,
-+	.max_keysize	= 2 * AES_MAX_KEY_SIZE,
-+	.ivsize			= AES_BLOCK_SIZE,
-+	.init 			= xtsproxy_skcipher_init,
-+	.exit 			= xtsproxy_skcipher_exit,
-+	.setkey			= xtsproxy_setkey,
-+	.encrypt		= xtsproxy_encrypt,
-+	.decrypt		= xtsproxy_decrypt,
-+};
-+
-+static int __init xtsproxy_init(void)
-+{
-+	return crypto_register_skcipher(&xtsproxy_skcipher);
-+}
-+
-+static void __exit xtsproxy_fini(void)
-+{
-+	crypto_unregister_skcipher(&xtsproxy_skcipher);
-+}
-+
-+module_init(xtsproxy_init);
-+module_exit(xtsproxy_fini);
-+
-+MODULE_DESCRIPTION("XTS-AES using AESNI implementation with generic AES fallback");
-+MODULE_AUTHOR("Ignat Korchagin <ignat@cloudflare.com>");
-+MODULE_LICENSE("GPL");
-+MODULE_ALIAS_CRYPTO("xts(aes)");
 diff --git a/drivers/Makefile b/drivers/Makefile
 index 20b118dca999..c19dee206e53 100644
 --- a/drivers/Makefile
@@ -73390,7 +73220,7 @@ index 1637b65ba07a..033c6deeb515 100644
  void resched_latency_warn(int cpu, u64 latency)
  {
 diff --git a/kernel/sched/fair.c b/kernel/sched/fair.c
-index 5f6587d94c1d..150c5ef465a3 100644
+index 5f6587d94c1d..64791e6fc50d 100644
 --- a/kernel/sched/fair.c
 +++ b/kernel/sched/fair.c
 @@ -69,8 +69,13 @@
@@ -73469,6 +73299,69 @@ index 5f6587d94c1d..150c5ef465a3 100644
  		return prev_cpu;
  
  	schedstat_inc(sd->ttwu_move_affine);
+@@ -6966,6 +6989,37 @@ static int select_idle_cpu(struct task_struct *p, struct sched_domain *sd, bool
+ 	return idle_cpu;
+ }
+ 
++/*
++ * For the multiple-LLC per node case, make sure to try the other LLC's if the
++ * local LLC comes up empty.
++ */
++static int
++select_idle_node(struct task_struct *p, struct sched_domain *sd, int target)
++{
++	struct sched_domain *parent = sd->parent;
++	struct sched_group *sg;
++
++	/* Make sure to not cross nodes. */
++	if (!parent || parent->flags & SD_NUMA)
++		return -1;
++
++	sg = parent->groups;
++	do {
++		int cpu = cpumask_first(sched_group_span(sg));
++
++		if (!cpus_share_cache(cpu, target)) {
++			int i = select_idle_cpu(p, per_cpu(sd_llc, cpu),
++						test_idle_cores(cpu), cpu);
++			if ((unsigned)i < nr_cpumask_bits)
++				return i;
++		}
++
++		sg = sg->next;
++	} while (sg != parent->groups);
++
++	return -1;
++}
++
+ /*
+  * Scan the asym_capacity domain for idle CPUs; pick the first idle one on which
+  * the task fits. If no CPU is big enough, but there are idle ones, try to
+@@ -7138,6 +7192,12 @@ static int select_idle_sibling(struct task_struct *p, int prev, int target)
+ 	if ((unsigned)i < nr_cpumask_bits)
+ 		return i;
+ 
++	if (sched_feat(SIS_NODE)) {
++		i = select_idle_node(p, sd, target);
++		if ((unsigned)i < nr_cpumask_bits)
++			return i;
++	}
++
+ 	return target;
+ }
+ 
+diff --git a/kernel/sched/features.h b/kernel/sched/features.h
+index ee7f23c76bd3..9e390eb82e38 100644
+--- a/kernel/sched/features.h
++++ b/kernel/sched/features.h
+@@ -62,6 +62,7 @@ SCHED_FEAT(TTWU_QUEUE, true)
+  */
+ SCHED_FEAT(SIS_PROP, false)
+ SCHED_FEAT(SIS_UTIL, true)
++SCHED_FEAT(SIS_NODE, true)
+ 
+ /*
+  * Issue a WARN when we do multiple update_rq_clock() calls
 diff --git a/kernel/sched/idle.c b/kernel/sched/idle.c
 index e9ef66be2870..4fff3f75a779 100644
 --- a/kernel/sched/idle.c
