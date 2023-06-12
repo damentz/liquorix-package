@@ -23,7 +23,7 @@ source_distro='ubuntu'
 source_release='focal'
 
 # stable => bullseye, testing => bookworm, unstable => sid
-releases_debian=('bullseye' 'bookworm' 'sid')
+releases_debian=('bullseye' 'bookworm' 'trixie' 'sid')
 releases_ubuntu=('focal' 'jammy' 'kinetic' 'lunar')
 mirror_debian='http://deb.debian.org/debian'
 mirror_ubuntu='http://archive.ubuntu.com/ubuntu'
