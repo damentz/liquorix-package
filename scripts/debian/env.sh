@@ -19,12 +19,12 @@ package_source="${package_name}_${version_kernel}.orig.tar.xz"
 # Distribution and release to build source packages with.  Normally defaulted
 # to Debian Sid since it normally tracks the latest upstream.
 source_arch='amd64'
-source_distro='ubuntu'
-source_release='focal'
+source_distro='debian'
+source_release='bookworm'
 
 # stable => bullseye, testing => bookworm, unstable => sid
 releases_debian=('bullseye' 'bookworm' 'trixie' 'sid')
-releases_ubuntu=('focal' 'jammy' 'kinetic' 'lunar' 'mantic')
+releases_ubuntu=('jammy' 'kinetic' 'lunar' 'mantic')
 mirror_debian='http://deb.debian.org/debian'
 mirror_ubuntu='http://archive.ubuntu.com/ubuntu'
 
@@ -115,6 +115,11 @@ function build_source_package {
     $clean || $clean
 
     mk-build-deps -ir -t 'apt-get -y'
+
+    EDITOR="cat" \
+    DPKG_SOURCE_COMMIT_MESSAGE="Automated changes through CI" \
+    DPKG_SOURCE_COMMIT_OPTIONS="--include-removal" \
+        dpkg-source --commit . ci.patch
 
     echo "[INFO ] Making source package"
     $schedtool dpkg-buildpackage --build=source
