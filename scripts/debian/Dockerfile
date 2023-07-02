@@ -23,8 +23,7 @@ RUN apt-get update &&\
         equivs \
         wget \
         gnupg \
-        schedtool \
-        pkg-config &&\
+        schedtool &&\
     apt-get clean &&\
     rm -rfv /var/lib/apt/lists/*
 
