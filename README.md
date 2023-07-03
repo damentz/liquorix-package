@@ -43,6 +43,18 @@ If the build completes successfully, the build for Ubuntu Focal will be found un
 
 At this time, only AMD64 is supported and is the only architecture that will build successfully.
 
+### Package Signing
+
+If you run into trouble with errors for signing or don't desire signed packages, look for instances in the scripts folder of `dpkg-buildpackage` and add the `--no-sign` flag to all lines.
+
+For example, from the root of this project, execute the following script to find all instances and edit each file as necessary:
+
+```shell
+find scripts/ -type f | xargs grep -H 'dpkg-buildpackage'
+```
+
+If signing is desired, make sure to update the changelog with `dch -i --auto-nmu` and set the author to match your signing key you set up with GnuPG.
+
 ## Contributing
 
 PRs accepted.
