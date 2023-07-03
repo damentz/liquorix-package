@@ -11,7 +11,11 @@ The following software must be installed.
 1. Docker
 2. GnuPG
 
-GnuPG must be configured with a `default-key` line defined in `~/.gnupg/gpg.conf`.  Consult the GnuPG manual for more information if you're unsure what to put here.
+GnuPG must be configured with a `default-key` line defined in `~/.gnupg/gpg.conf`.  Consult the GnuPG manual for more information if you're unsure what to put here.  But if you're creating a temporary signing key for the purposes of building, follow these steps:
+
+1. Execute `gpg --full-gen-key` and follow prompts
+2. Run `gpg --list-secret-keys` to produce a list of keys you own the secrets to
+3. Create `~/.gnupg/gpg.conf` and add `default-key EXAMPLE1234...`, where the example is your key from the previous output
 
 ## Usage
 
