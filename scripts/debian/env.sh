@@ -24,7 +24,7 @@ source_release='bookworm'
 
 # stable => bullseye, testing => bookworm, unstable => sid
 releases_debian=('bullseye' 'bookworm' 'trixie' 'sid')
-releases_ubuntu=('jammy' 'kinetic' 'lunar' 'mantic')
+releases_ubuntu=('jammy' 'lunar' 'mantic')
 mirror_debian='http://deb.debian.org/debian'
 mirror_ubuntu='http://archive.ubuntu.com/ubuntu'
 
