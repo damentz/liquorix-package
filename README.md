@@ -34,16 +34,16 @@ Subsequent executions of `docker_bootstrap.sh` will update the existing images r
 The `debian/docker_build-source.sh` script require two operands, the distribution and release.  For example, to build for Ubuntu Focal, you would execute below:
 
 ```shell
-./scripts/debian/docker_build-source.sh ubuntu focal
+./scripts/debian/docker_build-source.sh debian bookworm
 ```
 
 Once complete, you need to build the binary:
 
 ```shell
-./scripts/debian/docker_build-binary.sh amd64 ubuntu focal
+./scripts/debian/docker_build-binary.sh amd64 debian bookworm
 ```
 
-If the build completes successfully, the build for Ubuntu Focal will be found under `artifacts/ubuntu/focal`.
+If the build completes successfully, the build for Debian Bookworm will be found under `artifacts/debian/bookworm`.
 
 At this time, only AMD64 is supported and is the only architecture that will build successfully.
 
