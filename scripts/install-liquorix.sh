@@ -26,12 +26,18 @@ fi
 export DEBIAN_FRONTEND="noninteractive" # `curl <URL> | sudo bash` suppresses stdin
 export NEEDRESTART_SUSPEND="*" # suspend needrestart or it will restart services automatically
 
-# Smash all possible distributions into one line and simply try testing most
-# esoteric distribution to most generic.
+# Smash all possible distributions into one line
 dists="$(
     grep -P '^ID.*=' /etc/os-release | cut -f2 -d= | tr '\n' ' ' |
     tr '[:upper:]' '[:lower:]' | tr -dc '[:lower:] [:space:]'
 )"
+
+# Append upstream distributions through package manager landmarks
+command -v apt-get &> /dev/null && dists="$dists debian"
+command -v pacman  &> /dev/null && dists="$dists arch"
+
+# Deduplicate and trim list of discovered distributions
+dists=$(echo "$dists" | tr '[:space:]' '\n' | sort | uniq | xargs)
 
 log INFO "Possible distributions: $dists"
 
