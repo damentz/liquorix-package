@@ -63,6 +63,15 @@ case "$dists" in
     else
         log INFO "Liquorix kernel already installed"
     fi
+
+    grub_cfg='/boot/grub/grub.cfg'
+    if [ -f "$grub_cfg" ]; then
+        if sudo grub-mkconfig -o "$grub_cfg"; then
+            log INFO "GRUB updated successfully"
+        else
+            log ERROR "GRUB update failed"
+        fi
+    fi
     ;;
 *ubuntu*)
     apt-get update && apt-get install -y --no-install-recommends \
