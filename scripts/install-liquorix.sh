@@ -77,7 +77,8 @@ case "$dists" in
     apt-get update && apt-get install -y --no-install-recommends \
         gpg gpg-agent software-properties-common
 
-    add-apt-repository -y ppa:damentz/liquorix
+    add-apt-repository -y ppa:damentz/liquorix &&\
+    apt-get update -y
 
     echo ""
     log INFO "Liquorix PPA repository added successfully"
