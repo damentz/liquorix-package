@@ -1,11 +1,9 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3
 
 import optparse
-import os.path
 import re
-import sys
 
-from debian_linux.kconfig import *
+from debian_linux.kconfig import KconfigFile
 
 
 def merge(output, configs, overrides):
@@ -18,7 +16,7 @@ def merge(output, configs, overrides):
 
 
 def opt_callback_dict(option, opt, value, parser):
-    match = re.match('^\s*(\S+)=(\S+)\s*$', value)
+    match = re.match(r'^\s*(\S+)=(\S+)\s*$', value)
     if not match:
         raise optparse.OptionValueError('not key=value')
     dest = option.dest
