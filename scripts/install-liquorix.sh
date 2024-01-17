@@ -3,6 +3,8 @@
 set -euo pipefail
 
 log() {
+    echo ""
+
     case "$1" in
     INFO)
         echo -e "\033[32m[INFO ] $2\033[0m" # green
@@ -11,6 +13,8 @@ log() {
         echo -e "\033[31m[ERROR] $2\033[0m" # red
 	;;
     esac
+
+    echo ""
 }
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -80,15 +84,11 @@ case "$dists" in
     add-apt-repository -y ppa:damentz/liquorix &&\
     apt-get update -y
 
-    echo ""
     log INFO "Liquorix PPA repository added successfully"
-    echo ""
 
     apt-get install -y linux-image-liquorix-amd64 linux-headers-liquorix-amd64
 
-    echo ""
     log INFO "Liquorix kernel installed successfully"
-    echo ""
     ;;
 *debian*)
     apt-get update && apt-get install -y --no-install-recommends \
@@ -102,9 +102,7 @@ case "$dists" in
     curl "$keyring_url" | gpg --batch --yes --output "$keyring_path" --dearmor
     chmod 0644 "$keyring_path"
 
-    echo ""
     log INFO "Liquorix keyring added to $keyring_path"
-    echo ""
 
     apt-get install apt-transport-https lsb-release -y
 
@@ -123,15 +121,11 @@ case "$dists" in
 
     apt-get update -y
 
-    echo ""
     log INFO "Liquorix repository added successfully to $repo_file"
-    echo ""
 
     apt-get install -y linux-image-liquorix-amd64 linux-headers-liquorix-amd64
 
-    echo ""
     log INFO "Liquorix kernel installed successfully"
-    echo ""
     ;;
 *)
     log ERROR "This distribution is not supported at this time"
