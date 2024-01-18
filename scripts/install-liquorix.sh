@@ -107,13 +107,6 @@ case "$dists" in
 
     repo_file="/etc/apt/sources.list.d/liquorix.list"
     repo_code="$(lsb_release -cs)"
-
-    # Override to sid repository if the description mentions it
-    if lsb_release -d | grep -q '/sid'; then
-        log INFO "Using sid repository instead of $repo_code"
-        repo_code='sid'
-    fi
-
     repo_line="[arch=amd64 signed-by=$keyring_path] https://liquorix.net/debian $repo_code main"
     echo "deb $repo_line"      > $repo_file
     echo "deb-src $repo_line" >> $repo_file
