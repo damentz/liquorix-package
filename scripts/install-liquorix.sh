@@ -3,18 +3,17 @@
 set -euo pipefail
 
 log() {
-    echo ""
+  local level=$1
+  local message=$2
 
-    case "$1" in
-    INFO)
-        echo -e "\033[32m[INFO ] $2\033[0m" # green
-	;;
-    ERROR)
-        echo -e "\033[31m[ERROR] $2\033[0m" # red
-	;;
-    esac
-
-    echo ""
+  echo ""
+  case "$level" in
+      INFO)  printf "\033[32m[INFO ] %s\033[0m\n" "$message" ;; # green
+      WARN)  printf "\033[33m[WARN ] %s\033[0m\n" "$message" ;; # yellow
+      ERROR) printf "\033[31m[ERROR] %s\033[0m\n" "$message" ;; # red
+      *) printf "[UNKNOWN] %s\n" "$message" ;;
+  esac
+  echo ""
 }
 
 if [ "$(id -u)" -ne 0 ]; then
