@@ -106,7 +106,10 @@ case "$dists" in
     apt-get install apt-transport-https lsb-release -y
 
     repo_file="/etc/apt/sources.list.d/liquorix.list"
-    repo_code="$(lsb_release -cs)"
+    repo_code="$(
+        apt-cache policy | grep o=Debian | grep -Po 'n=\w+' | cut -f2 -d= |\
+        sort | uniq -c | sort | tail -n1 | awk '{print $2}'
+    )"
     repo_line="[arch=amd64 signed-by=$keyring_path] https://liquorix.net/debian $repo_code main"
     echo "deb $repo_line"      > $repo_file
     echo "deb-src $repo_line" >> $repo_file
