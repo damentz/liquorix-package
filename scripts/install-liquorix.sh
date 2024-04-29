@@ -3,17 +3,17 @@
 set -euo pipefail
 
 log() {
-  local level=$1
-  local message=$2
+    local level=$1
+    local message=$2
 
-  echo ""
-  case "$level" in
-      INFO)  printf "\033[32m[INFO ] %s\033[0m\n" "$message" ;; # green
-      WARN)  printf "\033[33m[WARN ] %s\033[0m\n" "$message" ;; # yellow
-      ERROR) printf "\033[31m[ERROR] %s\033[0m\n" "$message" ;; # red
-      *) printf "[UNKNOWN] %s\n" "$message" ;;
-  esac
-  echo ""
+    echo ""
+    case "$level" in
+    INFO) printf "\033[32m[INFO ] %s\033[0m\n" "$message" ;;  # green
+    WARN) printf "\033[33m[WARN ] %s\033[0m\n" "$message" ;;  # yellow
+    ERROR) printf "\033[31m[ERROR] %s\033[0m\n" "$message" ;; # red
+    *) printf "[UNKNOWN] %s\n" "$message" ;;
+    esac
+    echo ""
 }
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -27,17 +27,17 @@ if [ "$(uname -m)" != x86_64 ]; then
 fi
 
 export DEBIAN_FRONTEND="noninteractive" # `curl <URL> | sudo bash` suppresses stdin
-export NEEDRESTART_SUSPEND="*" # suspend needrestart or it will restart services automatically
+export NEEDRESTART_SUSPEND="*"          # suspend needrestart or it will restart services automatically
 
 # Smash all possible distributions into one line
 dists="$(
     grep -P '^ID.*=' /etc/os-release | cut -f2 -d= | tr '\n' ' ' |
-    tr '[:upper:]' '[:lower:]' | tr -dc '[:lower:] [:space:]'
+        tr '[:upper:]' '[:lower:]' | tr -dc '[:lower:] [:space:]'
 )"
 
 # Append upstream distributions through package manager landmarks
-command -v apt-get &> /dev/null && dists="$dists debian"
-command -v pacman  &> /dev/null && dists="$dists arch"
+command -v apt-get &>/dev/null && dists="$dists debian"
+command -v pacman &>/dev/null && dists="$dists arch"
 
 # Deduplicate and trim list of discovered distributions
 dists=$(echo "$dists" | tr '[:space:]' '\n' | sort | uniq | xargs)
@@ -53,14 +53,14 @@ case "$dists" in
 
     repo_file='/etc/pacman.conf'
     if ! grep -q 'liquorix.net/archlinux' /etc/pacman.conf; then
-        echo -e '\n[liquorix]\nServer = https://liquorix.net/archlinux/$repo/$arch' |\
+        echo -e '\n[liquorix]\nServer = https://liquorix.net/archlinux/$repo/$arch' |
             sudo tee -a $repo_file
         log INFO "Liquorix repository added successfully to $repo_file"
     else
         log INFO "Liquorix repo already configured in $repo_file, skipped add step"
     fi
 
-    if ! pacman -Q | grep -q linux-lqx; then
+    if ! pacman -Q linux-lqx | grep -q linux-lqx; then
         sudo pacman -Sy --noconfirm linux-lqx linux-lqx-headers
         log INFO "Liquorix kernel installed successfully"
     else
@@ -80,8 +80,8 @@ case "$dists" in
     apt-get update && apt-get install -y --no-install-recommends \
         gpg gpg-agent software-properties-common
 
-    add-apt-repository -y ppa:damentz/liquorix &&\
-    apt-get update -y
+    add-apt-repository -y ppa:damentz/liquorix &&
+        apt-get update -y
 
     log INFO "Liquorix PPA repository added successfully"
 
@@ -107,12 +107,12 @@ case "$dists" in
 
     repo_file="/etc/apt/sources.list.d/liquorix.list"
     repo_code="$(
-        apt-cache policy | grep o=Debian | grep -Po 'n=\w+' | cut -f2 -d= |\
-        sort | uniq -c | sort | tail -n1 | awk '{print $2}'
+        apt-cache policy | grep o=Debian | grep -Po 'n=\w+' | cut -f2 -d= |
+            sort | uniq -c | sort | tail -n1 | awk '{print $2}'
     )"
     repo_line="[arch=amd64 signed-by=$keyring_path] https://liquorix.net/debian $repo_code main"
-    echo "deb $repo_line"      > $repo_file
-    echo "deb-src $repo_line" >> $repo_file
+    echo "deb $repo_line" >$repo_file
+    echo "deb-src $repo_line" >>$repo_file
 
     apt-get update -y
 
