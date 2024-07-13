@@ -8,9 +8,26 @@ FROM $ARCH/$DISTRO:base-devel
 RUN echo 'Server = https://mirrors.kernel.org/archlinux/$repo/os/$arch' \
       > /etc/pacman.d/mirrorlist &&\
     pacman -Syyu \
-        gnupg pacman-contrib zstd schedtool sudo python \
-        kmod inetutils bc libelf cpio fakeroot base-devel \
-        libeatmydata pahole --noconfirm --needed &&\
+        base-devel \
+        bc \
+        cpio \
+        fakeroot \
+        git \
+        gnupg \
+        inetutils \
+        kmod \
+        libeatmydata \
+        libelf \
+        openssh \
+        pacman-contrib \
+        pahole \
+        python \
+        schedtool \
+        sudo \
+        wget \
+        zstd \
+        --noconfirm \
+        --needed &&\
     rm -rf /var/cache/pacman
 
 ENV LD_PRELOAD=/usr/lib/libeatmydata.so
@@ -27,8 +44,9 @@ WORKDIR /home/builder
 ARG DEFAULT
 ARG PUBLIC
 ARG SECRET
-RUN gpg --keyserver hkp://keyserver.ubuntu.com --recv-keys \
-		79BE3E4300411886  9AE4078033F8024D  38DBBDC86092693E &&\
+RUN mkdir -m700 ~/.gnupg &&\
+    echo 'keyserver hkps://keys.openpgp:443' > ~/.gnupg/dirmngr.conf &&\
+    gpg --locate-keys torvalds@kernel.org gregkh@kernel.org &&\
     echo "$PUBLIC" | gpg --import &&\
     echo "$SECRET" | gpg --import &&\
     echo "default-key $DEFAULT" >> ~/.gnupg/gpg.conf
