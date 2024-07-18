@@ -44,12 +44,12 @@ fi
 declare public="$(gpg --armor --export -a "$default_key")"
 declare secret="$(gpg --armor --export-secret-keys -a "$default_key")"
 
-if echo "$public" | head -n1 | grep -q 'BEGIN PGP PUBLIC KEY BLOCK'; then
+if ! echo "$public" | head -n1 | grep -q 'BEGIN PGP PUBLIC KEY BLOCK'; then
     echo "[ERROR] Exported public key is empty!  Cannot proceed with building bootstrap images."
     exit 1
 fi
 
-if echo "$secret" | head -n1 | grep -q 'BEGIN PGP PRIVATE KEY BLOCK'; then
+if ! echo "$secret" | head -n1 | grep -q 'BEGIN PGP PRIVATE KEY BLOCK'; then
     echo "[ERROR] Exported secret key is empty!  Cannot proceed with building bootstrap images."
     exit 1
 fi
