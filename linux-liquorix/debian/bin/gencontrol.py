@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 
-import sys
-sys.path.append("debian/lib/python")
-
 import codecs
 import os
-import os.path
-
 from debian_linux import config
-from debian_linux.debian import *
+from debian_linux.debian import (
+    VersionLinux,
+    PackageRelation,
+    PackageRelationGroup,
+    PackageRelationEntry,
+    PackageDescription,
+)
 from debian_linux.gencontrol import Gencontrol as Base, merge_packages
 from debian_linux.utils import Templates
+
 
 class Gencontrol(Base):
     config_schema = {
@@ -110,7 +112,6 @@ class Gencontrol(Base):
     def do_arch_packages(self, packages, makefile, arch, vars, makeflags, extra):
         # Some userland architectures require kernels from another
         # (Debian) architecture, e.g. x32/amd64.
-        foreign_kernel = not self.config['base', arch].get('featuresets')
 
         if self.version.linux_modifier is None:
             try:
@@ -121,6 +122,8 @@ class Gencontrol(Base):
                 self.version.linux_upstream + abiname_part
 
         """
+        foreign_kernel = not self.config['base', arch].get('featuresets')
+
         if foreign_kernel:
             packages_headers_arch = []
             makeflags['FOREIGN_KERNEL'] = True
@@ -187,7 +190,6 @@ class Gencontrol(Base):
         """
 
     def do_featureset_setup(self, vars, makeflags, arch, featureset, extra):
-        config_base = self.config.merge('base', arch, featureset)
         makeflags['LOCALVERSION_HEADERS'] = vars['localversion_headers'] = vars['localversion']
 
     def do_featureset_packages(self, packages, makefile, arch, featureset, vars, makeflags, extra):
@@ -267,31 +269,31 @@ class Gencontrol(Base):
             image_fields[field] = PackageRelation(config_entry_image.get(field.lower(), None), override_arches=(arch,))
 
         generators = config_entry_image['initramfs-generators']
-        l = PackageRelationGroup()
+        prg = PackageRelationGroup()
         for i in generators:
             i = config_entry_relations.get(i, i)
-            l.append(i)
+            prg.append(i)
             a = PackageRelationEntry(i)
             if a.operator is not None:
                 a.operator = -a.operator
                 image_fields['Breaks'].append(PackageRelationGroup([a]))
-        for item in l:
+        for item in prg:
             item.arches = [arch]
-        image_fields['Depends'].append(l)
+        image_fields['Depends'].append(prg)
 
         bootloaders = config_entry_image.get('bootloaders')
         if bootloaders:
-            l = PackageRelationGroup()
+            prg = PackageRelationGroup()
             for i in bootloaders:
                 i = config_entry_relations.get(i, i)
-                l.append(i)
+                prg.append(i)
                 a = PackageRelationEntry(i)
                 if a.operator is not None:
                     a.operator = -a.operator
                     image_fields['Breaks'].append(PackageRelationGroup([a]))
-            for item in l:
+            for item in prg:
                 item.arches = [arch]
-            image_fields['Suggests'].append(l)
+            image_fields['Suggests'].append(prg)
 
         desc_parts = self.config.get_merge('description', arch, featureset, flavour, 'parts')
         if desc_parts:
