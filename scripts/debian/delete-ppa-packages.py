@@ -9,7 +9,7 @@ def delete_source(launchpad, entry):
     Delete source package if no non-superseded published binaries are found.
     """
 
-    obj = launchpad.load(entry['self_link'])
+    obj = launchpad.load(entry["self_link"])
     binaries = obj.getPublishedBinaries()
 
     no_binaries = True
@@ -18,12 +18,12 @@ def delete_source(launchpad, entry):
             no_binaries = False
 
     if no_binaries:
-        print("[INFO ] Deleting superseded source: " +
-              entry["display_name"])
-        obj.requestDeletion(
-            removal_comment='Automated removal of superseded package.')
+        print("[INFO ] Deleting superseded source: " + entry["display_name"])
+        obj.requestDeletion(removal_comment="Automated removal of superseded package.")
     else:
-        print("[WARN ] Published binaries still exist for source, not deleting sources.")
+        print(
+            "[WARN ] Published binaries still exist for source, not deleting sources."
+        )
 
     return
 
@@ -35,22 +35,22 @@ def delete_binary(launchpad, entry):
     This method returns True if package is deleted successfully or already deleted.
     """
 
-    if entry['status'] == 'Deleted':
+    if entry["status"] == "Deleted":
         return True
 
     print("[INFO ] Deleting superseded binary: " + entry["display_name"])
-    obj = launchpad.load(entry['self_link'])
-    obj.requestDeletion(
-        removal_comment='Automated removal of superseded package.')
+    obj = launchpad.load(entry["self_link"])
+    obj.requestDeletion(removal_comment="Automated removal of superseded package.")
 
     return True
 
 
 def main():
     """Find and delete superseded packages in Liquorix PPA"""
-    cachedir = os.path.expanduser('~/.launchpadlib/cache')
+    cachedir = os.path.expanduser("~/.launchpadlib/cache")
     launchpad = Launchpad.login_with(
-        'Liquorix', 'production', cachedir, version='devel')
+        "Liquorix", "production", cachedir, version="devel"
+    )
     ppa = launchpad.me.getPPAByName(name="liquorix")
 
     # We can either delete superseded sources or binaries.  Sources supersede
