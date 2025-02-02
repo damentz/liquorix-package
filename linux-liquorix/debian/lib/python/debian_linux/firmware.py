@@ -31,7 +31,7 @@ class FirmwareWhence(list):
         version = None
 
         for line in file:
-            if line.startswith('----------'):
+            if line.startswith("----------"):
                 if in_header:
                     in_header = False
                 else:
@@ -46,7 +46,7 @@ class FirmwareWhence(list):
             if in_header:
                 continue
 
-            if line == '\n':
+            if line == "\n":
                 # End of field; end of file fields
                 for b in binary:
                     # XXX The WHENCE file isn't yet consistent in its
@@ -61,27 +61,30 @@ class FirmwareWhence(list):
                 continue
 
             match = re.match(
-                r'(Driver|File|Info|Licen[cs]e|Source|Version'
-                r'|Original licen[cs]e info(?:rmation)?):\s*(.*)\n',
-                line)
+                r"(Driver|File|Info|Licen[cs]e|Source|Version"
+                r"|Original licen[cs]e info(?:rmation)?):\s*(.*)\n",
+                line,
+            )
             if match:
                 keyword, value = match.group(1, 2)
-                if keyword == 'Driver':
-                    driver = value.split(' ')[0].lower()
-                elif keyword == 'File':
-                    match = re.match(r'(\S+)(?:\s+--\s+(.*))?', value)
+                if keyword == "Driver":
+                    driver = value.split(" ")[0].lower()
+                elif keyword == "File":
+                    match = re.match(r"(\S+)(?:\s+--\s+(.*))?", value)
                     binary.append(match.group(1))
                     desc = match.group(2)
-                elif keyword in ['Info', 'Version']:
+                elif keyword in ["Info", "Version"]:
                     version = value
-                elif keyword == 'Source':
+                elif keyword == "Source":
                     source.append(value)
                 else:
                     licence = value
             elif licence is not None:
-                licence = (licence + '\n'
-                           + re.sub(r'^(?:[/ ]\*| \*/)?\s*(.*?)\s*$', r'\1',
-                                    line))
+                licence = (
+                    licence
+                    + "\n"
+                    + re.sub(r"^(?:[/ ]\*| \*/)?\s*(.*?)\s*$", r"\1", line)
+                )
 
         # Finish last section if non-empty
         for b in binary:

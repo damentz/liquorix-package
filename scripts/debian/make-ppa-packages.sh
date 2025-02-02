@@ -18,7 +18,7 @@ echo "[DEBUG] dir_script:  $dir_script"
 echo "[DEBUG] dir_base:    $dir_base"
 echo "[DEBUG] dir_package: $dir_package"
 echo "[DEBUG] dir_build:     $dir_build"
-echo "[DEBUG] releases_ubuntu: ${releases_ubuntu[@]}"
+echo "[DEBUG] releases_ubuntu:" "${releases_ubuntu[@]}"
 
 prepare_env
 

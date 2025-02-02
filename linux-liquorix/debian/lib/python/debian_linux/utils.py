@@ -17,17 +17,17 @@ class Templates(object):
         raise KeyError(key)
 
     def _read(self, name):
-        prefix, id = name.split('.', 1)
+        prefix, id = name.split(".", 1)
 
-        for suffix in ['.in', '']:
+        for suffix in [".in", ""]:
             for dir in self.dirs:
                 filename = "%s/%s%s" % (dir, name, suffix)
                 if os.path.exists(filename):
-                    with codecs.open(filename, 'r', 'utf-8') as f:
+                    with codecs.open(filename, "r", "utf-8") as f:
                         mode = os.stat(f.fileno()).st_mode
-                        if prefix == 'control':
+                        if prefix == "control":
                             return (read_control(f), mode)
-                        if prefix == 'tests-control':
+                        if prefix == "tests-control":
                             return (read_tests_control(f), mode)
                         return (f.read(), mode)
 
@@ -53,11 +53,13 @@ class Templates(object):
 
 def read_control(f):
     from .debian import Package
+
     return _read_rfc822(f, Package)
 
 
 def read_tests_control(f):
     from .debian import TestsControl
+
     return _read_rfc822(f, TestsControl)
 
 
@@ -75,27 +77,25 @@ def _read_rfc822(f, cls):
                 eof = True
                 break
             # Strip comments rather than trying to preserve them
-            if line[0] == '#':
+            if line[0] == "#":
                 continue
-            line = line.strip('\n')
+            line = line.strip("\n")
             if not line:
                 break
-            if line[0] in ' \t':
+            if line[0] in " \t":
                 if not last:
-                    raise ValueError(
-                        'Continuation line seen before first header')
+                    raise ValueError("Continuation line seen before first header")
                 lines.append(line.lstrip())
                 continue
             if last:
-                e[last] = '\n'.join(lines)
-            i = line.find(':')
+                e[last] = "\n".join(lines)
+            i = line.find(":")
             if i < 0:
-                raise ValueError(u"Not a header, not a continuation: ``%s''" %
-                                 line)
+                raise ValueError("Not a header, not a continuation: ``%s''" % line)
             last = line[:i]
-            lines = [line[i + 1:].lstrip()]
+            lines = [line[i + 1 :].lstrip()]
         if last:
-            e[last] = '\n'.join(lines)
+            e[last] = "\n".join(lines)
         if e:
             entries.append(e)
 
@@ -104,5 +104,6 @@ def _read_rfc822(f, cls):
 
 class TextWrapper(textwrap.TextWrapper):
     wordsep_re = re.compile(
-        r'(\s+|'                                  # any whitespace
-        r'(?<=[\w\!\"\'\&\.\,\?])-{2,}(?=\w))')   # em-dash
+        r"(\s+|"  # any whitespace
+        r"(?<=[\w\!\"\'\&\.\,\?])-{2,}(?=\w))"
+    )  # em-dash

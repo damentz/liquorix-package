@@ -22,7 +22,7 @@ for release in "${releases_debian[@]}"; do
     args+=("$distro" "$release" "$build")
 done
 
-echo "[DEBUG] $0, args: ${args[@]}"
+echo "[DEBUG] $0, args:" "${args[@]}"
 for item in "${args[@]}"; do
     echo "$item"
 done | xargs -n3 -P "$processes" "$dir_scripts/docker_build-source.sh"
