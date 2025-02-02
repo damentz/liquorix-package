@@ -16,24 +16,26 @@ def merge(output, configs, overrides):
 
 
 def opt_callback_dict(option, opt, value, parser):
-    match = re.match(r'^\s*(\S+)=(\S+)\s*$', value)
+    match = re.match(r"^\s*(\S+)=(\S+)\s*$", value)
     if not match:
-        raise optparse.OptionValueError('not key=value')
+        raise optparse.OptionValueError("not key=value")
     dest = option.dest
     data = getattr(parser.values, dest)
     data[match.group(1)] = match.group(2)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     parser = optparse.OptionParser(usage="%prog [OPTION]... FILE...")
     parser.add_option(
-        '-o', '--override',
-        action='callback',
+        "-o",
+        "--override",
+        action="callback",
         callback=opt_callback_dict,
         default={},
-        dest='overrides',
+        dest="overrides",
         help="Override option",
-        type='string')
+        type="string",
+    )
     options, args = parser.parse_args()
 
     merge(args[0], args[1:], options.overrides)

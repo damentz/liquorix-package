@@ -8,9 +8,9 @@ import sys
 from configparser import RawConfigParser
 
 __all__ = [
-    'ConfigCoreDump',
-    'ConfigCoreHierarchy',
-    'ConfigParser',
+    "ConfigCoreDump",
+    "ConfigCoreHierarchy",
+    "ConfigParser",
 ]
 
 
@@ -46,8 +46,7 @@ class ConfigCore(collections.OrderedDict):
         temp = []
 
         if arch and featureset and flavour:
-            temp.append(self.get((section, arch, featureset, flavour), {})
-                        .get(key))
+            temp.append(self.get((section, arch, featureset, flavour), {}).get(key))
             temp.append(self.get((section, arch, None, flavour), {}).get(key))
         if arch and featureset:
             temp.append(self.get((section, arch, featureset), {}).get(key))
@@ -97,11 +96,11 @@ class ConfigCoreDump(object):
 
 class ConfigCoreHierarchy(object):
     schema_base = {
-        'base': {
-            'arches': SchemaItemList(),
-            'enabled': SchemaItemBoolean(),
-            'featuresets': SchemaItemList(),
-            'flavours': SchemaItemList(),
+        "base": {
+            "arches": SchemaItemList(),
+            "enabled": SchemaItemBoolean(),
+            "featuresets": SchemaItemList(),
+            "flavours": SchemaItemList(),
         },
     }
 
@@ -131,8 +130,8 @@ class ConfigCoreHierarchy(object):
             config = ConfigParser(self.schema)
             config.read(self.get_files(arch))
 
-            featuresets = config['base', ].get('featuresets', [])
-            flavours = config['base', ].get('flavours', [])
+            featuresets = config["base",].get("featuresets", [])
+            flavours = config["base",].get("flavours", [])
 
             for section in iter(config):
                 if section[0] in featuresets:
@@ -149,13 +148,15 @@ class ConfigCoreHierarchy(object):
                 self.read_arch_featureset(ret, arch, featureset)
 
             if flavours:
-                base = ret['base', arch]
-                featuresets.insert(0, 'none')
-                base['featuresets'] = featuresets
-                del base['flavours']
-                ret['base', arch] = base
-                ret['base', arch, 'none'] = {'flavours': flavours,
-                                             'implicit-flavour': True}
+                base = ret["base", arch]
+                featuresets.insert(0, "none")
+                base["featuresets"] = featuresets
+                del base["flavours"]
+                ret["base", arch] = base
+                ret["base", arch, "none"] = {
+                    "flavours": flavours,
+                    "implicit-flavour": True,
+                }
 
         def read_arch_featureset(self, ret, arch, featureset):
             config = ConfigParser(self.schema)
@@ -171,11 +172,11 @@ class ConfigCoreHierarchy(object):
             config = ConfigParser(self.schema)
             config.read(self.get_files())
 
-            arches = config['base', ]['arches']
-            featuresets = config['base', ].get('featuresets', [])
+            arches = config["base",]["arches"]
+            featuresets = config["base",].get("featuresets", [])
 
             for section in iter(config):
-                if section[0].startswith('featureset-'):
+                if section[0].startswith("featureset-"):
                     real = (section[-1], None, section[0][11:])
                 else:
                     real = (section[-1],) + section[1:]
@@ -188,7 +189,7 @@ class ConfigCoreHierarchy(object):
 
         def read_featureset(self, ret, featureset):
             config = ConfigParser(self.schema)
-            config.read(self.get_files('featureset-%s' % featureset))
+            config.read(self.get_files("featureset-%s" % featureset))
 
             for section in iter(config):
                 real = (section[-1], None, featureset)
@@ -198,7 +199,7 @@ class ConfigCoreHierarchy(object):
 
 
 class ConfigParser(object):
-    __slots__ = '_config', 'schemas'
+    __slots__ = "_config", "schemas"
 
     def __init__(self, schemas):
         self.schemas = schemas
@@ -212,7 +213,7 @@ class ConfigParser(object):
         return iter(self._convert())
 
     def __str__(self):
-        return '<%s(%s)>' % (self.__class__.__name__, self._convert())
+        return "<%s(%s)>" % (self.__class__.__name__, self._convert())
 
     def _convert(self):
         ret = {}
@@ -220,13 +221,13 @@ class ConfigParser(object):
             data = {}
             for key, value in self._config.items(section):
                 data[key] = value
-            section_list = section.split('_')
+            section_list = section.split("_")
             section_base = section_list[-1]
             if section_base in self.schemas:
                 section_ret = tuple(section_list)
                 data = self._convert_one(self.schemas[section_base], data)
             else:
-                section_ret = (section, )
+                section_ret = (section,)
             ret[section_ret] = data
         return ret
 
@@ -245,12 +246,13 @@ class ConfigParser(object):
         return self._config.read(data)
 
 
-if __name__ == '__main__':
-    sys.path.append('debian/lib/python')
-    config = ConfigCoreDump(open('debian/config.defines.dump', 'rb'))
-    for section, items in sorted(config.items(),
-                                 key=(lambda a: tuple(i or '' for i in a[0]))):
-        print(u"[%s]" % (section,))
+if __name__ == "__main__":
+    sys.path.append("debian/lib/python")
+    config = ConfigCoreDump(open("debian/config.defines.dump", "rb"))
+    for section, items in sorted(
+        config.items(), key=(lambda a: tuple(i or "" for i in a[0]))
+    ):
+        print("[%s]" % (section,))
         for item, value in sorted(items.items()):
-            print(u"%s: %s" % (item, value))
+            print("%s: %s" % (item, value))
         print()
