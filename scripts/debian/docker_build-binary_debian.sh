@@ -19,7 +19,7 @@ for arch in 'amd64'; do
     done
 done
 
-echo "[DEBUG] $0, args: ${args[@]}"
+echo "[DEBUG] $0, args:" "${args[@]}"
 for item in "${args[@]}"; do
     echo "$item"
 done | xargs -n4 -P "$processes" "$dir_scripts/docker_build-binary.sh"
