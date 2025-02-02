@@ -589,7 +589,7 @@ class PackageRelationEntry(object):
             return self.operators_text[self._op]
 
         def __eq__(self, other):
-            return type(other) == type(self) and self._op == other._op
+            return other is self and self._op == other._op
 
     def __init__(self, value=None, override_arches=None):
         if not isinstance(value, str):
