@@ -81,6 +81,8 @@ if [[ "$(docker image ls)" == *"$release_string"* ]]; then
     docker container rm "$container_id" > /dev/null
 else
     echo "[INFO ] $release_string: Docker image not found, building with Dockerfile."
+    docker pull "public.ecr.aws/$distro/$distro:$release"
+    docker tag "public.ecr.aws/$distro/$distro:$release" "$arch/$distro:$release"
     docker buildx build \
         --network="host" \
         --no-cache \
