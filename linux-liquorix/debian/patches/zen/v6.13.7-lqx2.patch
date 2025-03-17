@@ -925,7 +925,7 @@ index 0fa7c5728f1e..efecb59adfe6 100644
  M:	Finn Thain <fthain@linux-m68k.org>
  L:	linux-m68k@lists.linux-m68k.org
 diff --git a/Makefile b/Makefile
-index b9464c88ac72..1a91c1b333c8 100644
+index b9464c88ac72..2b27fe766880 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -1,9 +1,9 @@
@@ -936,7 +936,7 @@ index b9464c88ac72..1a91c1b333c8 100644
 -EXTRAVERSION =
 -NAME = Baby Opossum Posse
 +SUBLEVEL = 7
-+EXTRAVERSION = -lqx1
++EXTRAVERSION = -lqx2
 +NAME = Channeling Inner Peace for Peak Performance
  
  # *DOCUMENTATION*
@@ -69394,10 +69394,10 @@ index 976092b7bd45..31d587c16ec1 100644
  obj-y += build_utility.o
 diff --git a/kernel/sched/alt_core.c b/kernel/sched/alt_core.c
 new file mode 100644
-index 000000000000..34f21a06276f
+index 000000000000..71466f081273
 --- /dev/null
 +++ b/kernel/sched/alt_core.c
-@@ -0,0 +1,7567 @@
+@@ -0,0 +1,7647 @@
 +/*
 + *  kernel/sched/alt_core.c
 + *
@@ -70100,8 +70100,10 @@ index 000000000000..34f21a06276f
 +	__SCHED_DEQUEUE_TASK(p, rq, flags, update_sched_preempt_mask(rq));
 +	--rq->nr_running;
 +#ifdef CONFIG_SMP
-+	if (1 == rq->nr_running)
++	if (1 == rq->nr_running) {
 +		cpumask_clear_cpu(cpu_of(rq), &sched_rq_pending_mask);
++		rq->prio_balance_time = 0;
++	}
 +#endif
 +
 +	sched_update_tick_dependency(rq);
@@ -70120,8 +70122,10 @@ index 000000000000..34f21a06276f
 +	__SCHED_ENQUEUE_TASK(p, rq, flags, update_sched_preempt_mask(rq));
 +	++rq->nr_running;
 +#ifdef CONFIG_SMP
-+	if (2 == rq->nr_running)
++	if (2 == rq->nr_running) {
 +		cpumask_set_cpu(cpu_of(rq), &sched_rq_pending_mask);
++		rq->prio_balance_time = rq->clock;
++	}
 +#endif
 +
 +	sched_update_tick_dependency(rq);
@@ -71369,7 +71373,7 @@ index 000000000000..34f21a06276f
 +}
 +
 +static inline int
-+preempt_mask_check(cpumask_t *preempt_mask, cpumask_t *allow_mask, int prio)
++preempt_mask_check(cpumask_t *preempt_mask, const cpumask_t *allow_mask, int prio)
 +{
 +	cpumask_t *mask = sched_preempt_mask + prio;
 +	int pr = atomic_read(&sched_prio_record);
@@ -72561,7 +72565,6 @@ index 000000000000..34f21a06276f
 +#endif
 +
 +	if (p->time_slice < RESCHED_NS) {
-+		p->time_slice = sysctl_sched_base_slice;
 +		resched_curr(rq);
 +	}
 +	sched_task_fork(p, rq);
@@ -73840,15 +73843,19 @@ index 000000000000..34f21a06276f
 +
 +			if ((nr_migrated = migrate_pending_tasks(src_rq, rq, cpu))) {
 +				src_rq->nr_running -= nr_migrated;
-+				if (src_rq->nr_running < 2)
++				if (src_rq->nr_running < 2) {
++					rq->prio_balance_time = 0;
 +					cpumask_clear_cpu(i, &sched_rq_pending_mask);
++				}
 +
 +				spin_release(&src_rq->lock.dep_map, _RET_IP_);
 +				do_raw_spin_unlock(&src_rq->lock);
 +
 +				rq->nr_running += nr_migrated;
-+				if (rq->nr_running > 1)
++				if (rq->nr_running > 1) {
++					rq->prio_balance_time = rq->clock;
 +					cpumask_set_cpu(cpu, &sched_rq_pending_mask);
++				}
 +
 +				update_sched_preempt_mask(rq);
 +				cpufreq_update_util(rq, 0);
@@ -73873,6 +73880,77 @@ index 000000000000..34f21a06276f
 +
 +	if (SCHED_FIFO != p->policy && task_on_rq_queued(p))
 +		requeue_task(p, rq);
++}
++
++static inline int balance_select_task_rq(struct task_struct *p)
++{
++	cpumask_t mask;
++	int cpu = task_cpu(p);
++
++	if (cpumask_empty(sched_idle_mask) &&
++	    cpumask_and(&mask, p->cpus_ptr, cpu_active_mask) &&
++	    preempt_mask_check(&mask, &mask, task_sched_prio(p))) {
++		return best_mask_cpu(cpu, &mask);
++	}
++
++	return cpu;
++}
++
++static inline void
++__move_queued_task(struct rq *rq, struct task_struct *p, struct rq *dest_rq, int dest_cpu)
++{
++	WRITE_ONCE(p->on_rq, TASK_ON_RQ_MIGRATING);
++	dequeue_task(p, rq, 0);
++	set_task_cpu(p, dest_cpu);
++
++	sched_mm_cid_migrate_to(dest_rq, p);
++
++	sched_task_sanity_check(p, dest_rq);
++	enqueue_task(p, dest_rq, 0);
++	WRITE_ONCE(p->on_rq, TASK_ON_RQ_QUEUED);
++	wakeup_preempt(dest_rq);
++}
++
++static inline void prio_balance(struct rq *rq)
++{
++	struct task_struct *p, *next;
++	int cpu, dest_cpu;
++
++	if (!rq->online)
++		return;
++
++	if (0 == rq->prio_balance_time)
++		return;
++
++	if (rq->clock - rq->prio_balance_time < sysctl_sched_base_slice << 2)
++		return;
++
++	rq->prio_balance_time = rq->clock;
++	cpu = cpu_of(rq);
++
++	if (!cpumask_empty(sched_idle_mask))
++		return;
++
++	p = sched_rq_next_task(rq->curr, rq);
++	while (p != rq->idle) {
++		next = sched_rq_next_task(p, rq);
++		if (!is_migration_disabled(p) && (dest_cpu = balance_select_task_rq(p)) != cpu) {
++			struct rq *dest_rq;
++
++			dest_rq = cpu_rq(dest_cpu);
++
++			if (do_raw_spin_trylock(&dest_rq->lock)) {
++				spin_acquire(&dest_rq->lock.dep_map,
++					     SINGLE_DEPTH_NESTING, 1, _RET_IP_);
++
++				__move_queued_task(rq, p, dest_rq, dest_cpu);
++
++				spin_release(&dest_rq->lock.dep_map, _RET_IP_);
++				do_raw_spin_unlock(&dest_rq->lock);
++			}
++		}
++		p = next;
++	}
 +}
 +
 +/*
@@ -74121,6 +74199,7 @@ index 000000000000..34f21a06276f
 +		cpu = cpu_of(rq);
 +	} else {
 +		__balance_callbacks(rq);
++		prio_balance(rq);
 +		raw_spin_unlock_irq(&rq->lock);
 +	}
 +}
@@ -75716,6 +75795,7 @@ index 000000000000..34f21a06276f
 +
 +		sched_queue_init(&rq->queue);
 +		rq->prio = IDLE_TASK_SCHED_PRIO;
++		rq->prio_balance_time = 0;
 +#ifdef CONFIG_SCHED_PDS
 +		rq->prio_idx = rq->prio;
 +#endif
@@ -77224,10 +77304,10 @@ index 000000000000..1dbd7eb6a434
 +{}
 diff --git a/kernel/sched/alt_sched.h b/kernel/sched/alt_sched.h
 new file mode 100644
-index 000000000000..01ac1a53898c
+index 000000000000..5c2887a421ba
 --- /dev/null
 +++ b/kernel/sched/alt_sched.h
-@@ -0,0 +1,1026 @@
+@@ -0,0 +1,1028 @@
 +#ifndef _KERNEL_SCHED_ALT_SCHED_H
 +#define _KERNEL_SCHED_ALT_SCHED_H
 +
@@ -77436,6 +77516,7 @@ index 000000000000..01ac1a53898c
 +	struct cpu_stop_work	active_balance_work;
 +
 +	struct balance_callback	*balance_callback;
++
 +#ifdef CONFIG_HOTPLUG_CPU
 +	struct rcuwait		hotplug_wait;
 +#endif
@@ -77464,6 +77545,7 @@ index 000000000000..01ac1a53898c
 +	/* Ensure that all clocks are in the same cache line */
 +	u64			clock ____cacheline_aligned;
 +	u64			clock_task;
++	u64			prio_balance_time;
 +
 +	unsigned int  nr_running;
 +	unsigned long nr_uninterruptible;
