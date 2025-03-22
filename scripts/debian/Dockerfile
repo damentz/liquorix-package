@@ -30,3 +30,9 @@ RUN apt-get update &&\
 RUN echo "$PUBLIC" | gpg --import &&\
     echo "$SECRET" | gpg --import &&\
     echo "default-key $DEFAULT" > ~/.gnupg/gpg.conf
+
+RUN if command -v sq; then \
+        sq pki link add --cert "$DEFAULT" --userid \
+            "$(gpg --list-keys --with-colons $DEFAULT | grep ^uid | cut -d: -f10)" &&\
+        sq pki link authorize --cert "$DEFAULT" --all --unconstrained; \
+    fi
