@@ -22,8 +22,8 @@ source_arch='amd64'
 source_distro='debian'
 source_release='bookworm'
 
-# stable => bookworm, testing => trixie, unstable => sid
-releases_debian=('bookworm' 'trixie' 'sid')
+# oldstable => bookworm, stable => trixie, testing => forky, unstable => sid
+releases_debian=('bookworm' 'trixie' 'forky' 'sid')
 releases_ubuntu=('jammy' 'noble' 'oracular' 'plucky')
 mirror_debian='http://deb.debian.org/debian'
 mirror_ubuntu='http://archive.ubuntu.com/ubuntu'
