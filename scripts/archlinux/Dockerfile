@@ -22,6 +22,9 @@ RUN echo 'Server = https://mirrors.kernel.org/archlinux/$repo/os/$arch' \
         pacman-contrib \
         pahole \
         python \
+        rust \
+        rust-bindgen \
+        rust-src \
         schedtool \
         sudo \
         unzip \
