@@ -11,4 +11,4 @@ if [[ -f "$dir_base/$package_source" ]]; then
 fi
 
 wget -O "$dir_base/$package_source" \
-    "https://aur.archlinux.org/cgit/aur.git/snapshot/$package_source"
+    "https://github.com/damentz/linux-lqx/archive/refs/heads/master.zip"

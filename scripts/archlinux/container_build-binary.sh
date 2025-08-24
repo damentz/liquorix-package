@@ -38,7 +38,7 @@ sudo mkdir -vp "$dir_build"
 sudo chown -R "$build_user":"$build_user" "$dir_build"
 cd "$dir_build"
 
-tar -xpvf "$dir_base/$package_source" --strip-components=1
+unzip -j "$dir_base/$package_source"
 
 echo "[INFO ] Building binary package for $release"
 export PACKAGER="$package_maintainer"

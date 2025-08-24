@@ -2,7 +2,7 @@
 
 dir_script="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 package_name='linux-lqx'
-package_source="$package_name.tar.gz"
+package_source="$package_name.zip"
 package_maintainer="Steven Barrett <steven@liquorix.net>"
 
 dir_base="${dir_script%/*/*}"

@@ -24,6 +24,7 @@ RUN echo 'Server = https://mirrors.kernel.org/archlinux/$repo/os/$arch' \
         python \
         schedtool \
         sudo \
+        unzip \
         wget \
         zstd \
         --noconfirm \
