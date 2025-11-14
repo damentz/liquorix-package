@@ -713,7 +713,7 @@ index 5765eb3e9efa..a30f4bed11b4 100644
    +------------------+
    | hist_data        |<-------------------------------------------------------+
 diff --git a/Makefile b/Makefile
-index 82bb9cdf73a3..fe57ab46f47c 100644
+index 82bb9cdf73a3..944fc0f5d655 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -1,9 +1,9 @@
@@ -724,7 +724,7 @@ index 82bb9cdf73a3..fe57ab46f47c 100644
 -EXTRAVERSION =
 -NAME = Baby Opossum Posse
 +SUBLEVEL = 8
-+EXTRAVERSION = -lqx1
++EXTRAVERSION = -lqx2
 +NAME = Channeling Inner Peace for Peak Performance
  
  # *DOCUMENTATION*
@@ -79701,10 +79701,10 @@ index 8ae86371ddcd..a972ef1e31a7 100644
  obj-y += build_utility.o
 diff --git a/kernel/sched/alt_core.c b/kernel/sched/alt_core.c
 new file mode 100644
-index 000000000000..6a8c29288d81
+index 000000000000..000b418ad425
 --- /dev/null
 +++ b/kernel/sched/alt_core.c
-@@ -0,0 +1,7649 @@
+@@ -0,0 +1,7640 @@
 +/*
 + *  kernel/sched/alt_core.c
 + *
@@ -79835,12 +79835,9 @@ index 000000000000..6a8c29288d81
 +# define finish_arch_post_lock_switch()	do { } while (0)
 +#endif
 +
-+static cpumask_t sched_preempt_mask[SCHED_QUEUE_BITS + 2] ____cacheline_aligned_in_smp;
++static cpumask_t sched_preempt_mask[SCHED_QUEUE_BITS] ____cacheline_aligned_in_smp;
 +
-+cpumask_t *const sched_idle_mask = &sched_preempt_mask[SCHED_QUEUE_BITS - 1];
-+cpumask_t *const sched_sg_idle_mask = &sched_preempt_mask[SCHED_QUEUE_BITS];
-+cpumask_t *const sched_pcore_idle_mask = &sched_preempt_mask[SCHED_QUEUE_BITS];
-+cpumask_t *const sched_ecore_idle_mask = &sched_preempt_mask[SCHED_QUEUE_BITS + 1];
++cpumask_t sched_idle_mask[3] ____cacheline_aligned_in_smp;
 +
 +/* task function */
 +static inline const struct cpumask *task_user_cpus(struct task_struct *p)
@@ -79872,14 +79869,6 @@ index 000000000000..6a8c29288d81
 +	idle->on_rq = TASK_ON_RQ_QUEUED;
 +}
 +
-+#define CLEAR_CACHED_PREEMPT_MASK(pr, low, high, cpu)		\
-+	if (low < pr && pr <= high)				\
-+		cpumask_clear_cpu(cpu, sched_preempt_mask + pr);
-+
-+#define SET_CACHED_PREEMPT_MASK(pr, low, high, cpu)		\
-+	if (low < pr && pr <= high)				\
-+		cpumask_set_cpu(cpu, sched_preempt_mask + pr);
-+
 +static atomic_t sched_prio_record = ATOMIC_INIT(0);
 +
 +/* water mark related functions */
@@ -79887,7 +79876,6 @@ index 000000000000..6a8c29288d81
 +{
 +	int prio = find_first_bit(rq->queue.bitmap, SCHED_QUEUE_BITS);
 +	int last_prio = rq->prio;
-+	int cpu, pr;
 +
 +	if (prio == last_prio)
 +		return;
@@ -79896,24 +79884,26 @@ index 000000000000..6a8c29288d81
 +#ifdef CONFIG_SCHED_PDS
 +	rq->prio_idx = sched_prio2idx(rq->prio, rq);
 +#endif
-+	cpu = cpu_of(rq);
-+	pr = atomic_read(&sched_prio_record);
 +
-+	if (prio < last_prio) {
-+		if (IDLE_TASK_SCHED_PRIO == last_prio) {
++	int cpu = cpu_of(rq);
++	bool set = prio > last_prio;
++	int low = set ? last_prio : prio;
++	int high = set ? prio : last_prio;
++
++	if (IDLE_TASK_SCHED_PRIO == high) {
++		high -= 2;
++		if (set)
++			sched_set_idle_mask(cpu);
++		else
 +			sched_clear_idle_mask(cpu);
-+			last_prio -= 2;
-+		}
-+		CLEAR_CACHED_PREEMPT_MASK(pr, prio, last_prio, cpu);
-+
-+		return;
 +	}
-+	/* last_prio < prio */
-+	if (IDLE_TASK_SCHED_PRIO == prio) {
-+		sched_set_idle_mask(cpu);
-+		prio -= 2;
++	int pr = atomic_read(&sched_prio_record);
++	if (low < pr && pr <= high) {
++		if (set)
++			cpumask_set_cpu(cpu, sched_preempt_mask + pr);
++		else
++			cpumask_clear_cpu(cpu, sched_preempt_mask + pr);
 +	}
-+	SET_CACHED_PREEMPT_MASK(pr, last_prio, prio, cpu);
 +}
 +
 +/* need a wrapper since we may need to trace from modules */
@@ -81732,7 +81722,8 @@ index 000000000000..6a8c29288d81
 +	if (unlikely(!cpumask_and(&allow_mask, p->cpus_ptr, cpu_active_mask)))
 +		return select_fallback_rq(task_cpu(p), p);
 +
-+	if (static_call(sched_idle_select_func)(&mask, &allow_mask, sched_idle_mask)	||
++	if ((cpumask_intersects(&mask, sched_idle_mask) &&
++	     static_call(sched_idle_select_func)(&mask, &allow_mask, sched_idle_mask)) ||
 +	    preempt_mask_check(&mask, &allow_mask, task_sched_prio(p)))
 +		return best_mask_cpu(task_cpu(p), &mask);
 +
@@ -87356,10 +87347,10 @@ index 000000000000..6a8c29288d81
 +#endif /* CONFIG_SCHED_MM_CID */
 diff --git a/kernel/sched/alt_core.h b/kernel/sched/alt_core.h
 new file mode 100644
-index 000000000000..55497941a22b
+index 000000000000..34c65fc1aee4
 --- /dev/null
 +++ b/kernel/sched/alt_core.h
-@@ -0,0 +1,174 @@
+@@ -0,0 +1,175 @@
 +#ifndef _KERNEL_SCHED_ALT_CORE_H
 +#define _KERNEL_SCHED_ALT_CORE_H
 +
@@ -87513,17 +87504,18 @@ index 000000000000..55497941a22b
 +
 +extern int sched_yield_type;
 +
-+extern cpumask_t sched_rq_pending_mask ____cacheline_aligned_in_smp;
++extern cpumask_t sched_rq_pending_mask;
 +
 +DECLARE_STATIC_KEY_FALSE(sched_smt_present);
 +DECLARE_PER_CPU_ALIGNED(cpumask_t *, sched_cpu_llc_mask);
 +
-+extern cpumask_t sched_smt_mask ____cacheline_aligned_in_smp;
++extern cpumask_t sched_smt_mask;
 +
-+extern cpumask_t *const sched_idle_mask;
-+extern cpumask_t *const sched_sg_idle_mask;
-+extern cpumask_t *const sched_pcore_idle_mask;
-+extern cpumask_t *const sched_ecore_idle_mask;
++extern cpumask_t sched_idle_mask[3];
++
++#define sched_sg_idle_mask	(sched_idle_mask + 1)
++#define sched_pcore_idle_mask	(sched_idle_mask + 1)
++#define sched_ecore_idle_mask	(sched_idle_mask + 2)
 +
 +extern struct rq *move_queued_task(struct rq *rq, struct task_struct *p, int new_cpu);
 +
@@ -88593,7 +88585,7 @@ index 000000000000..6cd5cfe3a332
 +#endif /* _KERNEL_SCHED_ALT_SCHED_H */
 diff --git a/kernel/sched/alt_topology.c b/kernel/sched/alt_topology.c
 new file mode 100644
-index 000000000000..590ee3cb1b49
+index 000000000000..cf5921e8268b
 --- /dev/null
 +++ b/kernel/sched/alt_topology.c
 @@ -0,0 +1,287 @@
@@ -88602,14 +88594,14 @@ index 000000000000..590ee3cb1b49
 +
 +static cpumask_t sched_pcore_mask ____cacheline_aligned_in_smp;
 +
-+static int __init sched_pcore_mask_setup(char *str)
++static int __init pcore_cpus_setup(char *str)
 +{
 +	if (cpulist_parse(str, &sched_pcore_mask))
 +		pr_warn("sched/alt: pcore_cpus= incorrect CPU range\n");
 +
-+	return 0;
++	return 1;
 +}
-+__setup("pcore_cpus=", sched_pcore_mask_setup);
++__setup("pcore_cpus=", pcore_cpus_setup);
 +
 +DEFINE_PER_CPU_READ_MOSTLY(enum cpu_topo_type, sched_cpu_topo);
 +DEFINE_PER_CPU_READ_MOSTLY(enum cpu_topo_balance_type, sched_cpu_topo_balance);
