@@ -28,7 +28,7 @@ RUN apt-get update &&\
     rm -rfv /var/lib/apt/lists/*
 
 RUN echo "$PUBLIC" | gpg --import &&\
-    echo "$SECRET" | gpg --import &&\
+    echo "$SECRET" | gpg --import --batch --no-tty &&\
     echo "default-key $DEFAULT" > ~/.gnupg/gpg.conf
 
 RUN if command -v sq; then \
