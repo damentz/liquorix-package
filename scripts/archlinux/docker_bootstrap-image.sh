@@ -55,7 +55,7 @@ if ! echo "$secret" | head -n1 | grep -q 'BEGIN PGP PRIVATE KEY BLOCK'; then
 fi
 
 declare release_string="liquorix_$arch/$distro/$release"
-if [[ "$(docker image ls)" == *"$release_string"* ]]; then
+if [[ "$(docker image ls --format table)" == *"$release_string"* ]]; then
     echo "[INFO ] $release_string: Docker image already built, performing update."
     declare container_id=$(
         docker run --net='host' -d $release_string bash -c \
