@@ -257,7 +257,6 @@ class Gencontrol(Base):
         headers = self.templates["control.headers"]
 
         config_entry_base = self.config.merge("base", arch, featureset, flavour)
-        config_entry_build = self.config.merge("build", arch, featureset, flavour)
         config_entry_description = self.config.merge(
             "description", arch, featureset, flavour
         )
