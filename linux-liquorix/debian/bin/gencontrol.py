@@ -19,8 +19,7 @@ class Gencontrol(Base):
         "abi": {
             "ignore-changes": config.SchemaItemList(),
         },
-        "build": {
-        },
+        "build": {},
         "description": {
             "parts": config.SchemaItemList(),
         },
