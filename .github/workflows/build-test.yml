@@ -1,0 +1,223 @@
+name: Build Test
+
+on:
+  push:
+    branches: ['[0-9]*.[0-9]*/**']
+  pull_request:
+    branches: ['[0-9]*.[0-9]*/**']
+  workflow_dispatch:
+
+env:
+  GPG_REAL_NAME: "Liquorix CI Build User"
+  GPG_EMAIL: "ci@liquorix.net"
+
+jobs:
+  prepare:
+    name: Prepare
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      version-kernel: ${{ steps.version.outputs.kernel }}
+      version-major: ${{ steps.version.outputs.major }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version info
+        id: version
+        run: |
+          # Derive kernel major version from branch name (e.g. 6.18/master -> 6.18)
+          branch="${GITHUB_HEAD_REF:-${GITHUB_REF_NAME}}"
+          branch_major="${branch%%/*}"
+          source scripts/debian/env.sh
+          echo "kernel=$version_kernel" >> "$GITHUB_OUTPUT"
+          echo "major=$branch_major" >> "$GITHUB_OUTPUT"
+
+      - name: Generate build matrix from env.sh
+        id: set-matrix
+        run: |
+          source scripts/debian/env.sh
+          matrix='{"include":['
+          first=true
+          for release in "${releases_debian[@]}"; do
+            [[ "$first" == true ]] && first=false || matrix+=','
+            matrix+="{\"distro\":\"debian\",\"release\":\"$release\"}"
+          done
+          for release in "${releases_ubuntu[@]}"; do
+            matrix+=",{\"distro\":\"ubuntu\",\"release\":\"$release\"}"
+          done
+          matrix+=']}'
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
+      - name: Download kernel source
+        run: scripts/debian/common_bootstrap.sh
+
+      - name: Generate temporary GPG key
+        run: |
+          gpg --batch --gen-key <<GPGEOF
+          %no-protection
+          Key-Type: RSA
+          Key-Length: 4096
+          Subkey-Type: RSA
+          Subkey-Length: 4096
+          Name-Real: ${GPG_REAL_NAME}
+          Name-Email: ${GPG_EMAIL}
+          Expire-Date: 1d
+          %commit
+          GPGEOF
+          key_id=$(gpg --list-keys --with-colons "${GPG_EMAIL}" | grep -m1 '^fpr' | cut -d: -f10)
+          echo "default-key $key_id" > ~/.gnupg/gpg.conf
+
+      - name: Cache GPG keyring
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.gnupg
+          key: gpg-keyring-${{ github.run_id }}
+
+      - name: Cache kernel source
+        uses: actions/cache/save@v4
+        with:
+          path: "*.orig.tar.xz"
+          key: kernel-source-${{ steps.version.outputs.major }}
+
+      - name: Get date
+        id: date
+        run: echo "date=$(date +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Bootstrap source Docker image
+        run: |
+          source scripts/debian/env.sh
+          scripts/debian/docker_bootstrap-image.sh "$source_arch" "$source_distro" "$source_release"
+          docker save "liquorix_${source_arch}/${source_distro}/${source_release}" | \
+            gzip > /tmp/docker-source.tar.gz
+
+      - name: Cache source Docker image
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/docker-source.tar.gz
+          key: docker-source-${{ steps.version.outputs.major }}-${{ steps.date.outputs.date }}
+
+  build-source:
+    name: Source (${{ matrix.distro }}/${{ matrix.release }})
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get date
+        id: date
+        run: echo "date=$(date +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore kernel source cache
+        uses: actions/cache/restore@v4
+        with:
+          path: "*.orig.tar.xz"
+          key: kernel-source-${{ needs.prepare.outputs.version-major }}
+
+      - name: Download kernel source (cache miss fallback)
+        run: scripts/debian/common_bootstrap.sh
+
+      - name: Restore GPG keyring
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.gnupg
+          key: gpg-keyring-${{ github.run_id }}
+
+      - name: Update changelog author for CI
+        run: |
+          sed -i '0,/^ -- /{s/^ -- .*/ -- '"${GPG_REAL_NAME}"' <'"${GPG_EMAIL}"'>  '"$(date -R)"'/}' \
+            linux-liquorix/debian/changelog
+
+      - name: Restore source Docker image cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/docker-source.tar.gz
+          key: docker-source-${{ needs.prepare.outputs.version-major }}-${{ steps.date.outputs.date }}
+
+      - name: Load source Docker image
+        run: gunzip -c /tmp/docker-source.tar.gz | docker load
+
+      - name: Build source package
+        run: |
+          scripts/debian/docker_build-source.sh \
+            "${{ matrix.distro }}" "${{ matrix.release }}"
+
+      - name: Upload source artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-${{ matrix.distro }}-${{ matrix.release }}
+          path: artifacts/${{ matrix.distro }}/${{ matrix.release }}/
+          retention-days: 1
+
+      - name: Bootstrap and cache target Docker image
+        run: |
+          scripts/debian/docker_bootstrap-image.sh \
+            amd64 "${{ matrix.distro }}" "${{ matrix.release }}"
+          docker save "liquorix_amd64/${{ matrix.distro }}/${{ matrix.release }}" | \
+            gzip > /tmp/docker-image.tar.gz
+
+      - name: Save target Docker image cache
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/docker-image.tar.gz
+          key: docker-${{ matrix.distro }}-${{ matrix.release }}-${{ steps.date.outputs.date }}
+
+  build-binary:
+    name: Binary (${{ matrix.distro }}/${{ matrix.release }})
+    needs: [prepare, build-source]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get date
+        id: date
+        run: echo "date=$(date +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore kernel source cache
+        uses: actions/cache/restore@v4
+        with:
+          path: "*.orig.tar.xz"
+          key: kernel-source-${{ needs.prepare.outputs.version-major }}
+
+      - name: Download kernel source (cache miss fallback)
+        run: scripts/debian/common_bootstrap.sh
+
+      - name: Restore GPG keyring
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.gnupg
+          key: gpg-keyring-${{ github.run_id }}
+
+      - name: Download source artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: source-${{ matrix.distro }}-${{ matrix.release }}
+          path: artifacts/${{ matrix.distro }}/${{ matrix.release }}/
+
+      - name: Restore Docker image cache
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/docker-image.tar.gz
+          key: docker-${{ matrix.distro }}-${{ matrix.release }}-${{ steps.date.outputs.date }}
+
+      - name: Load Docker image
+        run: gunzip -c /tmp/docker-image.tar.gz | docker load
+
+      - name: Build binary package
+        run: |
+          scripts/debian/docker_build-binary.sh \
+            amd64 "${{ matrix.distro }}" "${{ matrix.release }}"
+
+      - name: Upload binary artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.distro }}-${{ matrix.release }}
+          path: artifacts/${{ matrix.distro }}/${{ matrix.release }}/*_amd64*
+          retention-days: 1
+          if-no-files-found: ignore
