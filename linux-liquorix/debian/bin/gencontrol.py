@@ -20,7 +20,6 @@ class Gencontrol(Base):
             "ignore-changes": config.SchemaItemList(),
         },
         "build": {
-            "debug-info": config.SchemaItemBoolean(),
         },
         "description": {
             "parts": config.SchemaItemList(),
@@ -352,27 +351,6 @@ class Gencontrol(Base):
         extra['headers_arch_depends'].append('%s (= ${binary:Version})' % packages_own[-1]['Package'])
         """
 
-        build_debug = config_entry_build.get("debug-info")
-
-        if os.getenv("DEBIAN_KERNEL_DISABLE_DEBUG"):
-            if self.changelog[0].distribution == "UNRELEASED":
-                import warnings
-
-                warnings.warn(
-                    "Disable debug infos on request (DEBIAN_KERNEL_DISABLE_DEBUG set)"
-                )
-                build_debug = False
-            else:
-                raise RuntimeError(
-                    "Unable to disable debug infos in release build (DEBIAN_KERNEL_DISABLE_DEBUG set)"
-                )
-
-        if build_debug:
-            makeflags["DEBUG"] = True
-            packages_own.extend(
-                self.process_packages(self.templates["control.image-dbg"], vars)
-            )
-
         merge_packages(packages, packages_own + packages_dummy, arch)
 
         """
@@ -447,8 +425,6 @@ class Gencontrol(Base):
             )
         )
         makeflags["KCONFIG"] = " ".join(kconfig)
-        if build_debug:
-            makeflags["KCONFIG_OPTIONS"] = "-o DEBUG_INFO=y"
 
         cmds_binary_arch = [
             "$(MAKE) -f debian/rules.real binary-arch-flavour %s" % makeflags
@@ -485,13 +461,6 @@ class Gencontrol(Base):
                 vars,
                 "debian/linux-image-%s%s.%s"
                 % (vars["abiname"], vars["localversion"], name),
-            )
-        if build_debug:
-            self._substitute_file(
-                "image-dbg.lintian-override",
-                vars,
-                "debian/linux-image-%s%s-dbgsym.lintian-overrides"
-                % (vars["abiname"], vars["localversion"]),
             )
 
     def process_changelog(self):
