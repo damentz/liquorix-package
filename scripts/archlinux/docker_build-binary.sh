@@ -34,6 +34,7 @@ fi
 echo "[DEBUG] dir_base: $dir_base"
 docker run --net='host' \
     --rm \
+    --ulimit nofile=524288:524288 \
     -v "$dir_base":/liquorix-package \
     -t "liquorix_$arch/$distro/$release" \
     /liquorix-package/scripts/archlinux/container_build-binary.sh \
