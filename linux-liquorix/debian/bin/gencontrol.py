@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 
-import codecs
 import os
 from debian_linux import config
 from debian_linux.debian import (
@@ -50,7 +49,7 @@ class Gencontrol(Base):
                 makeflags[dst] = data[src]
 
     def _substitute_file(self, template, vars, target, append=False):
-        with codecs.open(target, "a" if append else "w", "utf-8") as f:
+        with open(target, "a" if append else "w", encoding="utf-8") as f:
             f.write(self.substitute(self.templates[template], vars))
 
     def do_main_setup(self, vars, makeflags, extra):
@@ -538,7 +537,7 @@ class Gencontrol(Base):
 
     def write_tests_control(self):
         self.write_rfc822(
-            codecs.open("debian/tests/control", "w", "utf-8"), [self.tests_control]
+            open("debian/tests/control", "w", encoding="utf-8"), [self.tests_control]
         )
 
 
