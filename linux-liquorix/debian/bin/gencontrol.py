@@ -63,11 +63,6 @@ class Gencontrol(Base):
             }
         )
 
-        """
-        # Prepare to generate debian/tests/control
-        self.tests_control = None
-        """
-
     def do_main_makefile(self, makefile, makeflags, extra):
         fs_enabled = [
             featureset
@@ -125,74 +120,6 @@ class Gencontrol(Base):
                 self.version.linux_upstream + abiname_part
             )
 
-        """
-        foreign_kernel = not self.config['base', arch].get('featuresets')
-
-        if foreign_kernel:
-            packages_headers_arch = []
-            makeflags['FOREIGN_KERNEL'] = True
-        else:
-            headers_arch = self.templates["control.headers.arch"]
-            packages_headers_arch = self.process_packages(headers_arch, vars)
-
-        libc_dev = self.templates["control.libc-dev"]
-        packages_headers_arch[0:0] = self.process_packages(libc_dev, {})
-
-        packages_headers_arch[-1]['Depends'].extend(PackageRelation())
-        extra['headers_arch_depends'] = packages_headers_arch[-1]['Depends']
-
-        merge_packages(packages, packages_headers_arch, arch)
-
-        cmds_binary_arch = ["$(MAKE) -f debian/rules.real binary-arch-arch %s" % makeflags]
-        makefile.add('binary-arch_%s_real' % arch, cmds=cmds_binary_arch)
-
-        # Shortcut to aid architecture bootstrapping
-        makefile.add('binary-libc-dev_%s' % arch,
-                     ['source_none_real'],
-                     ["$(MAKE) -f debian/rules.real install-libc-dev_%s %s" %
-                      (arch, makeflags)])
-
-        if os.getenv('DEBIAN_KERNEL_DISABLE_INSTALLER'):
-            if self.changelog[0].distribution == 'UNRELEASED':
-                import warnings
-                warnings.warn('Disable installer modules on request (DEBIAN_KERNEL_DISABLE_INSTALLER set)')
-            else:
-                raise RuntimeError('Unable to disable installer modules in release build (DEBIAN_KERNEL_DISABLE_INSTALLER set)')
-        else:
-            # Add udebs using kernel-wedge
-            installer_def_dir = 'debian/installer'
-            installer_arch_dir = os.path.join(installer_def_dir, arch)
-            if os.path.isdir(installer_arch_dir):
-                kw_env = os.environ.copy()
-                kw_env['KW_DEFCONFIG_DIR'] = installer_def_dir
-                kw_env['KW_CONFIG_DIR'] = installer_arch_dir
-                kw_proc = subprocess.Popen(
-                    ['kernel-wedge', 'gen-control', vars['abiname']],
-                    stdout=subprocess.PIPE,
-                    env=kw_env)
-                if not isinstance(kw_proc.stdout, io.IOBase):
-                    udeb_packages = read_control(io.open(kw_proc.stdout.fileno(), encoding='utf-8', closefd=False))
-                else:
-                    udeb_packages = read_control(io.TextIOWrapper(kw_proc.stdout, 'utf-8'))
-                kw_proc.wait()
-                if kw_proc.returncode != 0:
-                    raise RuntimeError('kernel-wedge exited with code %d' %
-                                       kw_proc.returncode)
-
-                merge_packages(packages, udeb_packages, arch)
-
-                # These packages must be built after the per-flavour/
-                # per-featureset packages.  Also, this won't work
-                # correctly with an empty package list.
-                if udeb_packages:
-                    makefile.add(
-                        'binary-arch_%s' % arch,
-                        cmds=["$(MAKE) -f debian/rules.real install-udeb_%s %s "
-                              "PACKAGE_NAMES='%s'" %
-                              (arch, makeflags,
-                               ' '.join(p['Package'] for p in udeb_packages))])
-        """
-
     def do_featureset_setup(self, vars, makeflags, arch, featureset, extra):
         makeflags["LOCALVERSION_HEADERS"] = vars["localversion_headers"] = vars[
             "localversion"
@@ -201,15 +128,7 @@ class Gencontrol(Base):
     def do_featureset_packages(
         self, packages, makefile, arch, featureset, vars, makeflags, extra
     ):
-        """
-        headers_featureset = self.templates["control.headers.featureset"]
-        package_headers = self.process_package(headers_featureset[0], vars)
-
-        merge_packages(packages, (package_headers,), arch)
-
-        cmds_binary_arch = ["$(MAKE) -f debian/rules.real binary-arch-featureset %s" % makeflags]
-        makefile.add('binary-arch_%s_%s_real' % (arch, featureset), cmds=cmds_binary_arch)
-        """
+        pass
 
     flavour_makeflags_base = (
         ("compiler", "COMPILER", False),
@@ -344,23 +263,8 @@ class Gencontrol(Base):
         package_headers = self.process_package(headers[0], vars)
         package_headers["Depends"].extend(relations_compiler_headers)
         packages_own.append(package_headers)
-        """
-        extra['headers_arch_depends'].append('%s (= ${binary:Version})' % packages_own[-1]['Package'])
-        """
 
         merge_packages(packages, packages_own + packages_dummy, arch)
-
-        """
-        tests_control = self.process_package(
-            self.templates['tests-control.main'][0], vars)
-        tests_control['Depends'].append(
-            PackageRelationGroup(image_main['Package'],
-                                 override_arches=(arch,)))
-        if self.tests_control:
-            self.tests_control['Depends'].extend(tests_control['Depends'])
-        else:
-            self.tests_control = tests_control
-        """
 
         def get_config(*entry_name):
             entry_real = ("image",) + entry_name
@@ -526,19 +430,11 @@ class Gencontrol(Base):
     def write(self, packages, makefile):
         self.write_config()
         super(Gencontrol, self).write(packages, makefile)
-        """
-        self.write_tests_control()
-        """
 
     def write_config(self):
         f = open("debian/config.defines.dump", "wb")
         self.config.dump(f)
         f.close()
-
-    def write_tests_control(self):
-        self.write_rfc822(
-            open("debian/tests/control", "w", encoding="utf-8"), [self.tests_control]
-        )
 
 
 if __name__ == "__main__":
