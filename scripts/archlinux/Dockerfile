@@ -45,12 +45,3 @@ RUN sed -r -i.bak 's/^#?MAKEFLAGS.*/MAKEFLAGS="-j$(nproc)"/' /etc/makepkg.conf &
 
 USER builder
 WORKDIR /home/builder
-ARG DEFAULT
-ARG PUBLIC
-ARG SECRET
-RUN mkdir -m700 ~/.gnupg &&\
-    echo 'keyserver hkps://keys.openpgp:443' > ~/.gnupg/dirmngr.conf &&\
-    gpg --locate-keys torvalds@kernel.org gregkh@kernel.org &&\
-    echo "$PUBLIC" | gpg --import &&\
-    echo "$SECRET" | gpg --import &&\
-    echo "default-key $DEFAULT" >> ~/.gnupg/gpg.conf

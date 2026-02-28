@@ -30,6 +30,7 @@ docker run --net='host' \
     --rm \
     --tmpfs /build:exec \
     --ulimit nofile=524288:524288 \
+    -v "$HOME/.gnupg":/root/.gnupg \
     -v $dir_base:/liquorix-package \
     -t "liquorix_$source_arch/$source_distro/$source_release" \
     /liquorix-package/scripts/debian/container_build-source.sh \

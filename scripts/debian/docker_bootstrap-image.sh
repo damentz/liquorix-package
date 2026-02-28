@@ -31,29 +31,6 @@ if [[ $fail -eq 1 ]]; then
     exit 1
 fi
 
-declare default_key="$(
-    cat ~/.gnupg/gpg.conf ~/.gnupg/options 2>/dev/null | \
-    grep -E '^\s*default-key' | grep -Po '\S+\s*$'
-)"
-
-if [[ -z "$default_key" ]]; then
-    echo "[ERROR] No default key found in ~/.gnupg/gpg.conf or ~/.gnupg.options!  Cannot proceed with building bootstrap images."
-    exit 1
-fi
-
-declare public="$(gpg --armor --export -a "$default_key")"
-declare secret="$(gpg --armor --export-secret-keys -a "$default_key")"
-
-if ! echo "$public" | head -n1 | grep -q 'BEGIN PGP PUBLIC KEY BLOCK'; then
-    echo "[ERROR] Exported public key is empty!  Cannot proceed with building bootstrap images."
-    exit 1
-fi
-
-if ! echo "$secret" | head -n1 | grep -q 'BEGIN PGP PRIVATE KEY BLOCK'; then
-    echo "[ERROR] Exported secret key is empty!  Cannot proceed with building bootstrap images."
-    exit 1
-fi
-
 declare release_string="liquorix_$arch/$distro/$release"
 if [[ "$(docker image ls --format table)" == *"$release_string"* ]]; then
     echo "[INFO ] $release_string: Docker image already built, performing update."
@@ -91,9 +68,6 @@ else
         --build-arg ARCH="$arch" \
         --build-arg DISTRO="$distro" \
         --build-arg RELEASE="$release" \
-        --build-arg DEFAULT="$default_key" \
-        --build-arg PUBLIC="$public" \
-        --build-arg SECRET="$secret" \
         $dir_base/ || true
 
         # We don't want the docker build --network="host" bootstrap script from stopping release
