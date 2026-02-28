@@ -19,31 +19,63 @@ GnuPG must be configured with a `default-key` line defined in `~/.gnupg/gpg.conf
 
 ## Usage
 
-### Bootstrap Docker Images
-
-Before any builds can be executed, the prepared docker images must be bootstrapped.  To bootstrap all supported images, execute:
+Run `make` or `make help` to see all available targets and their current variable defaults:
 
 ```shell
-./scripts/debian/docker_bootstrap.sh
+make
 ```
 
-Subsequent executions of `docker_bootstrap.sh` will update the existing images rather than performing a full build.
+Variables can be overridden on the command line:
+
+- `PROCS` — number of parallel jobs (default: `nproc/2`, minimum 2)
+- `BUILD` — build number (default: `1`)
+- `DISTRO` — distribution name (e.g. `ubuntu`, `debian`) — required for per-release targets
+- `RELEASE` — release codename (e.g. `resolute`, `trixie`) — required for per-release targets
+
+### Bootstrap Docker Images
+
+Before any builds can be executed, the prepared Docker images must be bootstrapped.  To bootstrap Debian images:
+
+```shell
+make bootstrap-debian
+```
+
+For Arch Linux:
+
+```shell
+make bootstrap-arch
+```
+
+Subsequent runs will update the existing images rather than performing a full build.
 
 ### Build Source and Binary Packages
 
-The `debian/docker_build-source.sh` script require two operands, the distribution and release.  For example, to build for Ubuntu Focal, you would execute below:
+Build all Debian source packages:
 
 ```shell
-./scripts/debian/docker_build-source.sh debian bookworm
+make build-source-all
 ```
 
-Once complete, you need to build the binary:
+Build all Debian binary packages:
 
 ```shell
-./scripts/debian/docker_build-binary.sh amd64 debian bookworm
+make build-binary-debian
 ```
 
-If the build completes successfully, the build for Debian Bookworm will be found under `artifacts/debian/bookworm`.
+Build the Arch Linux binary package:
+
+```shell
+make build-binary-arch
+```
+
+To build for a single release, use the per-release targets with `DISTRO` and `RELEASE`:
+
+```shell
+make build-source DISTRO=ubuntu RELEASE=resolute
+make build-binary DISTRO=ubuntu RELEASE=resolute
+```
+
+If the build completes successfully, Debian packages will be found under `artifacts/debian/<release>`.
 
 At this time, only AMD64 is supported and is the only architecture that will build successfully.
 
@@ -51,13 +83,15 @@ At this time, only AMD64 is supported and is the only architecture that will bui
 
 If you run into trouble with errors for signing or don't desire signed packages, look for instances in the scripts folder of `dpkg-buildpackage` and add the `--no-sign` flag to all lines.
 
-For example, from the root of this project, execute the following script to find all instances and edit each file as necessary:
+If signing is desired, make sure to update the changelog with `dch -i --auto-nmu` and set the author to match your signing key you set up with GnuPG.
+
+### Cleanup
+
+Remove all Liquorix Docker build images:
 
 ```shell
-find scripts/ -type f | xargs grep -H 'dpkg-buildpackage'
+make clean
 ```
-
-If signing is desired, make sure to update the changelog with `dch -i --auto-nmu` and set the author to match your signing key you set up with GnuPG.
 
 ## Contributing
 
