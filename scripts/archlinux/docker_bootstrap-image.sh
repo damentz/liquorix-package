@@ -41,14 +41,8 @@ if [[ "$(docker image ls --format table)" == *"$release_string"* ]]; then
 		 sudo rm -rf /var/lib/pacman/sync'
     )
 
-    echo "[INFO ] $release_string: Trailing container - $container_id"
-    while true; do
-        if [[ -n "$(docker container ls -q -f id=$container_id)" ]]; then
-            sleep 1
-        else
-            break
-        fi
-    done
+    echo "[INFO ] $release_string: Waiting for container - $container_id"
+    docker wait "$container_id" > /dev/null
 
     echo "[INFO ] $release_string: Committing updated container to repository"
     docker commit -m "Update system packages" "$container_id" "$release_string" > /dev/null
@@ -67,8 +61,5 @@ else
         --build-arg ARCH="$arch" \
         --build-arg DISTRO="$distro" \
         --build-arg RELEASE="$release" \
-        $dir_base/ || true
-
-        # We don't want the docker build --network="host" bootstrap script from stopping release
-        # scripts from completing.
+        $dir_base/
 fi
