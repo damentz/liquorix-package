@@ -4,6 +4,8 @@ set -euo pipefail
 
 # shellcheck source=env.sh
 source "$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/env.sh"
+# shellcheck source=../lib.sh
+source "$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/../lib.sh"
 
 declare arch=${1:-}
 declare distro=${2:-}
@@ -11,42 +13,22 @@ declare release=${3:-}
 
 declare dir_artifacts="$dir_artifacts/$distro/$release"
 
-declare -i fail=0
+require_build_args "$arch" "$distro" "$release"
 
-if [[ -z "$arch" ]]; then
-    echo "[ERROR] No architecture set!"
-    fail=1
-fi
-
-if [[ -z "$distro" ]]; then
-    echo "[ERROR] No distribution set!"
-    fail=1
-fi
-
-if [[ -z "$release" ]]; then
-    echo "[ERROR] No release set!"
-    fail=1
-fi
-
-if [[ $fail -eq 1 ]]; then
-    echo "[ERROR] Encountered a fatal error, cannot continue!"
-    exit 1
-fi
-
-echo "[INFO ] Preparing build directory: $dir_build"
+log_info "Preparing build directory: $dir_build"
 sudo mkdir -vp "$dir_build"
 sudo chown -R "$build_user":"$build_user" "$dir_build"
 cd "$dir_build"
 
 unzip -j "$dir_base/$package_source"
 
-echo "[INFO ] Building binary package for $release"
+log_info "Building binary package for $release"
 export PACKAGER="$package_maintainer"
 $schedtool makepkg --sign -s
 
-echo "[INFO ] Copying binary packages to bind mount: $dir_artifacts/"
+log_info "Copying binary packages to bind mount: $dir_artifacts/"
 if [[ -d "$dir_artifacts" ]]; then
-    echo "[INFO ] Removing existing artifacts first"
+    log_info "Removing existing artifacts first"
     sudo rm -fv "$dir_artifacts"/*
 fi
 
@@ -54,7 +36,7 @@ sudo mkdir -vp "$dir_artifacts"
 sudo chown -R "$build_user":"$build_user" "$dir_artifacts"
 cp -arv "$dir_build/"*.pkg.tar* "$dir_artifacts/"
 
-echo "[INFO ] Creating AUR repository"
+log_info "Creating AUR repository"
 cd "$dir_artifacts"
 repo-add $repo_file *.pkg.tar.zst
 tar --remove-files -cf "$repo_name.tar" -- *.pkg.tar* *.db* *.files*

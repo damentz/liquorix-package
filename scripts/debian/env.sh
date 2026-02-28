@@ -62,17 +62,17 @@ function get_release_version {
 }
 
 function prepare_env {
-    echo "[INFO ] Preparing build directory: $dir_build"
+    log_info "Preparing build directory: $dir_build"
     mkdir -p "$dir_build"
     if [[ -d "$dir_build/$package_name" ]]; then
-        echo "[INFO ] Removing $dir_build/$package_name"
+        log_info "Removing $dir_build/$package_name"
         rm -rf "$dir_build/$package_name"
     fi
 
-    echo "[INFO ] Creating folder $package_name in $dir_build/"
+    log_info "Creating folder $package_name in $dir_build/"
     mkdir -pv "$dir_build/$package_name"
 
-    echo "[INFO ] Copying $package_name/debian to $dir_build/$package_name/"
+    log_info "Copying $package_name/debian to $dir_build/$package_name/"
     cp -raf "$dir_package/debian" "$dir_build/$package_name/"
 
     # Fakeroot has a 15% chance of failing for a semop error in docker
@@ -82,15 +82,15 @@ function prepare_env {
     fi
     cd "$dir_build/$package_name"
 
-    echo "[INFO ] Running '$maintainerclean'"
+    log_info "Running '$maintainerclean'"
     $maintainerclean
 
     if [[ ! -L "$dir_build/$package_source" ]]; then
-        echo "[INFO ] Missing symlink: $dir_build/$package_source, creating"
+        log_info "Missing symlink: $dir_build/$package_source, creating"
         ln -sf "$dir_base/$package_source" "$dir_build/$package_source"
     fi
 
-    echo "[INFO ] Unpacking kernel source into package folder."
+    log_info "Unpacking kernel source into package folder."
     tar -xpf "$dir_base/$package_source" --strip-components=1 -C "$dir_build/$package_name"
 }
 
@@ -100,10 +100,10 @@ function build_source_package {
 
     cd "$dir_build/$package_name"
 
-    echo "[INFO ] Updating changelog to: $release_version"
+    log_info "Updating changelog to: $release_version"
     sed -r -i "1s/[^;]+(;.*)/$package_name ($release_version) $release_name\1/" debian/changelog
 
-    echo "[INFO ] Cleaning package"
+    log_info "Cleaning package"
 
     local clean='fakeroot debian/rules clean'
 
@@ -121,6 +121,6 @@ function build_source_package {
     DPKG_SOURCE_COMMIT_OPTIONS="--include-removal" \
         dpkg-source --commit . ci.patch
 
-    echo "[INFO ] Making source package"
+    log_info "Making source package"
     $schedtool dpkg-buildpackage --build=source
 }
