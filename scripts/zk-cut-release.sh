@@ -2,9 +2,12 @@
 
 set -euo pipefail
 
+# shellcheck source=lib.sh
+source "$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/lib.sh"
+
 declare ev=${1:-lqx1}
 if [[ ! -f "Makefile" ]]; then
-    echo "[ERROR] Makefile for Linux not in current directory!"
+    log_error "Makefile for Linux not in current directory!"
     exit 1
 fi
 

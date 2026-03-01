@@ -5,17 +5,20 @@ set -euo pipefail
 # shellcheck source=env.sh
 source "$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/env.sh"
 
+# shellcheck source=../lib.sh
+source "$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/../lib.sh"
+
 # Redefine prepare_env with only the necessary operations required to save time.
 function prepare_env {
-    echo "[INFO ] Preparing build directory: $dir_build"
+    log_info "Preparing build directory: $dir_build"
     mkdir -p "$dir_build"
     if [[ -d "$dir_build/$package_name" ]]; then
-        echo "[INFO ] Removing $dir_build/$package_name"
+        log_info "Removing $dir_build/$package_name"
         rm -rf "$dir_build/$package_name"
     fi
 
     if [[ ! -L "$dir_build/$package_source" ]]; then
-        echo "[INFO ] Missing symlink: $dir_build/$package_source, creating"
+        log_info "Missing symlink: $dir_build/$package_source, creating"
         ln -sf "$dir_base/$package_source" "$dir_build/$package_source"
     fi
 }

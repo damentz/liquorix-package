@@ -2,14 +2,17 @@
 
 set -euo pipefail
 
+# shellcheck source=lib.sh
+source "$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/lib.sh"
+
 declare ev=${1:-lqx1}
 if [[ ! -f "Makefile" ]]; then
-    echo "[ERROR] Makefile for Linux not in current directory!"
+    log_error "Makefile for Linux not in current directory!"
     exit 1
 fi
 
 if [[ -z "${GH_ASSET_TOKEN:-}" ]]; then
-    echo "[ERROR] No GitHub API token found under GH_ASSET_TOKEN!"
+    log_error "No GitHub API token found under GH_ASSET_TOKEN!"
     exit 1
 fi
 
@@ -22,6 +25,11 @@ tag_commit="$(git rev-list -n1 "$tag")"
 tag_patch_file="${tag}.patch.xz"
 tag_patch_dir="../"
 
+cleanup() {
+    rm -f "$tag_patch_dir/$tag_patch_file" "$tag_patch_dir/$tag_patch_file.sig"
+}
+trap cleanup EXIT
+
 # zen-kernel repo is under an organization, not user, so it must be specified
 # by its unique ID
 declare -i repository_id=2465166
@@ -31,7 +39,7 @@ git diff "v$kv.$kpl" "$tag" | xz -9 > "$tag_patch_dir/$tag_patch_file"
 gpg --output "$tag_patch_dir/$tag_patch_file.sig" \
     --detach-sign "$tag_patch_dir/$tag_patch_file"
 
-echo "[INFO ] Making release and getting release ID"
+log_info "Making release and getting release ID"
 release_id=$(
     curl -X POST -H "Authorization: token ${GH_ASSET_TOKEN:-}" \
         --data "$release_data" "https://api.github.com/repositories/$repository_id/releases" |\
@@ -40,8 +48,8 @@ release_id=$(
 
 echo ""
 echo ""
-echo "[DEBUG] release_id: $release_id"
-echo "[INFO ] Uploading $tag_patch_file"
+log_debug "release_id: $release_id"
+log_info "Uploading $tag_patch_file"
 curl -X POST -H "Content-Type:application/x-xz" \
     -H "Authorization: token ${GH_ASSET_TOKEN:-}" \
     --data-binary @"${tag_patch_dir}/${tag_patch_file}" \
@@ -49,7 +57,7 @@ curl -X POST -H "Content-Type:application/x-xz" \
 
 echo ""
 echo ""
-echo "[INFO ] Uploading $tag_patch_file.sig"
+log_info "Uploading $tag_patch_file.sig"
 curl -X POST -H "Content-Type:application/octet-stream" \
     -H "Authorization: token ${GH_ASSET_TOKEN:-}" \
     --data-binary @"${tag_patch_dir}/${tag_patch_file}.sig" \

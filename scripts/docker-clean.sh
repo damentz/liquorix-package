@@ -2,27 +2,36 @@
 
 set -euo pipefail
 
+# shellcheck source=lib.sh
+source "$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/lib.sh"
+
 # shellcheck source=debian/env.sh
 source "$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/debian/env.sh"
 
 # shellcheck source=archlinux/env.sh
 source "$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/archlinux/env.sh"
 
-echo "[INFO ] Removing Liquorix build images"
+remove_image() {
+    if docker image inspect "$1" &>/dev/null; then
+        docker rmi -f "$1"
+    fi
+}
+
+log_info "Removing Liquorix build images"
 docker image ls --format '{{.Repository}}:{{.Tag}}\t{{.ID}}' | \
     awk '/^liquorix_/ {print $2}' | \
     xargs -r docker rmi -f
 
-echo "[INFO ] Removing base images used by Liquorix builds"
+log_info "Removing base images used by Liquorix builds"
 for release in "${releases_debian[@]}"; do
-    docker rmi -f "debian:$release" 2>/dev/null || true
-    docker rmi -f "amd64/debian:$release" 2>/dev/null || true
+    remove_image "debian:$release"
+    remove_image "amd64/debian:$release"
 done
 for release in "${releases_ubuntu[@]}"; do
-    docker rmi -f "ubuntu:$release" 2>/dev/null || true
-    docker rmi -f "amd64/ubuntu:$release" 2>/dev/null || true
+    remove_image "ubuntu:$release"
+    remove_image "amd64/ubuntu:$release"
 done
-docker rmi -f "archlinux:base-devel" 2>/dev/null || true
-docker rmi -f "amd64/archlinux:base-devel" 2>/dev/null || true
+remove_image "archlinux:base-devel"
+remove_image "amd64/archlinux:base-devel"
 
-echo "[INFO ] Done"
+log_info "Done"

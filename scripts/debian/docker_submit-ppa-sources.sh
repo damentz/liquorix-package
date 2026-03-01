@@ -5,11 +5,14 @@ set -euo pipefail
 # shellcheck source=env.sh
 source "$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/env.sh"
 
+# shellcheck source=../lib.sh
+source "$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/../lib.sh"
+
 declare -i build=${1:-${version_build}}
 declare distro='ubuntu'
 
 for release in "${releases_ubuntu[@]}"; do
-    echo "[INFO ] Uploading sources for $distro/$release"
+    log_info "Uploading sources for $distro/$release"
     docker run --net='host' \
     --rm \
     --tmpfs /build:exec \

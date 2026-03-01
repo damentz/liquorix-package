@@ -13,7 +13,7 @@ declare release=${3:-}
 
 require_build_args "$arch" "$distro" "$release"
 
-echo "[DEBUG] dir_base: $dir_base"
+log_debug "dir_base: $dir_base"
 docker run --net='host' \
     --rm \
     --ulimit nofile=524288:524288 \
