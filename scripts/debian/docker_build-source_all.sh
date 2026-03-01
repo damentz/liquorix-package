@@ -8,6 +8,8 @@ source "$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/env.sh"
 # shellcheck source=../lib.sh
 source "$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/../lib.sh"
 
+require_gpg
+
 declare -i processes_default=2
 declare -i processes=${1:-"$processes_default"}
 declare -i build=${2:-${version_build}}

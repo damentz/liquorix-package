@@ -7,6 +7,8 @@ source "$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/env.sh"
 # shellcheck source=../lib.sh
 source "$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/../lib.sh"
 
+require_gpg
+
 declare arch=${1:-}
 declare distro=${2:-}
 declare release=${3:-}
@@ -18,6 +20,7 @@ docker run --net='host' \
     --rm \
     --ulimit nofile=524288:524288 \
     -v "$HOME/.gnupg":/root/.gnupg \
+    $(gpg_agent_mount_flags /root) \
     -v $dir_base:/liquorix-package \
     -t "liquorix_$arch/$distro/$release" \
     /liquorix-package/scripts/debian/container_build-binary.sh \
