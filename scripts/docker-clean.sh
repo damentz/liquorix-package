@@ -11,6 +11,9 @@ source "$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/debian/env.sh"
 # shellcheck source=archlinux/env.sh
 source "$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/archlinux/env.sh"
 
+# shellcheck source=fedora/env.sh
+source "$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/fedora/env.sh"
+
 remove_image() {
     if docker image inspect "$1" &>/dev/null; then
         docker rmi -f "$1"
@@ -33,5 +36,9 @@ for release in "${releases_ubuntu[@]}"; do
 done
 remove_image "archlinux:base-devel"
 remove_image "amd64/archlinux:base-devel"
+for release in "${releases_fedora[@]}"; do
+    remove_image "fedora:$release"
+    remove_image "amd64/fedora:$release"
+done
 
 log_info "Done"
