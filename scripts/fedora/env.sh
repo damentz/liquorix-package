@@ -27,7 +27,7 @@ package_source="linux-liquorix_${version_kernel}.orig.tar.xz"
 source_arch='amd64'
 source_distro='fedora'
 
-releases_fedora=('rawhide')
+releases_fedora=('43' 'rawhide')
 
 build_user="builder"
 

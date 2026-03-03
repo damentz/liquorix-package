@@ -12,6 +12,7 @@ require_gpg
 declare arch=${1:-}
 declare distro=${2:-}
 declare release=${3:-}
+declare build=${4:-${version_build}}
 
 require_build_args "$arch" "$distro" "$release"
 
@@ -26,4 +27,5 @@ docker run --net='host' \
     /liquorix-package/scripts/fedora/container_build-binary.sh \
         "$arch" \
         "$distro" \
-        "$release"
+        "$release" \
+        "$build"

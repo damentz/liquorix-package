@@ -55,7 +55,7 @@ bootstrap-debian: ## Bootstrap Debian Docker build images
 
 bootstrap-image: ## Bootstrap a single Docker image (needs DISTRO, RELEASE)
 	$(require-release)
-	$(SCRIPTS)/debian/docker_bootstrap-image.sh amd64 $(DISTRO) $(RELEASE)
+	$(SCRIPTS)/$(DISTRO)/docker_bootstrap-image.sh amd64 $(DISTRO) $(RELEASE)
 
 bootstrap-arch: ## Bootstrap Arch Linux Docker build image
 	$(SCRIPTS)/archlinux/docker_bootstrap.sh $(PROCS)
@@ -77,11 +77,11 @@ build-binary-arch: ## Build Arch Linux binary package
 	$(SCRIPTS)/archlinux/docker_build-binary_archlinux.sh $(PROCS)
 
 build-binary-fedora: ## Build Fedora RPM packages
-	$(SCRIPTS)/fedora/docker_build-binary_fedora.sh $(PROCS)
+	$(SCRIPTS)/fedora/docker_build-binary_fedora.sh $(PROCS) $(BUILD)
 
 build-binary: ## Build binary package for a single release (needs DISTRO, RELEASE)
 	$(require-release)
-	$(SCRIPTS)/debian/docker_build-binary.sh amd64 $(DISTRO) $(RELEASE) $(BUILD)
+	$(SCRIPTS)/$(DISTRO)/docker_build-binary.sh amd64 $(DISTRO) $(RELEASE) $(BUILD)
 
 upload-ppa: ## Upload source packages to PPA
 	$(SCRIPTS)/debian/docker_submit-ppa-sources.sh $(BUILD)

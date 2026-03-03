@@ -10,6 +10,9 @@ source "$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/../lib.sh"
 declare arch=${1:-}
 declare distro=${2:-}
 declare release=${3:-}
+declare build=${4:-${version_build}}
+
+version_build="$build"
 
 declare dir_artifacts="$dir_artifacts/$distro/$release"
 
