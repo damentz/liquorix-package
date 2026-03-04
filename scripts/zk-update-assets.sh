@@ -35,4 +35,6 @@ gh release create "$tag" \
     "$tag_patch_dir/$tag_patch_file.sig" \
     --repo zen-kernel/zen-kernel \
     --target "$tag_commit" \
-    --title "$tag"
+    --title "$tag" \
+    --notes "" \
+    --latest=false
