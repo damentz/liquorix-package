@@ -50,6 +50,10 @@ release-debian: ## Full Debian release pipeline
 	$(MAKE) PROCS=1 build-binary-debian
 	$(MAKE) repo-add-debian
 
+release-fedora: ## Full Fedora release pipeline
+	$(MAKE) bootstrap-fedora
+	$(MAKE) build-binary-fedora
+
 bootstrap-debian: ## Bootstrap Debian Docker build images
 	$(SCRIPTS)/debian/docker_bootstrap.sh $(PROCS)
 
@@ -91,10 +95,6 @@ repo-add-debian: ## Add built packages to Debian repository
 
 clean-ppa: ## Delete PPA packages
 	$(SCRIPTS)/debian/delete_ppa_packages.py
-
-release-fedora: ## Full Fedora release pipeline (bootstrap + build)
-	$(MAKE) bootstrap-fedora
-	$(MAKE) build-binary-fedora
 
 clean: ## Remove Liquorix Docker build images
 	$(SCRIPTS)/docker-clean.sh
