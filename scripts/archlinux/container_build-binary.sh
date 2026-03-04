@@ -26,12 +26,6 @@ log_info "Building binary package for $release"
 export PACKAGER="$package_maintainer"
 $schedtool makepkg --sign -s
 
-log_info "Copying binary packages to bind mount: $dir_artifacts/"
-if [[ -d "$dir_artifacts" ]]; then
-    log_info "Removing existing artifacts first"
-    sudo rm -fv "$dir_artifacts"/*
-fi
-
 sudo mkdir -vp "$dir_artifacts"
 sudo chown -R "$build_user":"$build_user" "$dir_artifacts"
 cp -arv "$dir_build/"*.pkg.tar* "$dir_artifacts/"
