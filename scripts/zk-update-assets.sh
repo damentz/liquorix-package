@@ -20,11 +20,6 @@ tag_commit="$(git rev-list -n1 "$tag")"
 tag_patch_file="${tag}.patch.xz"
 tag_patch_dir="../"
 
-cleanup() {
-    rm -f "$tag_patch_dir/$tag_patch_file" "$tag_patch_dir/$tag_patch_file.sig"
-}
-trap cleanup EXIT
-
 git diff "v$kv.$kpl" "$tag" | xz -9 > "$tag_patch_dir/$tag_patch_file"
 gpg --output "$tag_patch_dir/$tag_patch_file.sig" \
     --detach-sign "$tag_patch_dir/$tag_patch_file"
