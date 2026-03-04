@@ -22,7 +22,6 @@ fi
 
 docker run --net='host' \
     --rm \
-    --tmpfs /build:exec \
     --ulimit nofile=524288:524288 \
     -v "$HOME/.gnupg":/root/.gnupg \
     $(gpg_agent_mount_flags /root) \

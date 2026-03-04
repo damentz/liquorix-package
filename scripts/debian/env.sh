@@ -122,5 +122,12 @@ function build_source_package {
         dpkg-source --commit . ci.patch
 
     log_info "Making source package"
-    $schedtool dpkg-buildpackage --build=source
+    local gpg_key
+    gpg_key=$(awk '/^default-key/ {print $2}' ~/.gnupg/gpg.conf 2>/dev/null || echo "")
+
+    if [[ -n "$gpg_key" ]]; then
+        $schedtool dpkg-buildpackage --build=source -k"$gpg_key"
+    else
+        $schedtool dpkg-buildpackage --build=source
+    fi
 }

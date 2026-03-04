@@ -17,7 +17,6 @@ for release in "${releases_ubuntu[@]}"; do
     log_info "Uploading sources for $distro/$release"
     docker run --net='host' \
     --rm \
-    --tmpfs /build:exec \
     --env LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libeatmydata.so \
     -v "$HOME/.gnupg":/root/.gnupg \
     $(gpg_agent_mount_flags /root) \

@@ -52,7 +52,15 @@ cd "$dir_build/$package_name-$version_kernel"
 mk-build-deps -ir -t 'apt-get -y'
 
 log_info "Building binary package for $release"
-$schedtool dpkg-buildpackage --build=binary
+
+declare gpg_key
+gpg_key=$(awk '/^default-key/ {print $2}' ~/.gnupg/gpg.conf 2>/dev/null || echo "")
+
+if [[ -n "$gpg_key" ]]; then
+    $schedtool dpkg-buildpackage --build=binary -k"$gpg_key"
+else
+    $schedtool dpkg-buildpackage --build=binary
+fi
 
 log_info "Copying binary packages to bind mount: $dir_artifacts/"
 mkdir -p "$dir_artifacts"
