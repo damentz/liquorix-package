@@ -53,8 +53,9 @@ case "$dists" in
 
     repo_file='/etc/pacman.conf'
     if ! grep -q 'liquorix.net/archlinux' /etc/pacman.conf; then
+        # shellcheck disable=SC2016
         echo -e '\n[liquorix]\nServer = https://liquorix.net/archlinux/$repo/$arch' |\
-            sudo tee -a $repo_file
+            sudo tee -a "$repo_file"
         log INFO "Liquorix repository added successfully to $repo_file"
     else
         log INFO "Liquorix repo already configured in $repo_file, skipped add step"

@@ -11,9 +11,12 @@ if [[ ! -f "Makefile" ]]; then
     exit 1
 fi
 
-declare -i kv=$(grep -E '^VERSION = ' Makefile | sed -r 's/^VERSION = //')
-declare -i kpl=$(grep -E '^PATCHLEVEL = ' Makefile | sed -r 's/^PATCHLEVEL = //')
-declare -i ksl=$(grep -E '^SUBLEVEL = ' Makefile | sed -r 's/^SUBLEVEL = //')
+declare -i kv
+kv=$(grep -E '^VERSION = ' Makefile | sed -r 's/^VERSION = //')
+declare -i kpl
+kpl=$(grep -E '^PATCHLEVEL = ' Makefile | sed -r 's/^PATCHLEVEL = //')
+declare -i ksl
+ksl=$(grep -E '^SUBLEVEL = ' Makefile | sed -r 's/^SUBLEVEL = //')
 
 tag="v$kv.$kpl.$ksl-$ev"
 tag_commit="$(git rev-list -n1 "$tag")"

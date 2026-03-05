@@ -54,15 +54,14 @@ log_info "cleaning repository"
 git clean -xdf
 
 log_info "checking if, $queue, exists"
-stat "$queue" &> /dev/null
-if [[ "$?" -ne 0 ]]; then
+if ! stat "$queue" &> /dev/null; then
     log_error "folder, $queue, does not exist"
     exit 1
 fi
 
 log_info "merging from stable queue"
-for file in $(cat "$queue/series"); do
+while IFS= read -r file; do
     git am -3 "$queue/$file"
-done
+done < "$queue/series"
 
 exit 0
