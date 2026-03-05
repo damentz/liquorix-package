@@ -49,17 +49,17 @@ $schedtool rpmbuild -bb \
     "$rpmbuild_dir/SPECS/$spec_name"
 
 # Sign RPMs
-log_info "Signing RPM packages"
-declare gpg_key
-gpg_key="$(
-    cat ~/.gnupg/gpg.conf ~/.gnupg/options 2>/dev/null | \
-    grep -E '^\s*default-key' | grep -Po '\S+\s*$' | tr -d '[:space:]' || true
-)"
-if [[ -n "$gpg_key" ]]; then
+if gpg_available; then
+    log_info "Signing RPM packages"
+    declare gpg_key
+    gpg_key="$(
+        cat ~/.gnupg/gpg.conf ~/.gnupg/options 2>/dev/null | \
+        grep -E '^\s*default-key' | grep -Po '\S+\s*$' | tr -d '[:space:]'
+    )"
     echo "%_gpg_name $gpg_key" >> ~/.rpmmacros
     rpm --addsign "$rpmbuild_dir/RPMS/x86_64/"*.rpm
 else
-    log_warn "No GPG default-key found, skipping RPM signing"
+    log_warn "No GPG signing key available, skipping RPM signing"
 fi
 
 sudo mkdir -vp "$dir_artifacts"

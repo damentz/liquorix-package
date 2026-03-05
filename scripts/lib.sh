@@ -47,65 +47,48 @@ require_docker() {
     fi
 }
 
-# Validate GPG signing setup: agent running, default key configured, and
-# socket available. Call this early (before docker builds) to give clear
-# errors instead of cryptic failures inside containers.
-require_gpg() {
-    local -i fail=0
+# Check if GPG signing is available. Returns 0 if ready, 1 if not.
+# Does NOT exit — callers decide how to handle the result.
+gpg_available() {
+    command -v gpgconf > /dev/null || return 1
+    gpgconf --launch gpg-agent 2>/dev/null || return 1
 
-    # gpgconf is required to locate sockets
-    if ! command -v gpgconf > /dev/null; then
-        log_error "gpgconf not found. Install gnupg (>= 2.1) to enable package signing."
-        exit 1
-    fi
-
-    # Ensure the agent is running (gpgconf --launch is idempotent)
-    if ! gpgconf --launch gpg-agent 2>/dev/null; then
-        log_error "Failed to start gpg-agent."
-        log_error "Ensure gnupg and gpg-agent are installed and that \$GNUPGHOME (or ~/.gnupg) is accessible."
-        exit 1
-    fi
-
-    # Verify a default signing key is configured
     local default_key
     default_key="$(
         cat ~/.gnupg/gpg.conf ~/.gnupg/options 2>/dev/null | \
         grep -E '^\s*default-key' | grep -Po '\S+\s*$' || true
     )"
-    if [[ -z "$default_key" ]]; then
-        log_error "No default-key found in ~/.gnupg/gpg.conf."
-        log_error "Add 'default-key <KEY_ID>' to ~/.gnupg/gpg.conf."
-        fail=1
-    fi
+    [[ -n "$default_key" ]] || return 1
 
-    # Verify the agent socket exists
     local agent_socket
     agent_socket="$(gpgconf --list-dirs agent-socket 2>/dev/null || true)"
-    if [[ -z "$agent_socket" || ! -S "$agent_socket" ]]; then
-        log_error "GPG agent socket not found at: ${agent_socket:-<unknown>}"
-        log_error "Try: gpgconf --kill gpg-agent && gpgconf --launch gpg-agent"
-        fail=1
-    fi
+    [[ -n "$agent_socket" && -S "$agent_socket" ]] || return 1
 
-    if [[ $fail -eq 1 ]]; then
-        exit 1
-    fi
-
-    log_info "GPG signing ready (key: ${default_key}, agent: $agent_socket)"
+    return 0
 }
 
-# Return docker flags to forward the host GPG agent socket into a container.
-# Mounts the host agent socket at the standard path inside the container
-# so gpg finds it automatically without starting its own agent.
-# Usage: docker run $(gpg_agent_mount_flags /root) ...
-gpg_agent_mount_flags() {
+# Require GPG signing to be available, exit with error if not.
+require_gpg() {
+    if ! gpg_available; then
+        log_error "GPG signing is not available. See README.md for setup instructions."
+        exit 1
+    fi
+    log_info "GPG signing ready"
+}
+
+# Return all docker flags needed for GPG signing, or empty if GPG is unavailable.
+# Usage: docker run $(gpg_docker_flags /home/builder) ...
+gpg_docker_flags() {
+    gpg_available || return 0
+
     local container_home="${1:-/root}"
+    local flags="-v $HOME/.gnupg:${container_home}/.gnupg"
+
     local agent_socket
     agent_socket="$(gpgconf --list-dirs agent-socket 2>/dev/null || true)"
-    if [[ -z "$agent_socket" ]]; then
-        log_warn "Could not determine GPG agent socket path, signing may fail"
-        return 0
+    if [[ -n "$agent_socket" ]]; then
+        flags+=" -v $agent_socket:${container_home}/.gnupg/S.gpg-agent"
     fi
-    local container_socket="$container_home/.gnupg/S.gpg-agent"
-    echo "-v $agent_socket:$container_socket"
+
+    echo "$flags"
 }

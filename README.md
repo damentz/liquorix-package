@@ -9,13 +9,7 @@ This repository contains the Debian package to build Liquorix for both Debian an
 The following software must be installed.
 
 1. Docker
-2. GnuPG
-
-GnuPG must be configured with a `default-key` line defined in `~/.gnupg/gpg.conf`.  Consult the GnuPG manual for more information if you're unsure what to put here.  But if you're creating a temporary signing key for the purposes of building, follow these steps:
-
-1. Execute `gpg --full-gen-key` and follow prompts
-2. Run `gpg --list-secret-keys` to produce a list of keys you own the secrets to
-3. Create `~/.gnupg/gpg.conf` and add `default-key EXAMPLE1234...`, where the example is your key from the previous output
+2. GnuPG (optional — required only for package signing)
 
 ## Usage
 
@@ -81,9 +75,15 @@ At this time, only AMD64 is supported and is the only architecture that will bui
 
 ### Package Signing
 
-If you run into trouble with errors for signing or don't desire signed packages, look for instances in the scripts folder of `dpkg-buildpackage` and add the `--no-sign` flag to all lines.
+Package signing is optional.  If GnuPG is not installed or no signing key is configured, builds will complete successfully and skip signing with a warning.
 
-If signing is desired, make sure to update the changelog with `dch -i --auto-nmu` and set the author to match your signing key you set up with GnuPG.
+To enable signing, configure GnuPG with a default key:
+
+1. Execute `gpg --full-gen-key` and follow prompts
+2. Run `gpg --list-secret-keys` to find your key ID
+3. Create `~/.gnupg/gpg.conf` and add `default-key EXAMPLE1234...`, where the example is your key from the previous output
+
+When a valid key is configured, packages are signed automatically during the build.  If signing is desired for Debian, make sure to update the changelog with `dch -i --auto-nmu` and set the author to match your signing key.
 
 ### Cleanup
 

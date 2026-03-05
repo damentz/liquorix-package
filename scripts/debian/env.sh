@@ -122,5 +122,12 @@ function build_source_package {
         dpkg-source --commit . ci.patch
 
     log_info "Making source package"
-    $schedtool dpkg-buildpackage --build=source
+    $schedtool dpkg-buildpackage --build=source --no-sign
+
+    if gpg_available; then
+        log_info "Signing source package"
+        debsign "$dir_build/${package_name}_${release_version}_source.changes"
+    else
+        log_warn "No GPG signing key available, skipping source package signing"
+    fi
 }

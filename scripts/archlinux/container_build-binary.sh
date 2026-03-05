@@ -24,7 +24,15 @@ unzip -j "$dir_base/$package_source"
 
 log_info "Building binary package for $release"
 export PACKAGER="$package_maintainer"
-$schedtool makepkg --sign -s
+
+declare -a makepkg_flags=(-s)
+if gpg_available; then
+    makepkg_flags+=(--sign)
+else
+    log_warn "No GPG signing key available, skipping package signing"
+fi
+
+$schedtool makepkg "${makepkg_flags[@]}"
 
 sudo mkdir -vp "$dir_artifacts"
 sudo chown -R "$build_user":"$build_user" "$dir_artifacts"

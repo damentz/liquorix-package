@@ -19,8 +19,7 @@ for release in "${releases_ubuntu[@]}"; do
     --rm \
     --tmpfs /build:exec \
     --env LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libeatmydata.so \
-    -v "$HOME/.gnupg":/root/.gnupg \
-    $(gpg_agent_mount_flags /root) \
+    $(gpg_docker_flags /root) \
     -v "$dir_base":/liquorix-package \
     -t "liquorix_$source_arch/$source_distro/$source_release" \
     /liquorix-package/scripts/debian/container_dput-to-ppa.sh \
