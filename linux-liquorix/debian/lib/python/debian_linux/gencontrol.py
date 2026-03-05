@@ -1,4 +1,3 @@
-import codecs
 import os
 import re
 from collections import OrderedDict
@@ -105,7 +104,7 @@ class Gencontrol(object):
     def __init__(self, config, templates, version=Version):
         self.config, self.templates = config, templates
         self.changelog = Changelog(version=version)
-        self.vars = {}
+        self.tpl_vars = {}
 
     def __call__(self):
         packages = PackagesList()
@@ -122,23 +121,24 @@ class Gencontrol(object):
         source = self.templates["control.source"][0]
         if not source.get("Source"):
             source["Source"] = self.changelog[0].source
-        packages["source"] = self.process_package(source, self.vars)
+        packages["source"] = self.process_package(source, self.tpl_vars)
 
     def do_main(self, packages, makefile):
-        vars = self.vars.copy()
+        tpl_vars = self.tpl_vars.copy()
 
         makeflags = MakeFlags()
         extra = {}
 
-        self.do_main_setup(vars, makeflags, extra)
+        self.do_main_setup(tpl_vars, makeflags, extra)
         self.do_main_makefile(makefile, makeflags, extra)
-        self.do_main_packages(packages, vars, makeflags, extra)
-        self.do_main_recurse(packages, makefile, vars, makeflags, extra)
+        self.do_main_packages(packages, tpl_vars, makeflags, extra)
+        self.do_main_recurse(packages, makefile, tpl_vars, makeflags, extra)
 
-    def do_main_setup(self, vars, makeflags, extra):
-        pass
+    def do_main_setup(self, tpl_vars, makeflags, extra):
+        del tpl_vars, makeflags, extra
 
     def do_main_makefile(self, makefile, makeflags, extra):
+        del extra
         makefile.add(
             "build-indep",
             cmds=["$(MAKE) -f debian/rules.real build-indep %s" % makeflags],
@@ -148,23 +148,23 @@ class Gencontrol(object):
             cmds=["$(MAKE) -f debian/rules.real binary-indep %s" % makeflags],
         )
 
-    def do_main_packages(self, packages, vars, makeflags, extra):
-        pass
+    def do_main_packages(self, packages, tpl_vars, makeflags, extra):
+        del packages, tpl_vars, makeflags, extra
 
-    def do_main_recurse(self, packages, makefile, vars, makeflags, extra):
+    def do_main_recurse(self, packages, makefile, tpl_vars, makeflags, extra):
         for featureset in iter_featuresets(self.config):
             self.do_indep_featureset(
-                packages, makefile, featureset, vars.copy(), makeflags.copy(), extra
+                packages, makefile, featureset, tpl_vars.copy(), makeflags.copy(), extra
             )
         for arch in iter_arches(self.config):
-            self.do_arch(packages, makefile, arch, vars.copy(), makeflags.copy(), extra)
+            self.do_arch(packages, makefile, arch, tpl_vars.copy(), makeflags.copy(), extra)
 
     def do_extra(self, packages, makefile):
         templates_extra = self.templates.get("control.extra", None)
         if templates_extra is None:
             return
 
-        packages_extra = self.process_packages(templates_extra, self.vars)
+        packages_extra = self.process_packages(templates_extra, self.tpl_vars)
         packages.extend(packages_extra)
         extra_arches = {}
         for package in packages_extra:
@@ -184,22 +184,23 @@ class Gencontrol(object):
             makefile.add("binary-arch_%s_extra" % arch, cmds=cmds)
 
     def do_indep_featureset(
-        self, packages, makefile, featureset, vars, makeflags, extra
+        self, packages, makefile, featureset, tpl_vars, makeflags, extra
     ):
-        vars["localversion"] = ""
+        tpl_vars["localversion"] = ""
         if featureset != "none":
-            vars["localversion"] = "-" + featureset
+            tpl_vars["localversion"] = "-" + featureset
 
-        self.do_indep_featureset_setup(vars, makeflags, featureset, extra)
+        self.do_indep_featureset_setup(tpl_vars, makeflags, featureset, extra)
         self.do_indep_featureset_makefile(makefile, featureset, makeflags, extra)
         self.do_indep_featureset_packages(
-            packages, makefile, featureset, vars, makeflags, extra
+            packages, makefile, featureset, tpl_vars, makeflags, extra
         )
 
-    def do_indep_featureset_setup(self, vars, makeflags, featureset, extra):
-        pass
+    def do_indep_featureset_setup(self, tpl_vars, makeflags, featureset, extra):
+        del tpl_vars, makeflags, featureset, extra
 
     def do_indep_featureset_makefile(self, makefile, featureset, makeflags, extra):
+        del extra
         makeflags["FEATURESET"] = featureset
 
         for i in self.makefile_targets_indep:
@@ -210,22 +211,23 @@ class Gencontrol(object):
             makefile.add(target2, [target3])
 
     def do_indep_featureset_packages(
-        self, packages, makefile, featureset, vars, makeflags, extra
+        self, packages, makefile, featureset, tpl_vars, makeflags, extra
     ):
-        pass
+        del packages, makefile, featureset, tpl_vars, makeflags, extra
 
-    def do_arch(self, packages, makefile, arch, vars, makeflags, extra):
-        vars["arch"] = arch
+    def do_arch(self, packages, makefile, arch, tpl_vars, makeflags, extra):
+        tpl_vars["arch"] = arch
 
-        self.do_arch_setup(vars, makeflags, arch, extra)
+        self.do_arch_setup(tpl_vars, makeflags, arch, extra)
         self.do_arch_makefile(makefile, arch, makeflags, extra)
-        self.do_arch_packages(packages, makefile, arch, vars, makeflags, extra)
-        self.do_arch_recurse(packages, makefile, arch, vars, makeflags, extra)
+        self.do_arch_packages(packages, makefile, arch, tpl_vars, makeflags, extra)
+        self.do_arch_recurse(packages, makefile, arch, tpl_vars, makeflags, extra)
 
-    def do_arch_setup(self, vars, makeflags, arch, extra):
-        pass
+    def do_arch_setup(self, tpl_vars, makeflags, arch, extra):
+        del tpl_vars, makeflags, arch, extra
 
     def do_arch_makefile(self, makefile, arch, makeflags, extra):
+        del extra
         makeflags["ARCH"] = arch
 
         for i in self.makefile_targets:
@@ -235,41 +237,42 @@ class Gencontrol(object):
             makefile.add(target1, [target2])
             makefile.add(target2, [target3])
 
-    def do_arch_packages(self, packages, makefile, arch, vars, makeflags, extra):
-        pass
+    def do_arch_packages(self, packages, makefile, arch, tpl_vars, makeflags, extra):
+        del packages, makefile, arch, tpl_vars, makeflags, extra
 
-    def do_arch_recurse(self, packages, makefile, arch, vars, makeflags, extra):
+    def do_arch_recurse(self, packages, makefile, arch, tpl_vars, makeflags, extra):
         for featureset in iter_arch_featuresets(self.config, arch):
             self.do_featureset(
                 packages,
                 makefile,
                 arch,
                 featureset,
-                vars.copy(),
+                tpl_vars.copy(),
                 makeflags.copy(),
                 extra,
             )
 
     def do_featureset(
-        self, packages, makefile, arch, featureset, vars, makeflags, extra
+        self, packages, makefile, arch, featureset, tpl_vars, makeflags, extra
     ):
-        vars["localversion"] = ""
+        tpl_vars["localversion"] = ""
         if featureset != "none":
-            vars["localversion"] = "-" + featureset
+            tpl_vars["localversion"] = "-" + featureset
 
-        self.do_featureset_setup(vars, makeflags, arch, featureset, extra)
+        self.do_featureset_setup(tpl_vars, makeflags, arch, featureset, extra)
         self.do_featureset_makefile(makefile, arch, featureset, makeflags, extra)
         self.do_featureset_packages(
-            packages, makefile, arch, featureset, vars, makeflags, extra
+            packages, makefile, arch, featureset, tpl_vars, makeflags, extra
         )
         self.do_featureset_recurse(
-            packages, makefile, arch, featureset, vars, makeflags, extra
+            packages, makefile, arch, featureset, tpl_vars, makeflags, extra
         )
 
-    def do_featureset_setup(self, vars, makeflags, arch, featureset, extra):
-        pass
+    def do_featureset_setup(self, tpl_vars, makeflags, arch, featureset, extra):
+        del tpl_vars, makeflags, arch, featureset, extra
 
     def do_featureset_makefile(self, makefile, arch, featureset, makeflags, extra):
+        del extra
         makeflags["FEATURESET"] = featureset
 
         for i in self.makefile_targets:
@@ -280,12 +283,12 @@ class Gencontrol(object):
             makefile.add(target2, [target3])
 
     def do_featureset_packages(
-        self, packages, makefile, arch, featureset, vars, makeflags, extra
+        self, packages, makefile, arch, featureset, tpl_vars, makeflags, extra
     ):
-        pass
+        del packages, makefile, arch, featureset, tpl_vars, makeflags, extra
 
     def do_featureset_recurse(
-        self, packages, makefile, arch, featureset, vars, makeflags, extra
+        self, packages, makefile, arch, featureset, tpl_vars, makeflags, extra
     ):
         for flavour in iter_flavours(self.config, arch, featureset):
             self.do_flavour(
@@ -294,33 +297,35 @@ class Gencontrol(object):
                 arch,
                 featureset,
                 flavour,
-                vars.copy(),
+                tpl_vars.copy(),
                 makeflags.copy(),
                 extra,
             )
 
     def do_flavour(
-        self, packages, makefile, arch, featureset, flavour, vars, makeflags, extra
+        self, packages, makefile, arch, featureset, flavour, tpl_vars, makeflags, extra
     ):
-        vars["localversion"] += "-" + flavour
+        tpl_vars["localversion"] += "-" + flavour
 
-        self.do_flavour_setup(vars, makeflags, arch, featureset, flavour, extra)
+        self.do_flavour_setup(tpl_vars, makeflags, arch, featureset, flavour, extra)
         self.do_flavour_makefile(makefile, arch, featureset, flavour, makeflags, extra)
         self.do_flavour_packages(
-            packages, makefile, arch, featureset, flavour, vars, makeflags, extra
+            packages, makefile, arch, featureset, flavour, tpl_vars, makeflags, extra
         )
 
-    def do_flavour_setup(self, vars, makeflags, arch, featureset, flavour, extra):
+    def do_flavour_setup(self, tpl_vars, makeflags, arch, featureset, flavour, extra):
+        del arch, featureset, flavour, extra
         for i in (
             ("kernel-arch", "KERNEL_ARCH"),
             ("localversion", "LOCALVERSION"),
         ):
-            if i[0] in vars:
-                makeflags[i[1]] = vars[i[0]]
+            if i[0] in tpl_vars:
+                makeflags[i[1]] = tpl_vars[i[0]]
 
     def do_flavour_makefile(
         self, makefile, arch, featureset, flavour, makeflags, extra
     ):
+        del extra
         makeflags["FLAVOUR"] = flavour
 
         for i in self.makefile_targets:
@@ -331,58 +336,60 @@ class Gencontrol(object):
             makefile.add(target2, [target3])
 
     def do_flavour_packages(
-        self, packages, makefile, arch, featureset, flavour, vars, makeflags, extra
+        self, packages, makefile, arch, featureset, flavour, tpl_vars, makeflags, extra
     ):
-        pass
+        del packages, makefile, arch, featureset, flavour, tpl_vars, makeflags, extra
 
-    def process_relation(self, dep, vars):
+    def process_relation(self, dep, tpl_vars):
         import copy
 
         dep = copy.deepcopy(dep)
         for groups in dep:
             for item in groups:
-                item.name = self.substitute(item.name, vars)
+                item.name = self.substitute(item.name, tpl_vars)
                 if item.version:
-                    item.version = self.substitute(item.version, vars)
+                    item.version = self.substitute(item.version, tpl_vars)
         return dep
 
-    def process_description(self, in_desc, vars):
+    def process_description(self, in_desc, tpl_vars):
         desc = in_desc.__class__()
-        desc.short = self.substitute(in_desc.short, vars)
+        desc.short = self.substitute(in_desc.short, tpl_vars)
         for i in in_desc.long:
-            desc.append(self.substitute(i, vars))
+            desc.append(self.substitute(i, tpl_vars))
         return desc
 
-    def process_package(self, in_entry, vars={}):
+    def process_package(self, in_entry, tpl_vars=None):
+        if tpl_vars is None:
+            tpl_vars = {}
         entry = in_entry.__class__()
         for key, value in in_entry.items():
             if isinstance(value, PackageRelation):
-                value = self.process_relation(value, vars)
+                value = self.process_relation(value, tpl_vars)
             elif isinstance(value, PackageDescription):
-                value = self.process_description(value, vars)
+                value = self.process_description(value, tpl_vars)
             else:
-                value = self.substitute(value, vars)
+                value = self.substitute(value, tpl_vars)
             entry[key] = value
         return entry
 
-    def process_packages(self, entries, vars):
-        return [self.process_package(i, vars) for i in entries]
+    def process_packages(self, entries, tpl_vars):
+        return [self.process_package(i, tpl_vars) for i in entries]
 
-    def substitute(self, s, vars):
+    def substitute(self, s, tpl_vars):
         if isinstance(s, (list, tuple)):
-            return [self.substitute(i, vars) for i in s]
+            return [self.substitute(i, tpl_vars) for i in s]
 
         def subst(match):
-            return vars[match.group(1)]
+            return tpl_vars[match.group(1)]
 
         return re.sub(r"@([-_a-z0-9]+)@", subst, str(s))
 
     # Substitute kernel version etc. into maintainer scripts,
     # bug presubj message and lintian overrides
     def substitute_debhelper_config(
-        self, prefix, vars, package_name, output_dir="debian"
+        self, prefix, tpl_vars, package_name, output_dir="debian"
     ):
-        for id in [
+        for config_id in [
             "bug-presubj",
             "lintian-overrides",
             "maintscript",
@@ -391,15 +398,15 @@ class Gencontrol(object):
             "preinst",
             "prerm",
         ]:
-            name = "%s.%s" % (prefix, id)
+            name = "%s.%s" % (prefix, config_id)
             try:
                 template = self.templates[name]
             except KeyError:
                 continue
             else:
-                target = "%s/%s.%s" % (output_dir, package_name, id)
-                with open(target, "w") as f:
-                    f.write(self.substitute(template, vars))
+                target = "%s/%s.%s" % (output_dir, package_name, config_id)
+                with open(target, "w", encoding="utf-8") as f:
+                    f.write(self.substitute(template, tpl_vars))
                     os.chmod(f.fileno(), self.templates.get_mode(name) & 0o777)
 
     def merge_build_depends(self, packages):
@@ -434,16 +441,16 @@ class Gencontrol(object):
         self.write_control(packages.values())
         self.write_makefile(makefile)
 
-    def write_control(self, list, name="debian/control"):
-        self.write_rfc822(codecs.open(name, "w", "utf-8"), list)
+    def write_control(self, entries, name="debian/control"):
+        with open(name, "w", encoding="utf-8") as f:
+            self.write_rfc822(f, entries)
 
     def write_makefile(self, makefile, name="debian/rules.gen"):
-        f = open(name, "w")
-        makefile.write(f)
-        f.close()
+        with open(name, "w", encoding="utf-8") as f:
+            makefile.write(f)
 
-    def write_rfc822(self, f, list):
-        for entry in list:
+    def write_rfc822(self, f, entries):
+        for entry in entries:
             for key, value in entry.items():
                 f.write("%s: %s\n" % (key, value))
             f.write("\n")

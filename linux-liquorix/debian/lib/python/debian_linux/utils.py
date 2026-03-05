@@ -1,12 +1,11 @@
-import codecs
 import os
 import re
 import textwrap
 
 
 class Templates(object):
-    def __init__(self, dirs=["debian/templates"]):
-        self.dirs = dirs
+    def __init__(self, dirs=None):
+        self.dirs = dirs if dirs is not None else ["debian/templates"]
 
         self._cache = {}
 
@@ -17,13 +16,13 @@ class Templates(object):
         raise KeyError(key)
 
     def _read(self, name):
-        prefix, id = name.split(".", 1)
+        prefix, _ = name.split(".", 1)
 
         for suffix in [".in", ""]:
-            for dir in self.dirs:
-                filename = "%s/%s%s" % (dir, name, suffix)
+            for tmpl_dir in self.dirs:
+                filename = "%s/%s%s" % (tmpl_dir, name, suffix)
                 if os.path.exists(filename):
-                    with codecs.open(filename, "r", "utf-8") as f:
+                    with open(filename, "r", encoding="utf-8") as f:
                         mode = os.stat(f.fileno()).st_mode
                         if prefix == "control":
                             return (read_control(f), mode)

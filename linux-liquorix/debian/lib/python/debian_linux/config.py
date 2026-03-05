@@ -30,14 +30,14 @@ class SchemaItemInteger(object):
 
 
 class SchemaItemList(object):
-    def __init__(self, type=r"\s+"):
-        self.type = type
+    def __init__(self, separator=r"\s+"):
+        self.separator = separator
 
     def __call__(self, i):
         i = i.strip()
         if not i:
             return []
-        return [j.strip() for j in re.split(self.type, i)]
+        return [j.strip() for j in re.split(self.separator, i)]
 
 
 # Using OrderedDict instead of dict makes the pickled config reproducible
@@ -89,9 +89,8 @@ class ConfigCore(collections.OrderedDict):
         pickle.dump(self, fp, 0)
 
 
-class ConfigCoreDump(object):
-    def __new__(self, fp):
-        return pickle.load(fp)
+def ConfigCoreDump(fp):
+    return pickle.load(fp)
 
 
 class ConfigCoreHierarchy(object):
@@ -104,7 +103,9 @@ class ConfigCoreHierarchy(object):
         },
     }
 
-    def __new__(cls, schema, dirs=[]):
+    def __new__(cls, schema, dirs=None):
+        if dirs is None:
+            dirs = []
         schema_complete = cls.schema_base.copy()
         for key, value in schema.items():
             schema_complete.setdefault(key, {}).update(value)
@@ -246,13 +247,17 @@ class ConfigParser(object):
         return self._config.read(data)
 
 
-if __name__ == "__main__":
+def main():
     sys.path.append("debian/lib/python")
-    config = ConfigCoreDump(open("debian/config.defines.dump", "rb"))
+    dump = ConfigCoreDump(open("debian/config.defines.dump", "rb"))
     for section, items in sorted(
-        config.items(), key=(lambda a: tuple(i or "" for i in a[0]))
+        dump.items(), key=(lambda a: tuple(i or "" for i in a[0]))
     ):
         print("[%s]" % (section,))
         for item, value in sorted(items.items()):
             print("%s: %s" % (item, value))
         print()
+
+
+if __name__ == "__main__":
+    main()

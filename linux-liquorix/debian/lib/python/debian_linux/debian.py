@@ -59,13 +59,13 @@ class Changelog(list):
             for key, value in kwargs.items():
                 setattr(self, key, value)
 
-    def __init__(self, dir="", version=None, file=None):
+    def __init__(self, directory="", version=None, file=None):
         if version is None:
             version = Version
         if file:
             self._parse(version, file)
         else:
-            with open(os.path.join(dir, "debian/changelog"), encoding="UTF-8") as f:
+            with open(os.path.join(directory, "debian/changelog"), encoding="UTF-8") as f:
                 self._parse(version, f)
 
     def _parse(self, version, f):
@@ -80,17 +80,17 @@ class Changelog(list):
             elif top_match is None:
                 top_match = self._top_re.match(line)
                 if not top_match:
-                    raise Exception("invalid top line %d in changelog" % line_no)
+                    raise ValueError("invalid top line %d in changelog" % line_no)
                 try:
                     v = version(top_match.group("version"))
-                except Exception:
+                except (ValueError, RuntimeError, AssertionError):
                     if not len(self):
                         raise
                     v = Version(top_match.group("version"))
             else:
                 bottom_match = self._bottom_re.match(line)
                 if not bottom_match:
-                    raise Exception("invalid bottom line %d in changelog" % line_no)
+                    raise ValueError("invalid bottom line %d in changelog" % line_no)
 
                 self.append(
                     self.Entry(
@@ -472,13 +472,13 @@ class PackageDescription(object):
         long = "\n .\n ".join(["\n ".join(i) for i in long_pars])
         return short + "\n " + long if long else short
 
-    def append(self, str):
-        str = str.strip()
-        if str:
-            self.long.extend(str.split("\n.\n"))
+    def append(self, text):
+        text = text.strip()
+        if text:
+            self.long.extend(text.split("\n.\n"))
 
-    def append_short(self, str):
-        for i in [i.strip() for i in str.split(",")]:
+    def append_short(self, text):
+        for i in [i.strip() for i in text.split(",")]:
             if i:
                 self.short.append(i)
 
@@ -498,9 +498,9 @@ class PackageRelation(list):
     def __str__(self):
         return ", ".join(str(i) for i in self)
 
-    def _search_value(self, value):
+    def search_value(self, value):
         for i in self:
-            if i._search_value(value):
+            if i.search_value(value):
                 return i
         return None
 
@@ -509,9 +509,9 @@ class PackageRelation(list):
             value = PackageRelationGroup(value, override_arches)
         elif not isinstance(value, PackageRelationGroup):
             raise ValueError("got %s" % type(value))
-        j = self._search_value(value)
+        j = self.search_value(value)
         if j:
-            j._update_arches(value)
+            j.update_arches(value)
         else:
             super(PackageRelation, self).append(value)
 
@@ -530,7 +530,7 @@ class PackageRelationGroup(list):
     def __str__(self):
         return " | ".join(str(i) for i in self)
 
-    def _search_value(self, value):
+    def search_value(self, value):
         for i, j in zip(self, value):
             if (
                 i.name != j.name
@@ -541,7 +541,7 @@ class PackageRelationGroup(list):
                 return None
         return self
 
-    def _update_arches(self, value):
+    def update_arches(self, value):
         for i, j in zip(self, value):
             if i.arches:
                 for arch in j.arches:
@@ -653,6 +653,8 @@ class PackageRelationEntry(object):
 
 
 class _ControlFileDict(dict):
+    _fields = {}
+
     def __setitem__(self, key, value):
         try:
             cls = self._fields[key]

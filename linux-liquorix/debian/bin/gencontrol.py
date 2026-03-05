@@ -33,8 +33,12 @@ class Gencontrol(Base):
     }
 
     def __init__(
-        self, config_dirs=["debian/config"], template_dirs=["debian/templates"]
+        self, config_dirs=None, template_dirs=None
     ):
+        if config_dirs is None:
+            config_dirs = ["debian/config"]
+        if template_dirs is None:
+            template_dirs = ["debian/templates"]
         super(Gencontrol, self).__init__(
             config.ConfigCoreHierarchy(self.config_schema, config_dirs),
             Templates(template_dirs),
@@ -48,12 +52,12 @@ class Gencontrol(Base):
             if src in data or not optional:
                 makeflags[dst] = data[src]
 
-    def _substitute_file(self, template, vars, target, append=False):
+    def _substitute_file(self, template, tpl_vars, target, append=False):
         with open(target, "a" if append else "w", encoding="utf-8") as f:
-            f.write(self.substitute(self.templates[template], vars))
+            f.write(self.substitute(self.templates[template], tpl_vars))
 
-    def do_main_setup(self, vars, makeflags, extra):
-        super(Gencontrol, self).do_main_setup(vars, makeflags, extra)
+    def do_main_setup(self, tpl_vars, makeflags, extra):
+        super(Gencontrol, self).do_main_setup(tpl_vars, makeflags, extra)
         makeflags.update(
             {
                 "VERSION": self.version.linux_version,
@@ -95,19 +99,19 @@ class Gencontrol(Base):
         # linux-source-$UPSTREAMVERSION will contain all kconfig files
         makefile.add("binary-indep", deps=["setup"])
 
-    def do_main_packages(self, packages, vars, makeflags, extra):
+    def do_main_packages(self, packages, tpl_vars, makeflags, extra):
         packages.extend(
-            self.process_packages(self.templates["control.main"], self.vars)
+            self.process_packages(self.templates["control.main"], self.tpl_vars)
         )
 
     arch_makeflags = (("kernel-arch", "KERNEL_ARCH", False),)
 
-    def do_arch_setup(self, vars, makeflags, arch, extra):
+    def do_arch_setup(self, tpl_vars, makeflags, arch, extra):
         config_base = self.config.merge("base", arch)
 
         self._setup_makeflags(self.arch_makeflags, makeflags, config_base)
 
-    def do_arch_packages(self, packages, makefile, arch, vars, makeflags, extra):
+    def do_arch_packages(self, packages, makefile, arch, tpl_vars, makeflags, extra):
         # Some userland architectures require kernels from another
         # (Debian) architecture, e.g. x32/amd64.
 
@@ -116,17 +120,17 @@ class Gencontrol(Base):
                 abiname_part = ".%s" % self.config["abi", arch]["abiname"]
             except KeyError:
                 abiname_part = self.abiname_part
-            makeflags["ABINAME"] = vars["abiname"] = (
+            makeflags["ABINAME"] = tpl_vars["abiname"] = (
                 self.version.linux_upstream + abiname_part
             )
 
-    def do_featureset_setup(self, vars, makeflags, arch, featureset, extra):
-        makeflags["LOCALVERSION_HEADERS"] = vars["localversion_headers"] = vars[
+    def do_featureset_setup(self, tpl_vars, makeflags, arch, featureset, extra):
+        makeflags["LOCALVERSION_HEADERS"] = tpl_vars["localversion_headers"] = tpl_vars[
             "localversion"
         ]
 
     def do_featureset_packages(
-        self, packages, makefile, arch, featureset, vars, makeflags, extra
+        self, packages, makefile, arch, featureset, tpl_vars, makeflags, extra
     ):
         pass
 
@@ -146,30 +150,30 @@ class Gencontrol(Base):
         ("localversion-image", "LOCALVERSION_IMAGE", True),
     )
 
-    def do_flavour_setup(self, vars, makeflags, arch, featureset, flavour, extra):
+    def do_flavour_setup(self, tpl_vars, makeflags, arch, featureset, flavour, extra):
         config_base = self.config.merge("base", arch, featureset, flavour)
         config_build = self.config.merge("build", arch, featureset, flavour)
         config_description = self.config.merge("description", arch, featureset, flavour)
         config_image = self.config.merge("image", arch, featureset, flavour)
 
-        vars["class"] = config_description["hardware"]
-        vars["longclass"] = config_description.get("hardware-long") or vars["class"]
+        tpl_vars["class"] = config_description["hardware"]
+        tpl_vars["longclass"] = config_description.get("hardware-long") or tpl_vars["class"]
 
-        vars["localversion-image"] = vars["localversion"]
+        tpl_vars["localversion-image"] = tpl_vars["localversion"]
         override_localversion = config_image.get("override-localversion", None)
         if override_localversion is not None:
-            vars["localversion-image"] = (
-                vars["localversion_headers"] + "-" + override_localversion
+            tpl_vars["localversion-image"] = (
+                tpl_vars["localversion_headers"] + "-" + override_localversion
             )
-        vars["image-stem"] = config_image.get("install-stem")
+        tpl_vars["image-stem"] = config_image.get("install-stem")
 
         self._setup_makeflags(self.flavour_makeflags_base, makeflags, config_base)
         self._setup_makeflags(self.flavour_makeflags_build, makeflags, config_build)
         self._setup_makeflags(self.flavour_makeflags_image, makeflags, config_image)
-        self._setup_makeflags(self.flavour_makeflags_other, makeflags, vars)
+        self._setup_makeflags(self.flavour_makeflags_other, makeflags, tpl_vars)
 
     def do_flavour_packages(
-        self, packages, makefile, arch, featureset, flavour, vars, makeflags, extra
+        self, packages, makefile, arch, featureset, flavour, tpl_vars, makeflags, extra
     ):
         headers = self.templates["control.headers"]
 
@@ -254,13 +258,13 @@ class Gencontrol(Base):
 
         image = self.templates["control.image"]
 
-        vars.setdefault("desc", None)
+        tpl_vars.setdefault("desc", None)
 
-        image_main = self.process_real_image(image[0], image_fields, vars)
+        image_main = self.process_real_image(image[0], image_fields, tpl_vars)
         packages_own.append(image_main)
-        packages_own.extend(self.process_packages(image[1:], vars))
+        packages_own.extend(self.process_packages(image[1:], tpl_vars))
 
-        package_headers = self.process_package(headers[0], vars)
+        package_headers = self.process_package(headers[0], tpl_vars)
         package_headers["Depends"].extend(relations_compiler_headers)
         packages_own.append(package_headers)
 
@@ -352,16 +356,16 @@ class Gencontrol(Base):
         # translations and lintian overrides
         self._substitute_file(
             "headers.postinst",
-            vars,
+            tpl_vars,
             "debian/linux-headers-%s%s.postinst"
-            % (vars["abiname"], vars["localversion"]),
+            % (tpl_vars["abiname"], tpl_vars["localversion"]),
         )
         for name in ["postinst", "postrm", "preinst", "prerm"]:
             self._substitute_file(
                 "image.%s" % name,
-                vars,
+                tpl_vars,
                 "debian/linux-image-%s%s.%s"
-                % (vars["abiname"], vars["localversion"], name),
+                % (tpl_vars["abiname"], tpl_vars["localversion"], name),
             )
 
     def process_changelog(self):
@@ -377,7 +381,7 @@ class Gencontrol(Base):
             self.abiname_part = ""
         else:
             self.abiname_part = ".%s" % self.config["abi",]["abiname"]
-        self.vars = {
+        self.tpl_vars = {
             "upstreamversion": self.version.linux_upstream,
             "version": self.version.linux_version,
             "source_upstream": self.version.upstream,
@@ -417,8 +421,8 @@ class Gencontrol(Base):
                     "Can't upload to %s with a version of %s" % (distribution, version)
                 )
 
-    def process_real_image(self, entry, fields, vars):
-        entry = self.process_package(entry, vars)
+    def process_real_image(self, entry, fields, tpl_vars):
+        entry = self.process_package(entry, tpl_vars)
         for key, value in fields.items():
             if key in entry:
                 real = entry[key]
@@ -432,9 +436,8 @@ class Gencontrol(Base):
         super(Gencontrol, self).write(packages, makefile)
 
     def write_config(self):
-        f = open("debian/config.defines.dump", "wb")
-        self.config.dump(f)
-        f.close()
+        with open("debian/config.defines.dump", "wb") as f:
+            self.config.dump(f)
 
 
 if __name__ == "__main__":

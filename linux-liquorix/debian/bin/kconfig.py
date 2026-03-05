@@ -9,13 +9,15 @@ from debian_linux.kconfig import KconfigFile
 def merge(output, configs, overrides):
     kconfig = KconfigFile()
     for c in configs:
-        kconfig.read(open(c))
+        with open(c, encoding="utf-8") as f:
+            kconfig.read(f)
     for key, value in overrides.items():
         kconfig.set(key, value)
-    open(output, "w").write(str(kconfig))
+    with open(output, "w", encoding="utf-8") as f:
+        f.write(str(kconfig))
 
 
-def opt_callback_dict(option, opt, value, parser):
+def opt_callback_dict(option, _opt, value, parser):
     match = re.match(r"^\s*(\S+)=(\S+)\s*$", value)
     if not match:
         raise optparse.OptionValueError("not key=value")
@@ -24,9 +26,9 @@ def opt_callback_dict(option, opt, value, parser):
     data[match.group(1)] = match.group(2)
 
 
-if __name__ == "__main__":
-    parser = optparse.OptionParser(usage="%prog [OPTION]... FILE...")
-    parser.add_option(
+def main():
+    opt_parser = optparse.OptionParser(usage="%prog [OPTION]... FILE...")
+    opt_parser.add_option(
         "-o",
         "--override",
         action="callback",
@@ -36,6 +38,10 @@ if __name__ == "__main__":
         help="Override option",
         type="string",
     )
-    options, args = parser.parse_args()
+    options, args = opt_parser.parse_args()
 
     merge(args[0], args[1:], options.overrides)
+
+
+if __name__ == "__main__":
+    main()
