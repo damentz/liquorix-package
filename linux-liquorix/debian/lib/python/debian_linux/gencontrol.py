@@ -157,7 +157,9 @@ class Gencontrol(object):
                 packages, makefile, featureset, tpl_vars.copy(), makeflags.copy(), extra
             )
         for arch in iter_arches(self.config):
-            self.do_arch(packages, makefile, arch, tpl_vars.copy(), makeflags.copy(), extra)
+            self.do_arch(
+                packages, makefile, arch, tpl_vars.copy(), makeflags.copy(), extra
+            )
 
     def do_extra(self, packages, makefile):
         templates_extra = self.templates.get("control.extra", None)

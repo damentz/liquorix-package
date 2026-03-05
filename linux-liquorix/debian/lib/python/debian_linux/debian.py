@@ -65,7 +65,9 @@ class Changelog(list):
         if file:
             self._parse(version, file)
         else:
-            with open(os.path.join(directory, "debian/changelog"), encoding="UTF-8") as f:
+            with open(
+                os.path.join(directory, "debian/changelog"), encoding="UTF-8"
+            ) as f:
                 self._parse(version, f)
 
     def _parse(self, version, f):

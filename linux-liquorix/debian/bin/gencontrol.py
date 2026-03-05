@@ -32,9 +32,7 @@ class Gencontrol(Base):
         "relations": {},
     }
 
-    def __init__(
-        self, config_dirs=None, template_dirs=None
-    ):
+    def __init__(self, config_dirs=None, template_dirs=None):
         if config_dirs is None:
             config_dirs = ["debian/config"]
         if template_dirs is None:
@@ -157,7 +155,9 @@ class Gencontrol(Base):
         config_image = self.config.merge("image", arch, featureset, flavour)
 
         tpl_vars["class"] = config_description["hardware"]
-        tpl_vars["longclass"] = config_description.get("hardware-long") or tpl_vars["class"]
+        tpl_vars["longclass"] = (
+            config_description.get("hardware-long") or tpl_vars["class"]
+        )
 
         tpl_vars["localversion-image"] = tpl_vars["localversion"]
         override_localversion = config_image.get("override-localversion", None)
