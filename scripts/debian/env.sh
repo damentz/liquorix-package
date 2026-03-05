@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# Variables defined here are used by scripts that source this file
+# shellcheck disable=SC2034
+
 dir_script="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 package_name='linux-liquorix'
 
@@ -10,8 +13,8 @@ dir_scripts="$dir_base/scripts/debian"
 dir_artifacts="$dir_base/artifacts"
 
 version_package="$( head -n1 "$dir_package"/debian/changelog | grep -Po '\d+\.\d+-\d+' )"
-version_kernel="$(  echo $version_package                    | grep -Po '\d+\.\d+' )"
-version_major="$(   echo $version_kernel                     | sed -r 's/\..*//' )"
+version_kernel="$(  echo "$version_package"                   | grep -Po '\d+\.\d+' )"
+version_major="$(   echo "$version_kernel"                    | sed -r 's/\..*//' )"
 version_build="1"
 
 package_source="${package_name}_${version_kernel}.orig.tar.xz"
@@ -31,7 +34,7 @@ mirror_ubuntu='http://archive.ubuntu.com/ubuntu'
 # Now that we're sure this system is compatible with the bootstrap script, lets
 # set all the variables needed to proceed.
 build_user="$(whoami)"
-build_base=$(grep -E "^${build_user}:" /etc/passwd | cut -f6 -d:)
+build_base="$(grep -E "^${build_user}:" /etc/passwd | cut -f6 -d:)"
 build_deps=(
     'debhelper'
     'devscripts'
@@ -66,7 +69,7 @@ function prepare_env {
     mkdir -p "$dir_build"
     if [[ -d "$dir_build/$package_name" ]]; then
         log_info "Removing $dir_build/$package_name"
-        rm -rf "$dir_build/$package_name"
+        rm -rf "${dir_build:?}/$package_name"
     fi
 
     log_info "Creating folder $package_name in $dir_build/"
@@ -80,7 +83,7 @@ function prepare_env {
     if [[ "$(id -u)" == 0 ]]; then
         maintainerclean='debian/rules maintainerclean'
     fi
-    cd "$dir_build/$package_name"
+    cd "$dir_build/$package_name" || exit
 
     log_info "Running '$maintainerclean'"
     $maintainerclean
@@ -98,7 +101,7 @@ function build_source_package {
     local release_name="$1"
     local release_version="$2"
 
-    cd "$dir_build/$package_name"
+    cd "$dir_build/$package_name" || exit
 
     log_info "Updating changelog to: $release_version"
     sed -r -i "1s/[^;]+(;.*)/$package_name ($release_version) $release_name\1/" debian/changelog

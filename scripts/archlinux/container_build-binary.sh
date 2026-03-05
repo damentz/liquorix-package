@@ -18,7 +18,7 @@ require_build_args "$arch" "$distro" "$release"
 log_info "Preparing build directory: $dir_build"
 sudo mkdir -vp "$dir_build"
 sudo chown -R "$build_user":"$build_user" "$dir_build"
-cd "$dir_build"
+cd "$dir_build" || exit
 
 unzip -j "$dir_base/$package_source"
 
@@ -39,8 +39,8 @@ sudo chown -R "$build_user":"$build_user" "$dir_artifacts"
 cp -arv "$dir_build/"*.pkg.tar* "$dir_artifacts/"
 
 log_info "Creating AUR repository"
-cd "$dir_artifacts"
-repo-add $repo_file *.pkg.tar.zst
+cd "$dir_artifacts" || exit
+repo-add "$repo_file" ./*.pkg.tar.zst
 tar --remove-files -cf "$repo_name.tar" -- *.pkg.tar* *.db* *.files*
 
 ls -ltrh

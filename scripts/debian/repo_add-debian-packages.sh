@@ -18,10 +18,11 @@ if [[ ! -d "$repo_local_path" ]]; then
     exit 1
 fi
 
-for arch in 'amd64'; do
+# shellcheck disable=SC2043
+for arch in amd64; do
     distro='debian'
     for release in "${releases_debian[@]}"; do
-        cd "$dir_artifacts/$distro/$release"
+        cd "$dir_artifacts/$distro/$release" || exit
         changes="${package_name}_${version_package}.${build}~${release}_${arch}.changes"
 
         log_info "Including $changes to repo at $repo_local_path"

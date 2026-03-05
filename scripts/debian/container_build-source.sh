@@ -25,11 +25,11 @@ prepare_env
 # We need to update our lists to we can install dependencies correctly
 apt-get update
 
-version="$(get_release_version $distro $release $build)"
+version="$(get_release_version "$distro" "$release" "$build")"
 
 log_info "Building source package for $release"
 build_source_package "$release" "$version"
 
 log_info "Copying sources to bind mount: $dir_artifacts/"
 mkdir -p "$dir_artifacts"
-cp -arv "$dir_build/"*$version* "$dir_artifacts/"
+cp -arv "$dir_build/"*"$version"* "$dir_artifacts/"

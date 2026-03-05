@@ -13,11 +13,13 @@ declare release=${3:-}
 
 require_build_args "$arch" "$distro" "$release"
 
-declare release_string="$(image_name "$arch" "$distro" "$release")"
+declare release_string
+release_string="$(image_name "$arch" "$distro" "$release")"
 if [[ "$(docker image ls --format table)" == *"$release_string"* ]]; then
     log_info "$release_string: Docker image already built, performing update."
-    declare container_id=$(
-        docker run --net='host' -d $release_string bash -c \
+    declare container_id
+    container_id=$(
+        docker run --net='host' -d "$release_string" bash -c \
         'apt-get update && \
          apt-get dist-upgrade && \
          apt-get clean && \
@@ -44,5 +46,5 @@ else
         --build-arg ARCH="$arch" \
         --build-arg DISTRO="$distro" \
         --build-arg RELEASE="$release" \
-        $dir_base/
+        "$dir_base"/
 fi

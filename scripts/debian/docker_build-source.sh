@@ -18,14 +18,15 @@ if [[ $fail -eq 1 ]]; then
     exit 1
 fi
 
+# shellcheck disable=SC2046
 docker run --net='host' \
     --rm \
     --tmpfs /build:exec \
     --ulimit nofile=524288:524288 \
     $(gpg_docker_flags /root) \
-    -v $dir_base:/liquorix-package \
+    -v "$dir_base":/liquorix-package \
     -t "liquorix_$source_arch/$source_distro/$source_release" \
     /liquorix-package/scripts/debian/container_build-source.sh \
-        $distro \
-        $release \
-        $build
+        "$distro" \
+        "$release" \
+        "$build"

@@ -15,6 +15,8 @@ declare build=${4:-${version_build}}
 require_build_args "$arch" "$distro" "$release"
 
 log_debug "dir_base: $dir_base"
+
+# shellcheck disable=SC2046
 docker run --net='host' \
     --rm \
     --ulimit nofile=524288:524288 \

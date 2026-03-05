@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# Variables defined here are used by scripts that source this file
+# shellcheck disable=SC2034
+
 dir_script="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 package_name='linux-lqx'
 package_source="$package_name.zip"

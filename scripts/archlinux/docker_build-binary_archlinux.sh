@@ -14,7 +14,8 @@ declare -a args=()
 
 declare distro=''
 
-for arch in 'amd64'; do
+# shellcheck disable=SC2043
+for arch in amd64; do
     distro='archlinux'
     for release in "${releases[@]}"; do
         args+=("$arch" "$distro" "$release")

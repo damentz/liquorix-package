@@ -15,7 +15,8 @@ declare -a args=()
 
 declare distro=''
 
-for arch in 'amd64'; do
+# shellcheck disable=SC2043
+for arch in amd64; do
     distro='fedora'
     for release in "${releases_fedora[@]}"; do
         args+=("$arch" "$distro" "$release" "$build")

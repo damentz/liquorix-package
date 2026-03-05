@@ -15,6 +15,8 @@ declare distro='ubuntu'
 
 for release in "${releases_ubuntu[@]}"; do
     log_info "Uploading sources for $distro/$release"
+
+    # shellcheck disable=SC2046
     docker run --net='host' \
     --rm \
     --tmpfs /build:exec \
