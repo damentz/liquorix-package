@@ -1,6 +1,6 @@
 # Liquorix Package
 
-[![license](https://img.shields.io/github/license/damentz/liquorix-package.svg)](LICENSE)
+[![license](https://img.shields.io/badge/license-GPL--2.0-blue.svg)](LICENSE)
 
 This repository contains the Debian package to build Liquorix for both Debian and Ubuntu, and scripts for Debian, Ubuntu, and Arch Linux.
 
