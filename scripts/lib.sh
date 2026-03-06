@@ -60,9 +60,7 @@ gpg_available() {
     )"
     [[ -n "$default_key" ]] || return 1
 
-    local agent_socket
-    agent_socket="$(gpgconf --list-dirs agent-socket 2>/dev/null || true)"
-    [[ -n "$agent_socket" && -S "$agent_socket" ]] || return 1
+    gpg-connect-agent /bye 2>/dev/null || return 1
 
     return 0
 }
