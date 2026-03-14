@@ -73,7 +73,7 @@ def delete_binary(
     if status == "Deleted":
         return True
 
-    if not force and status != "Superseded":
+    if not force and status not in ("Superseded", "Published"):
         log.debug("Binary not deletable (status=%s): %s", status, entry["display_name"])
         return False
 
