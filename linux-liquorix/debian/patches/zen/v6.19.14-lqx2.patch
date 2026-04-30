@@ -927,7 +927,7 @@ index 01a3abef8abb..b1008283e11d 100644
  
  7.32 KVM_CAP_MAX_VCPU_ID
 diff --git a/Makefile b/Makefile
-index d3a8482bdbd0..8ea8cc99c4f4 100644
+index d3a8482bdbd0..ee698d3126eb 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -1,9 +1,9 @@
@@ -938,7 +938,7 @@ index d3a8482bdbd0..8ea8cc99c4f4 100644
 -EXTRAVERSION =
 -NAME = Baby Opossum Posse
 +SUBLEVEL = 14
-+EXTRAVERSION = -lqx1
++EXTRAVERSION = -lqx2
 +NAME = Channeling Inner Peace for Peak Performance
  
  # *DOCUMENTATION*
@@ -37040,10 +37040,6 @@ index f5aa29dc6ec0..88df2f0e3eba 100644
  }
  EXPORT_SYMBOL(ttm_resource_fini);
  
--int ttm_resource_alloc(struct ttm_buffer_object *bo,
--		       const struct ttm_place *place,
--		       struct ttm_resource **res_ptr,
--		       struct dmem_cgroup_pool_state **ret_limit_pool)
 +/**
 + * ttm_resource_try_charge - charge a resource manager's cgroup pool
 + * @bo: buffer for which an allocation should be charged
@@ -37076,9 +37072,10 @@ index f5aa29dc6ec0..88df2f0e3eba 100644
 +				      ret_limit_pool);
 +}
 +
-+int ttm_resource_alloc(struct ttm_buffer_object *bo,
-+		       const struct ttm_place *place,
-+		       struct ttm_resource **res_ptr,
+ int ttm_resource_alloc(struct ttm_buffer_object *bo,
+ 		       const struct ttm_place *place,
+ 		       struct ttm_resource **res_ptr,
+-		       struct dmem_cgroup_pool_state **ret_limit_pool)
 +		       struct dmem_cgroup_pool_state *charge_pool)
  {
  	struct ttm_resource_manager *man =
@@ -84036,7 +84033,7 @@ index 14077d23f2a1..c2603e700178 100644
  		*backend_domid = 0;
  		ret = 0;
 diff --git a/drivers/xen/privcmd.c b/drivers/xen/privcmd.c
-index f52a457b302d..cbc62f0df11b 100644
+index f52a457b302d..f37d8d212c06 100644
 --- a/drivers/xen/privcmd.c
 +++ b/drivers/xen/privcmd.c
 @@ -12,6 +12,7 @@
@@ -84107,7 +84104,28 @@ index f52a457b302d..cbc62f0df11b 100644
  
  	file->private_data = data;
  	return 0;
-@@ -1661,6 +1679,52 @@ static struct miscdevice privcmd_dev = {
+@@ -1601,6 +1619,12 @@ static void privcmd_close(struct vm_area_struct *vma)
+ 	kvfree(pages);
+ }
+ 
++static int privcmd_may_split(struct vm_area_struct *area, unsigned long addr)
++{
++	/* Forbid splitting, avoids double free via privcmd_close(). */
++	return -EINVAL;
++}
++
+ static vm_fault_t privcmd_fault(struct vm_fault *vmf)
+ {
+ 	printk(KERN_DEBUG "privcmd_fault: vma=%p %lx-%lx, pgoff=%lx, uv=%p\n",
+@@ -1612,6 +1636,7 @@ static vm_fault_t privcmd_fault(struct vm_fault *vmf)
+ 
+ static const struct vm_operations_struct privcmd_vm_ops = {
+ 	.close = privcmd_close,
++	.may_split = privcmd_may_split,
+ 	.fault = privcmd_fault
+ };
+ 
+@@ -1661,6 +1686,52 @@ static struct miscdevice privcmd_dev = {
  	.fops = &xen_privcmd_fops,
  };
  
@@ -84160,7 +84178,7 @@ index f52a457b302d..cbc62f0df11b 100644
  static int __init privcmd_init(void)
  {
  	int err;
-@@ -1668,6 +1732,9 @@ static int __init privcmd_init(void)
+@@ -1668,6 +1739,9 @@ static int __init privcmd_init(void)
  	if (!xen_domain())
  		return -ENODEV;
  
@@ -84170,7 +84188,7 @@ index f52a457b302d..cbc62f0df11b 100644
  	err = misc_register(&privcmd_dev);
  	if (err != 0) {
  		pr_err("Could not register Xen privcmd device\n");
-@@ -1697,6 +1764,9 @@ static int __init privcmd_init(void)
+@@ -1697,6 +1771,9 @@ static int __init privcmd_init(void)
  
  static void __exit privcmd_exit(void)
  {
@@ -84180,6 +84198,32 @@ index f52a457b302d..cbc62f0df11b 100644
  	privcmd_ioeventfd_exit();
  	privcmd_irqfd_exit();
  	misc_deregister(&privcmd_dev);
+diff --git a/drivers/xen/sys-hypervisor.c b/drivers/xen/sys-hypervisor.c
+index 2f880374b463..c1a0ca1b1b5f 100644
+--- a/drivers/xen/sys-hypervisor.c
++++ b/drivers/xen/sys-hypervisor.c
+@@ -366,6 +366,8 @@ static ssize_t buildid_show(struct hyp_sysfs_attr *attr, char *buffer)
+ 			ret = sprintf(buffer, "<denied>");
+ 		return ret;
+ 	}
++	if (ret > PAGE_SIZE)
++		return -ENOSPC;
+ 
+ 	buildid = kmalloc(sizeof(*buildid) + ret, GFP_KERNEL);
+ 	if (!buildid)
+@@ -373,8 +375,10 @@ static ssize_t buildid_show(struct hyp_sysfs_attr *attr, char *buffer)
+ 
+ 	buildid->len = ret;
+ 	ret = HYPERVISOR_xen_version(XENVER_build_id, buildid);
+-	if (ret > 0)
+-		ret = sprintf(buffer, "%s", buildid->buf);
++	if (ret > 0) {
++		/* Build id is binary, not a string. */
++		memcpy(buffer, buildid->buf, ret);
++	}
+ 	kfree(buildid);
+ 
+ 	return ret;
 diff --git a/drivers/xen/unpopulated-alloc.c b/drivers/xen/unpopulated-alloc.c
 index d6fc2aefe264..1dc0b495c8e5 100644
 --- a/drivers/xen/unpopulated-alloc.c
