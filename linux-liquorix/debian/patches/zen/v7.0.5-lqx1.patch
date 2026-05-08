@@ -316,7 +316,7 @@ index d74c2c2b9ef3..b4a710484a0b 100644
  
          ops.quiescent();        /* Task releases its assigned CPU (wait) */
 diff --git a/Makefile b/Makefile
-index 36d0a32fbe49..34ae47e5448f 100644
+index 36d0a32fbe49..17caf65490f2 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -1,9 +1,9 @@
@@ -326,8 +326,8 @@ index 36d0a32fbe49..34ae47e5448f 100644
 -SUBLEVEL = 0
 -EXTRAVERSION =
 -NAME = Baby Opossum Posse
-+SUBLEVEL = 4
-+EXTRAVERSION = -lqx2
++SUBLEVEL = 5
++EXTRAVERSION = -lqx1
 +NAME = Channeling Inner Peace for Peak Performance
  
  # *DOCUMENTATION*
@@ -16048,19 +16048,23 @@ index c6831c93cd6e..6d2eea8c713b 100644
  	}
  }
 diff --git a/include/linux/sched.h b/include/linux/sched.h
-index 5a5d3dbc9cdf..8f752666f619 100644
+index 5a5d3dbc9cdf..4a5f5830615f 100644
 --- a/include/linux/sched.h
 +++ b/include/linux/sched.h
-@@ -847,7 +847,9 @@ struct task_struct {
+@@ -847,11 +847,13 @@ struct task_struct {
  #endif
  
  	int				on_cpu;
 +
  	struct __call_single_node	wake_entry;
-+#ifndef CONFIG_SCHED_ALT
  	unsigned int			wakee_flips;
  	unsigned long			wakee_flip_decay_ts;
  	struct task_struct		*last_wakee;
+ 
++#ifndef CONFIG_SCHED_ALT
+ 	/*
+ 	 * recent_used_cpu is initially set as the last CPU used by a task
+ 	 * that wakes affine another task. Waker/wakee relationships can
 @@ -861,6 +863,7 @@ struct task_struct {
  	 */
  	int				recent_used_cpu;
@@ -17856,10 +17860,10 @@ index b1f1a367034f..b7f5f9931da3 100644
  obj-y += build_utility.o
 diff --git a/kernel/sched/alt_core.c b/kernel/sched/alt_core.c
 new file mode 100644
-index 000000000000..6fa910e650ba
+index 000000000000..75ceb3e967ec
 --- /dev/null
 +++ b/kernel/sched/alt_core.c
-@@ -0,0 +1,7657 @@
+@@ -0,0 +1,7738 @@
 +/*
 + *  kernel/sched/alt_core.c
 + *
@@ -17990,6 +17994,7 @@ index 000000000000..6fa910e650ba
 + * domain, see cpus_share_cache().
 + */
 +static DEFINE_PER_CPU_READ_MOSTLY(int, sd_llc_id);
++static DEFINE_PER_CPU_READ_MOSTLY(int, sd_llc_size);
 +
 +DEFINE_PER_CPU_SHARED_ALIGNED(struct rq, runqueues);
 +
@@ -19800,6 +19805,53 @@ index 000000000000..6fa910e650ba
 +
 +DEFINE_STATIC_CALL(sched_idle_select_func, cpumask_and);
 +
++static void record_wakee(struct task_struct *p)
++{
++	/*
++	 * Only decay a single time; tasks that have less then 1 wakeup per
++	 * jiffy will not have built up many flips.
++	 */
++	if (time_after(jiffies, current->wakee_flip_decay_ts + HZ)) {
++		current->wakee_flips >>= 1;
++		current->wakee_flip_decay_ts = jiffies;
++	}
++
++	if (current->last_wakee != p) {
++		current->last_wakee = p;
++		current->wakee_flips++;
++	}
++}
++
++/*
++ * Detect M:N waker/wakee relationships via a switching-frequency heuristic.
++ *
++ * A waker of many should wake a different task than the one last awakened
++ * at a frequency roughly N times higher than one of its wakees.
++ *
++ * In order to determine whether we should let the load spread vs consolidating
++ * to shared cache, we look for a minimum 'flip' frequency of llc_size in one
++ * partner, and a factor of lls_size higher frequency in the other.
++ *
++ * With both conditions met, we can be relatively sure that the relationship is
++ * non-monogamous, with partner count exceeding socket size.
++ *
++ * Waker/wakee being client/server, worker/dispatcher, interrupt source or
++ * whatever is irrelevant, spread criteria is apparent partner count exceeds
++ * socket size.
++ */
++static int wake_wide(struct task_struct *p)
++{
++	unsigned int master = current->wakee_flips;
++	unsigned int slave = p->wakee_flips;
++	int factor = __this_cpu_read(sd_llc_size);
++
++	if (master < slave)
++		swap(master, slave);
++	if (slave < factor || master < slave * factor)
++		return 0;
++	return 1;
++}
++
 +static int
 +wake_affine_idle(int this_cpu, int prev_cpu, int sync)
 +{
@@ -19833,25 +19885,58 @@ index 000000000000..6fa910e650ba
 +
 +static inline int select_task_rq(struct task_struct *p, int wake_flags)
 +{
++	int sync = (wake_flags & WF_SYNC) && !(current->flags & PF_EXITING);
 +	cpumask_t allow_mask, mask;
++	int cpu = smp_processor_id();
 +	int prev_cpu = task_cpu(p);
++	int new_cpu = prev_cpu;
++	int want_affine = 0;
++	bool wakee_migratable = p->nr_cpus_allowed > 1 && !is_migration_disabled(p);
 +
-+	if (unlikely(!cpumask_and(&allow_mask, p->cpus_ptr, cpu_active_mask)))
-+		return select_fallback_rq(prev_cpu, p);
++	/*
++	 * required for stable ->cpus_allowed
++	 */
++	lockdep_assert_held(&p->pi_lock);
++	if (wake_flags & WF_TTWU) {
++		if (wakee_migratable)
++			record_wakee(p);
 +
-+	if ((wake_flags & WF_SYNC) && !(current->flags & PF_EXITING)) {
-+		int affine_cpu = wake_affine_idle(smp_processor_id(), prev_cpu, true);
++		if ((wake_flags & WF_CURRENT_CPU) &&
++		    cpumask_test_cpu(cpu, p->cpus_ptr)) {
++			new_cpu = cpu;
++			goto out;
++		}
++
++		want_affine = wakee_migratable && !wake_wide(p) &&
++			      cpumask_test_cpu(cpu, p->cpus_ptr);
++	}
++
++	if (unlikely(!cpumask_and(&allow_mask, p->cpus_ptr, cpu_active_mask))) {
++		new_cpu = select_fallback_rq(prev_cpu, p);
++		goto out;
++	}
++
++	if (sync && want_affine) {
++		int affine_cpu = wake_affine_idle(cpu, prev_cpu, sync);
 +
 +		if (affine_cpu < nr_cpu_ids &&
-+		    cpumask_test_cpu(affine_cpu, &allow_mask))
-+			return affine_cpu;
++		    cpumask_test_cpu(affine_cpu, &allow_mask)) {
++			new_cpu = affine_cpu;
++			goto out;
++		}
 +	}
 +
 +	if (static_call(sched_idle_select_func)(&mask, &allow_mask, sched_idle_mask)	||
 +	    preempt_mask_check(&mask, &allow_mask, task_sched_prio(p)))
-+		return best_mask_cpu(prev_cpu, &mask);
++		new_cpu = best_mask_cpu(prev_cpu, &mask);
++	else
++		new_cpu = best_mask_cpu(prev_cpu, &allow_mask);
 +
-+	return best_mask_cpu(prev_cpu, &allow_mask);
++out:
++	if (unlikely(!is_cpu_allowed(p, new_cpu)))
++		new_cpu = select_fallback_rq(prev_cpu, p);
++
++	return new_cpu;
 +}
 +
 +void sched_set_stop_task(int cpu, struct task_struct *stop)
@@ -20594,6 +20679,8 @@ index 000000000000..6fa910e650ba
 +	guard(preempt)();
 +	int cpu, success = 0;
 +
++	wake_flags |= WF_TTWU;
++
 +	if (p == current) {
 +		/*
 +		 * We're waking current, this means 'p->on_rq' and 'task_cpu(p)
@@ -20722,11 +20809,7 @@ index 000000000000..6fa910e650ba
 +
 +		sched_task_ttwu(p);
 +
-+		if ((wake_flags & WF_CURRENT_CPU) &&
-+		    cpumask_test_cpu(smp_processor_id(), p->cpus_ptr))
-+			cpu = smp_processor_id();
-+		else
-+			cpu = select_task_rq(p, wake_flags);
++		cpu = select_task_rq(p, wake_flags);
 +
 +		if (cpu != task_cpu(p)) {
 +			if (p->in_iowait) {
@@ -24100,6 +24183,7 @@ index 000000000000..6fa910e650ba
 +		cpumask_copy(tmp, cpu_possible_mask);
 +		per_cpu(sched_cpu_llc_mask, cpu) = tmp;
 +		per_cpu(sched_cpu_topo_end_mask, cpu) = ++tmp;
++		per_cpu(sd_llc_size, cpu) = cpumask_weight(cpu_possible_mask);
 +	}
 +}
 +
@@ -24129,6 +24213,7 @@ index 000000000000..6fa910e650ba
 +		TOPOLOGY_CPUMASK(cluster, topology_cluster_cpumask(cpu), false);
 +
 +		per_cpu(sd_llc_id, cpu) = cpumask_first(cpu_coregroup_mask(cpu));
++		per_cpu(sd_llc_size, cpu) = cpumask_weight(cpu_coregroup_mask(cpu));
 +		per_cpu(sched_cpu_llc_mask, cpu) = topo;
 +		TOPOLOGY_CPUMASK(coregroup, cpu_coregroup_mask(cpu), false);
 +
@@ -31214,6 +31299,20 @@ index e01492234b0b..27893b774e08 100644
  	.cong_control = bpf_tcp_ca_cong_control,
  	.undo_cwnd = bpf_tcp_ca_undo_cwnd,
  	.sndbuf_expand = bpf_tcp_ca_sndbuf_expand,
+diff --git a/net/ipv4/esp4.c b/net/ipv4/esp4.c
+index 6dfc0bcdef65..6a5febbdbee4 100644
+--- a/net/ipv4/esp4.c
++++ b/net/ipv4/esp4.c
+@@ -873,7 +873,8 @@ static int esp_input(struct xfrm_state *x, struct sk_buff *skb)
+ 			nfrags = 1;
+ 
+ 			goto skip_cow;
+-		} else if (!skb_has_frag_list(skb)) {
++		} else if (!skb_has_frag_list(skb) &&
++			   !skb_has_shared_frag(skb)) {
+ 			nfrags = skb_shinfo(skb)->nr_frags;
+ 			nfrags++;
+ 
 diff --git a/net/ipv4/icmp.c b/net/ipv4/icmp.c
 index 4e2a6c70dcd8..ba4b1eec9ea2 100644
 --- a/net/ipv4/icmp.c
@@ -31261,6 +31360,19 @@ index e961936b6be7..bc987a59a095 100644
  
  				/* inet_csk_reqsk_queue_add() has already
  				 * called inet_child_forget() on failure case.
+diff --git a/net/ipv4/ip_output.c b/net/ipv4/ip_output.c
+index e4790cc7b5c2..5bcd73cbdb41 100644
+--- a/net/ipv4/ip_output.c
++++ b/net/ipv4/ip_output.c
+@@ -1233,6 +1233,8 @@ static int __ip_append_data(struct sock *sk,
+ 			if (err < 0)
+ 				goto error;
+ 			copy = err;
++			if (!(flags & MSG_NO_SHARED_FRAGS))
++				skb_shinfo(skb)->flags |= SKBFL_SHARED_FRAG;
+ 			wmem_alloc_delta += copy;
+ 		} else if (!zc) {
+ 			int i = skb_shinfo(skb)->nr_frags;
 diff --git a/net/ipv4/tcp.c b/net/ipv4/tcp.c
 index 202a4e57a218..9382f941aae3 100644
 --- a/net/ipv4/tcp.c
@@ -34232,6 +34344,20 @@ index 5a14a53a3c9e..cd78577acc32 100644
  	tcp_mstamp_refresh(tcp_sk(sk));
  	event = icsk->icsk_pending;
  
+diff --git a/net/ipv6/esp6.c b/net/ipv6/esp6.c
+index 9f75313734f8..9c06c5a1419d 100644
+--- a/net/ipv6/esp6.c
++++ b/net/ipv6/esp6.c
+@@ -915,7 +915,8 @@ static int esp6_input(struct xfrm_state *x, struct sk_buff *skb)
+ 			nfrags = 1;
+ 
+ 			goto skip_cow;
+-		} else if (!skb_has_frag_list(skb)) {
++		} else if (!skb_has_frag_list(skb) &&
++			   !skb_has_shared_frag(skb)) {
+ 			nfrags = skb_shinfo(skb)->nr_frags;
+ 			nfrags++;
+ 
 diff --git a/net/ipv6/exthdrs.c b/net/ipv6/exthdrs.c
 index 95558fd6f447..03cbce842c1a 100644
 --- a/net/ipv6/exthdrs.c
@@ -34266,6 +34392,19 @@ index 95558fd6f447..03cbce842c1a 100644
  	skb_reset_network_header(skb);
  	skb_mac_header_rebuild(skb);
  	skb_set_transport_header(skb, sizeof(struct ipv6hdr));
+diff --git a/net/ipv6/ip6_output.c b/net/ipv6/ip6_output.c
+index 8e2a6b28cea7..3f14e363c96e 100644
+--- a/net/ipv6/ip6_output.c
++++ b/net/ipv6/ip6_output.c
+@@ -1765,6 +1765,8 @@ static int __ip6_append_data(struct sock *sk,
+ 			if (err < 0)
+ 				goto error;
+ 			copy = err;
++			if (!(flags & MSG_NO_SHARED_FRAGS))
++				skb_shinfo(skb)->flags |= SKBFL_SHARED_FRAG;
+ 			wmem_alloc_delta += copy;
+ 		} else if (!zc) {
+ 			int i = skb_shinfo(skb)->nr_frags;
 diff --git a/net/ipv6/rpl_iptunnel.c b/net/ipv6/rpl_iptunnel.c
 index c7942cf65567..4e10adcd70e8 100644
 --- a/net/ipv6/rpl_iptunnel.c
@@ -34735,17 +34874,19 @@ index 96ecb83c9071..27c2aa2dd023 100644
  void rxrpc_free_skb(struct sk_buff *, enum rxrpc_skb_trace);
  void rxrpc_purge_queue(struct sk_buff_head *);
 diff --git a/net/rxrpc/call_event.c b/net/rxrpc/call_event.c
-index fec59d9338b9..fdd683261226 100644
+index fec59d9338b9..2b19b252225e 100644
 --- a/net/rxrpc/call_event.c
 +++ b/net/rxrpc/call_event.c
-@@ -332,7 +332,25 @@ bool rxrpc_input_call_event(struct rxrpc_call *call)
+@@ -332,7 +332,27 @@ bool rxrpc_input_call_event(struct rxrpc_call *call)
  
  			saw_ack |= sp->hdr.type == RXRPC_PACKET_TYPE_ACK;
  
 -			rxrpc_input_call_packet(call, skb);
 +			if (sp->hdr.type == RXRPC_PACKET_TYPE_DATA &&
 +			    sp->hdr.securityIndex != 0 &&
-+			    skb_cloned(skb)) {
++			    (skb_cloned(skb) ||
++			     skb_has_frag_list(skb) ||
++			     skb_has_shared_frag(skb))) {
 +				/* Unshare the packet so that it can be
 +				 * modified by in-place decryption.
 +				 */
@@ -34766,10 +34907,10 @@ index fec59d9338b9..fdd683261226 100644
  			did_receive = true;
  		}
 diff --git a/net/rxrpc/conn_event.c b/net/rxrpc/conn_event.c
-index 9a41ec708aeb..a2130d25aaa9 100644
+index 9a41ec708aeb..442414d90ba1 100644
 --- a/net/rxrpc/conn_event.c
 +++ b/net/rxrpc/conn_event.c
-@@ -240,6 +240,33 @@ static void rxrpc_call_is_secure(struct rxrpc_call *call)
+@@ -240,6 +240,34 @@ static void rxrpc_call_is_secure(struct rxrpc_call *call)
  		rxrpc_notify_socket(call);
  }
  
@@ -34778,7 +34919,8 @@ index 9a41ec708aeb..a2130d25aaa9 100644
 +{
 +	int ret;
 +
-+	if (skb_cloned(skb)) {
++	if (skb_cloned(skb) || skb_has_frag_list(skb) ||
++	    skb_has_shared_frag(skb)) {
 +		/* Copy the packet if shared so that we can do in-place
 +		 * decryption.
 +		 */
@@ -34803,7 +34945,7 @@ index 9a41ec708aeb..a2130d25aaa9 100644
  /*
   * connection-level Rx packet processor
   */
-@@ -270,7 +297,7 @@ static int rxrpc_process_event(struct rxrpc_connection *conn,
+@@ -270,7 +298,7 @@ static int rxrpc_process_event(struct rxrpc_connection *conn,
  		}
  		spin_unlock_irq(&conn->state_lock);
  
@@ -34812,7 +34954,7 @@ index 9a41ec708aeb..a2130d25aaa9 100644
  		if (ret < 0)
  			return ret;
  
-@@ -362,7 +389,6 @@ void rxrpc_process_delayed_final_acks(struct rxrpc_connection *conn, bool force)
+@@ -362,7 +390,6 @@ void rxrpc_process_delayed_final_acks(struct rxrpc_connection *conn, bool force)
  static void rxrpc_do_process_connection(struct rxrpc_connection *conn)
  {
  	struct sk_buff *skb;
@@ -34820,7 +34962,7 @@ index 9a41ec708aeb..a2130d25aaa9 100644
  
  	if (test_and_clear_bit(RXRPC_CONN_EV_CHALLENGE, &conn->events))
  		rxrpc_secure_connection(conn);
-@@ -371,17 +397,8 @@ static void rxrpc_do_process_connection(struct rxrpc_connection *conn)
+@@ -371,17 +398,8 @@ static void rxrpc_do_process_connection(struct rxrpc_connection *conn)
  	 * connection that each one has when we've finished with it */
  	while ((skb = skb_dequeue(&conn->rx_queue))) {
  		rxrpc_see_skb(skb, rxrpc_skb_see_conn_work);
