@@ -3,7 +3,7 @@ import re
 import textwrap
 
 
-class Templates(object):
+class Templates:
     def __init__(self, dirs=None):
         self.dirs = dirs if dirs is not None else ["debian/templates"]
 
@@ -20,7 +20,7 @@ class Templates(object):
 
         for suffix in [".in", ""]:
             for tmpl_dir in self.dirs:
-                filename = "%s/%s%s" % (tmpl_dir, name, suffix)
+                filename = f"{tmpl_dir}/{name}{suffix}"
                 if os.path.exists(filename):
                     with open(filename, "r", encoding="utf-8") as f:
                         mode = os.stat(f.fileno()).st_mode
@@ -90,7 +90,7 @@ def _read_rfc822(f, cls):
                 e[last] = "\n".join(lines)
             i = line.find(":")
             if i < 0:
-                raise ValueError("Not a header, not a continuation: ``%s''" % line)
+                raise ValueError(f"Not a header, not a continuation: ``{line}''")
             last = line[:i]
             lines = [line[i + 1 :].lstrip()]
         if last:

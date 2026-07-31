@@ -4,8 +4,8 @@ import os.path
 import pickle
 import re
 import sys
-
 from configparser import RawConfigParser
+from typing import ClassVar
 
 __all__ = [
     "ConfigCoreDump",
@@ -14,7 +14,7 @@ __all__ = [
 ]
 
 
-class SchemaItemBoolean(object):
+class SchemaItemBoolean:
     def __call__(self, i):
         i = i.strip().lower()
         if i in ("true", "1"):
@@ -24,12 +24,12 @@ class SchemaItemBoolean(object):
         raise ValueError
 
 
-class SchemaItemInteger(object):
+class SchemaItemInteger:
     def __call__(self, i):
         return int(i.strip(), 0)
 
 
-class SchemaItemList(object):
+class SchemaItemList:
     def __init__(self, separator=r"\s+"):
         self.separator = separator
 
@@ -93,8 +93,8 @@ def ConfigCoreDump(fp):
     return pickle.load(fp)
 
 
-class ConfigCoreHierarchy(object):
-    schema_base = {
+class ConfigCoreHierarchy:
+    schema_base: ClassVar[dict] = {
         "base": {
             "arches": SchemaItemList(),
             "enabled": SchemaItemBoolean(),
@@ -111,7 +111,7 @@ class ConfigCoreHierarchy(object):
             schema_complete.setdefault(key, {}).update(value)
         return cls.Reader(dirs, schema_complete)()
 
-    class Reader(object):
+    class Reader:
         config_name = "defines"
 
         def __init__(self, dirs, schema):
@@ -190,7 +190,7 @@ class ConfigCoreHierarchy(object):
 
         def read_featureset(self, ret, featureset):
             config = ConfigParser(self.schema)
-            config.read(self.get_files("featureset-%s" % featureset))
+            config.read(self.get_files(f"featureset-{featureset}"))
 
             for section in iter(config):
                 real = (section[-1], None, featureset)
@@ -199,7 +199,7 @@ class ConfigCoreHierarchy(object):
                 ret[real] = s
 
 
-class ConfigParser(object):
+class ConfigParser:
     __slots__ = "_config", "schemas"
 
     def __init__(self, schemas):
@@ -214,7 +214,7 @@ class ConfigParser(object):
         return iter(self._convert())
 
     def __str__(self):
-        return "<%s(%s)>" % (self.__class__.__name__, self._convert())
+        return f"<{self.__class__.__name__}({self._convert()})>"
 
     def _convert(self):
         ret = {}
@@ -249,13 +249,14 @@ class ConfigParser(object):
 
 def main():
     sys.path.append("debian/lib/python")
-    dump = ConfigCoreDump(open("debian/config.defines.dump", "rb"))
+    with open("debian/config.defines.dump", "rb") as f:
+        dump = ConfigCoreDump(f)
     for section, items in sorted(
         dump.items(), key=(lambda a: tuple(i or "" for i in a[0]))
     ):
-        print("[%s]" % (section,))
+        print(f"[{section}]")
         for item, value in sorted(items.items()):
-            print("%s: %s" % (item, value))
+            print(f"{item}: {value}")
         print()
 
 

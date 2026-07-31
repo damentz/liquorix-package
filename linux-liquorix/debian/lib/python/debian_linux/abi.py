@@ -1,4 +1,4 @@
-class Symbol(object):
+class Symbol:
     def __init__(self, name, namespace, module, version, export):
         self.name, self.namespace, self.module = name, namespace, module
         self.version, self.export = version, export
@@ -16,10 +16,7 @@ class Symbol(object):
             return False
         if self.version != other.version:
             return False
-        if self.export != other.export:
-            return False
-
-        return True
+        return self.export == other.export
 
     def __ne__(self, other):
         ret = self.__eq__(other)
@@ -41,6 +38,5 @@ class Symbols(dict):
     def write(self, file):
         for s in sorted(self.values(), key=lambda i: i.name):
             file.write(
-                "%s\t%s\t%s\t%s\t%s\n"
-                % (s.version, s.name, s.module, s.export, s.namespace)
+                f"{s.version}\t{s.name}\t{s.module}\t{s.export}\t{s.namespace}\n"
             )

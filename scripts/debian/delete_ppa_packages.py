@@ -14,7 +14,7 @@ warnings.filterwarnings(
     "ignore", message="pkg_resources is deprecated", category=UserWarning
 )
 
-from launchpadlib.launchpad import (  # type: ignore[import-untyped]  # noqa: E402  # pylint: disable=wrong-import-position
+from launchpadlib.launchpad import (  # type: ignore[import-untyped]  # pylint: disable=wrong-import-position
     Launchpad,
 )
 

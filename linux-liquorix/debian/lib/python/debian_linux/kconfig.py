@@ -3,8 +3,8 @@ from collections import OrderedDict
 __all__ = ("KconfigFile",)
 
 
-class KConfigEntry(object):
-    __slots__ = "name", "value", "comments"
+class KConfigEntry:
+    __slots__ = "comments", "name", "value"
 
     def __init__(self, name, value, comments=None):
         self.name, self.value = name, value
@@ -17,12 +17,10 @@ class KConfigEntry(object):
         return hash(self.name) | hash(self.value)
 
     def __repr__(self):
-        return "<{}({!r}, {!r}, {!r})>".format(
-            self.__class__.__name__, self.name, self.value, self.comments
-        )
+        return f"<{self.__class__.__name__}({self.name!r}, {self.value!r}, {self.comments!r})>"
 
     def __str__(self):
-        return "CONFIG_{}={}".format(self.name, self.value)
+        return f"CONFIG_{self.name}={self.value}"
 
     def write(self):
         for comment in self.comments:
@@ -46,22 +44,19 @@ class KConfigEntryTristate(KConfigEntry):
             value = self.VALUE_MOD
         else:
             raise NotImplementedError
-        super(KConfigEntryTristate, self).__init__(name, value, comments)
+        super().__init__(name, value, comments)
 
     def __str__(self):
         if self.value is self.VALUE_MOD:
-            return "CONFIG_{}=m".format(self.name)
+            return f"CONFIG_{self.name}=m"
         if self.value:
-            return "CONFIG_{}=y".format(self.name)
-        return "# CONFIG_{} is not set".format(self.name)
+            return f"CONFIG_{self.name}=y"
+        return f"# CONFIG_{self.name} is not set"
 
 
 class KconfigFile(OrderedDict):
     def __str__(self):
-        ret = []
-        for i in self.str_iter():
-            ret.append(i)
-        return "\n".join(ret) + "\n"
+        return "\n".join(self.str_iter()) + "\n"
 
     def read(self, f):
         for line in iter(f.readlines()):
@@ -77,7 +72,7 @@ class KconfigFile(OrderedDict):
             elif line.startswith("#") or not line:
                 pass
             else:
-                raise RuntimeError("Can't recognize %s" % line)
+                raise RuntimeError(f"Can't recognize {line}")
 
     def set(self, key, value):
         if value in ("y", "m", "n"):

@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
 
 import os
+from typing import ClassVar
+
 from debian_linux import config
 from debian_linux.debian import (
-    VersionLinux,
-    PackageRelation,
-    PackageRelationGroup,
-    PackageRelationEntry,
     PackageDescription,
+    PackageRelation,
+    PackageRelationEntry,
+    PackageRelationGroup,
+    VersionLinux,
 )
-from debian_linux.gencontrol import Gencontrol as Base, merge_packages
+from debian_linux.gencontrol import Gencontrol as Base
+from debian_linux.gencontrol import merge_packages
 from debian_linux.utils import Templates
 
 
 class Gencontrol(Base):
-    config_schema = {
+    config_schema: ClassVar[dict] = {
         "abi": {
             "ignore-changes": config.SchemaItemList(),
         },
@@ -37,7 +40,7 @@ class Gencontrol(Base):
             config_dirs = ["debian/config"]
         if template_dirs is None:
             template_dirs = ["debian/templates"]
-        super(Gencontrol, self).__init__(
+        super().__init__(
             config.ConfigCoreHierarchy(self.config_schema, config_dirs),
             Templates(template_dirs),
             VersionLinux,
@@ -55,7 +58,7 @@ class Gencontrol(Base):
             f.write(self.substitute(self.templates[template], tpl_vars))
 
     def do_main_setup(self, tpl_vars, makeflags, extra):
-        super(Gencontrol, self).do_main_setup(tpl_vars, makeflags, extra)
+        super().do_main_setup(tpl_vars, makeflags, extra)
         makeflags.update(
             {
                 "VERSION": self.version.linux_version,
@@ -75,24 +78,23 @@ class Gencontrol(Base):
             makeflags_featureset = makeflags.copy()
             makeflags_featureset["FEATURESET"] = featureset
             cmds_source = [
-                "$(MAKE) -f debian/rules.real source-featureset %s"
-                % makeflags_featureset
+                f"$(MAKE) -f debian/rules.real source-featureset {makeflags_featureset}"
             ]
-            makefile.add("source_%s_real" % featureset, cmds=cmds_source)
-            makefile.add("source_%s" % featureset, ["source_%s_real" % featureset])
-            makefile.add("source", ["source_%s" % featureset])
+            makefile.add(f"source_{featureset}_real", cmds=cmds_source)
+            makefile.add(f"source_{featureset}", [f"source_{featureset}_real"])
+            makefile.add("source", [f"source_{featureset}"])
 
         triplet_enabled = []
         for arch in iter(self.config["base",]["arches"]):
             for featureset in self.config["base", arch].get("featuresets", ()):
                 if self.config.merge("base", None, featureset).get("enabled", True):
                     for flavour in self.config["base", arch, featureset]["flavours"]:
-                        triplet_enabled.append("%s_%s_%s" % (arch, featureset, flavour))
+                        triplet_enabled.append(f"{arch}_{featureset}_{flavour}")
 
         makeflags = makeflags.copy()
         makeflags["ALL_FEATURESETS"] = " ".join(fs_enabled)
         makeflags["ALL_TRIPLETS"] = " ".join(triplet_enabled)
-        super(Gencontrol, self).do_main_makefile(makefile, makeflags, extra)
+        super().do_main_makefile(makefile, makeflags, extra)
 
         # linux-source-$UPSTREAMVERSION will contain all kconfig files
         makefile.add("binary-indep", deps=["setup"])
@@ -115,7 +117,7 @@ class Gencontrol(Base):
 
         if self.version.linux_modifier is None:
             try:
-                abiname_part = ".%s" % self.config["abi", arch]["abiname"]
+                abiname_part = ".{}".format(self.config["abi", arch]["abiname"])
             except KeyError:
                 abiname_part = self.abiname_part
             makeflags["ABINAME"] = tpl_vars["abiname"] = (
@@ -283,7 +285,7 @@ class Gencontrol(Base):
                 if os.path.exists(f1):
                     return [f1]
             if fail:
-                raise RuntimeError("%s unavailable" % f)
+                raise RuntimeError(f"{f} unavailable")
             return []
 
         def check_config_files(files):
@@ -295,7 +297,7 @@ class Gencontrol(Base):
                         ret.append(f1)
                         break
                 else:
-                    raise RuntimeError("%s unavailable" % f)
+                    raise RuntimeError(f"{f} unavailable")
             return ret
 
         def check_config(default, fail, *entry_name):
@@ -307,22 +309,22 @@ class Gencontrol(Base):
         kconfig = check_config("config", True)
         kconfig.extend(
             check_config(
-                "kernelarch-%s/config" % config_entry_base["kernel-arch"], False
+                "kernelarch-{}/config".format(config_entry_base["kernel-arch"]), False
             )
         )
-        kconfig.extend(check_config("%s/config" % arch, True, arch))
+        kconfig.extend(check_config(f"{arch}/config", True, arch))
         kconfig.extend(
-            check_config("%s/config.%s" % (arch, flavour), False, arch, None, flavour)
+            check_config(f"{arch}/config.{flavour}", False, arch, None, flavour)
         )
         kconfig.extend(
-            check_config("featureset-%s/config" % featureset, False, None, featureset)
+            check_config(f"featureset-{featureset}/config", False, None, featureset)
         )
         kconfig.extend(
-            check_config("%s/%s/config" % (arch, featureset), False, arch, featureset)
+            check_config(f"{arch}/{featureset}/config", False, arch, featureset)
         )
         kconfig.extend(
             check_config(
-                "%s/%s/config.%s" % (arch, featureset, flavour),
+                f"{arch}/{featureset}/config.{flavour}",
                 False,
                 arch,
                 featureset,
@@ -332,40 +334,40 @@ class Gencontrol(Base):
         makeflags["KCONFIG"] = " ".join(kconfig)
 
         cmds_binary_arch = [
-            "$(MAKE) -f debian/rules.real binary-arch-flavour %s" % makeflags
+            f"$(MAKE) -f debian/rules.real binary-arch-flavour {makeflags}"
         ]
         if packages_dummy:
             cmds_binary_arch.append(
-                "$(MAKE) -f debian/rules.real install-dummy DH_OPTIONS='%s' %s"
-                % (" ".join("-p%s" % i["Package"] for i in packages_dummy), makeflags)
+                "$(MAKE) -f debian/rules.real install-dummy DH_OPTIONS='{}' {}".format(
+                    " ".join("-p{}".format(i["Package"]) for i in packages_dummy),
+                    makeflags,
+                )
             )
-        cmds_build = ["$(MAKE) -f debian/rules.real build-arch-flavour %s" % makeflags]
-        cmds_setup = ["$(MAKE) -f debian/rules.real setup-arch-flavour %s" % makeflags]
+        cmds_build = [f"$(MAKE) -f debian/rules.real build-arch-flavour {makeflags}"]
+        cmds_setup = [f"$(MAKE) -f debian/rules.real setup-arch-flavour {makeflags}"]
         makefile.add(
-            "binary-arch_%s_%s_%s_real" % (arch, featureset, flavour),
+            f"binary-arch_{arch}_{featureset}_{flavour}_real",
             cmds=cmds_binary_arch,
         )
-        makefile.add(
-            "build-arch_%s_%s_%s_real" % (arch, featureset, flavour), cmds=cmds_build
-        )
-        makefile.add(
-            "setup_%s_%s_%s_real" % (arch, featureset, flavour), cmds=cmds_setup
-        )
+        makefile.add(f"build-arch_{arch}_{featureset}_{flavour}_real", cmds=cmds_build)
+        makefile.add(f"setup_{arch}_{featureset}_{flavour}_real", cmds=cmds_setup)
 
         # Substitute kernel version etc. into maintainer scripts,
         # translations and lintian overrides
         self._substitute_file(
             "headers.postinst",
             tpl_vars,
-            "debian/linux-headers-%s%s.postinst"
-            % (tpl_vars["abiname"], tpl_vars["localversion"]),
+            "debian/linux-headers-{}{}.postinst".format(
+                tpl_vars["abiname"], tpl_vars["localversion"]
+            ),
         )
         for name in ["postinst", "postrm", "preinst", "prerm"]:
             self._substitute_file(
-                "image.%s" % name,
+                f"image.{name}",
                 tpl_vars,
-                "debian/linux-image-%s%s.%s"
-                % (tpl_vars["abiname"], tpl_vars["localversion"], name),
+                "debian/linux-image-{}{}.{}".format(
+                    tpl_vars["abiname"], tpl_vars["localversion"], name
+                ),
             )
 
     def process_changelog(self):
@@ -380,7 +382,7 @@ class Gencontrol(Base):
         if self.version.linux_modifier is not None:
             self.abiname_part = ""
         else:
-            self.abiname_part = ".%s" % self.config["abi",]["abiname"]
+            self.abiname_part = ".{}".format(self.config["abi",]["abiname"])
         self.tpl_vars = {
             "upstreamversion": self.version.linux_upstream,
             "version": self.version.linux_version,
@@ -396,30 +398,31 @@ class Gencontrol(Base):
         }
 
         distribution = self.changelog[0].distribution
-        if distribution in ("unstable",):
-            if (
-                version.linux_revision_experimental
-                or version.linux_revision_backports
-                or version.linux_revision_other
-            ):
-                raise RuntimeError(
-                    "Can't upload to %s with a version of %s" % (distribution, version)
-                )
-        if distribution in ("experimental",):
-            if not version.linux_revision_experimental:
-                raise RuntimeError(
-                    "Can't upload to %s with a version of %s" % (distribution, version)
-                )
-        if distribution.endswith("-security") or distribution.endswith("-lts"):
-            if not version.linux_revision_security or version.linux_revision_backports:
-                raise RuntimeError(
-                    "Can't upload to %s with a version of %s" % (distribution, version)
-                )
-        if distribution.endswith("-backports"):
-            if not version.linux_revision_backports:
-                raise RuntimeError(
-                    "Can't upload to %s with a version of %s" % (distribution, version)
-                )
+        if distribution in ("unstable",) and (
+            version.linux_revision_experimental
+            or version.linux_revision_backports
+            or version.linux_revision_other
+        ):
+            raise RuntimeError(
+                f"Can't upload to {distribution} with a version of {version}"
+            )
+        if (
+            distribution in ("experimental",)
+            and not version.linux_revision_experimental
+        ):
+            raise RuntimeError(
+                f"Can't upload to {distribution} with a version of {version}"
+            )
+        if distribution.endswith(("-security", "-lts")) and (
+            not version.linux_revision_security or version.linux_revision_backports
+        ):
+            raise RuntimeError(
+                f"Can't upload to {distribution} with a version of {version}"
+            )
+        if distribution.endswith("-backports") and not version.linux_revision_backports:
+            raise RuntimeError(
+                f"Can't upload to {distribution} with a version of {version}"
+            )
 
     def process_real_image(self, entry, fields, tpl_vars):
         entry = self.process_package(entry, tpl_vars)
@@ -433,7 +436,7 @@ class Gencontrol(Base):
 
     def write(self, packages, makefile):
         self.write_config()
-        super(Gencontrol, self).write(packages, makefile)
+        super().write(packages, makefile)
 
     def write_config(self):
         with open("debian/config.defines.dump", "wb") as f:

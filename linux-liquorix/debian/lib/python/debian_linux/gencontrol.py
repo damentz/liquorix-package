@@ -20,7 +20,7 @@ class PackagesList(OrderedDict):
             self[package["Package"]] = package
 
 
-class Makefile(object):
+class Makefile:
     def __init__(self):
         self.rules = {}
         self.add(".NOTPARALLEL")
@@ -39,7 +39,7 @@ class Makefile(object):
         for i in sorted(self.rules.keys()):
             self.rules[i].write(out)
 
-    class Rule(object):
+    class Rule:
         def __init__(self, name, deps=None, cmds=None):
             self.name = name
             self.deps, self.cmds = set(), []
@@ -60,21 +60,21 @@ class Makefile(object):
 
             if self.cmds:
                 if deps_string:
-                    out.write("%s::%s\n" % (self.name, deps_string))
+                    out.write(f"{self.name}::{deps_string}\n")
                 for c in self.cmds:
-                    out.write("%s::\n" % self.name)
+                    out.write(f"{self.name}::\n")
                     for i in c:
-                        out.write("\t%s\n" % i)
+                        out.write(f"\t{i}\n")
             else:
-                out.write("%s:%s\n" % (self.name, deps_string))
+                out.write(f"{self.name}:{deps_string}\n")
 
 
 class MakeFlags(dict):
     def __str__(self):
-        return " ".join("%s='%s'" % i for i in sorted(self.items()))
+        return " ".join("{}='{}'".format(*i) for i in sorted(self.items()))
 
     def copy(self):
-        return self.__class__(super(MakeFlags, self).copy())
+        return self.__class__(super().copy())
 
 
 def iter_featuresets(config):
@@ -97,7 +97,7 @@ def iter_flavours(config, arch, featureset):
     return iter(config["base", arch, featureset]["flavours"])
 
 
-class Gencontrol(object):
+class Gencontrol:
     makefile_targets = ("binary-arch", "build-arch", "setup")
     makefile_targets_indep = ("binary-indep", "build-indep", "setup")
 
@@ -141,11 +141,11 @@ class Gencontrol(object):
         del extra
         makefile.add(
             "build-indep",
-            cmds=["$(MAKE) -f debian/rules.real build-indep %s" % makeflags],
+            cmds=[f"$(MAKE) -f debian/rules.real build-indep {makeflags}"],
         )
         makefile.add(
             "binary-indep",
-            cmds=["$(MAKE) -f debian/rules.real binary-indep %s" % makeflags],
+            cmds=[f"$(MAKE) -f debian/rules.real binary-indep {makeflags}"],
         )
 
     def do_main_packages(self, packages, tpl_vars, makeflags, extra):
@@ -180,10 +180,10 @@ class Gencontrol(object):
             for i in extra_arches[arch]:
                 cmds.append(
                     "$(MAKE) -f debian/rules.real install-dummy "
-                    "ARCH='%s' DH_OPTIONS='-p%s'" % (arch, i["Package"])
+                    "ARCH='{}' DH_OPTIONS='-p{}'".format(arch, i["Package"])
                 )
-            makefile.add("binary-arch_%s" % arch, ["binary-arch_%s_extra" % arch])
-            makefile.add("binary-arch_%s_extra" % arch, cmds=cmds)
+            makefile.add(f"binary-arch_{arch}", [f"binary-arch_{arch}_extra"])
+            makefile.add(f"binary-arch_{arch}_extra", cmds=cmds)
 
     def do_indep_featureset(
         self, packages, makefile, featureset, tpl_vars, makeflags, extra
@@ -207,8 +207,8 @@ class Gencontrol(object):
 
         for i in self.makefile_targets_indep:
             target1 = i
-            target2 = "_".join((target1, featureset))
-            target3 = "_".join((target2, "real"))
+            target2 = f"{target1}_{featureset}"
+            target3 = f"{target2}_real"
             makefile.add(target1, [target2])
             makefile.add(target2, [target3])
 
@@ -234,8 +234,8 @@ class Gencontrol(object):
 
         for i in self.makefile_targets:
             target1 = i
-            target2 = "_".join((target1, arch))
-            target3 = "_".join((target2, "real"))
+            target2 = f"{target1}_{arch}"
+            target3 = f"{target2}_real"
             makefile.add(target1, [target2])
             makefile.add(target2, [target3])
 
@@ -278,9 +278,9 @@ class Gencontrol(object):
         makeflags["FEATURESET"] = featureset
 
         for i in self.makefile_targets:
-            target1 = "_".join((i, arch))
-            target2 = "_".join((target1, featureset))
-            target3 = "_".join((target2, "real"))
+            target1 = f"{i}_{arch}"
+            target2 = f"{target1}_{featureset}"
+            target3 = f"{target2}_real"
             makefile.add(target1, [target2])
             makefile.add(target2, [target3])
 
@@ -331,9 +331,9 @@ class Gencontrol(object):
         makeflags["FLAVOUR"] = flavour
 
         for i in self.makefile_targets:
-            target1 = "_".join((i, arch, featureset))
-            target2 = "_".join((target1, flavour))
-            target3 = "_".join((target2, "real"))
+            target1 = f"{i}_{arch}_{featureset}"
+            target2 = f"{target1}_{flavour}"
+            target3 = f"{target2}_real"
             makefile.add(target1, [target2])
             makefile.add(target2, [target3])
 
@@ -400,13 +400,13 @@ class Gencontrol(object):
             "preinst",
             "prerm",
         ]:
-            name = "%s.%s" % (prefix, config_id)
+            name = f"{prefix}.{config_id}"
             try:
                 template = self.templates[name]
             except KeyError:
                 continue
             else:
-                target = "%s/%s.%s" % (output_dir, package_name, config_id)
+                target = f"{output_dir}/{package_name}.{config_id}"
                 with open(target, "w", encoding="utf-8") as f:
                     f.write(self.substitute(template, tpl_vars))
                     os.chmod(f.fileno(), self.templates.get_mode(name) & 0o777)
@@ -454,7 +454,7 @@ class Gencontrol(object):
     def write_rfc822(self, f, entries):
         for entry in entries:
             for key, value in entry.items():
-                f.write("%s: %s\n" % (key, value))
+                f.write(f"{key}: {value}\n")
             f.write("\n")
 
 

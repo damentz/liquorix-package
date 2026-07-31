@@ -1,7 +1,7 @@
 import re
 
 
-class FirmwareFile(object):
+class FirmwareFile:
     def __init__(self, binary, desc=None, source=None, version=None):
         self.binary = binary
         self.desc = desc
@@ -9,7 +9,7 @@ class FirmwareFile(object):
         self.version = version
 
 
-class FirmwareSection(object):
+class FirmwareSection:
     def __init__(self, driver, files, licence):
         self.driver = driver
         self.files = files

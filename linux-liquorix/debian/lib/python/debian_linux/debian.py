@@ -3,6 +3,7 @@ import collections.abc
 import os.path
 import re
 import unittest
+from typing import ClassVar
 
 from . import utils
 
@@ -29,7 +30,7 @@ class Changelog(list):
 )
 (?:,|\n)
 """
-    _top_re = re.compile(_top_rules, re.X)
+    _top_re = re.compile(_top_rules, re.VERBOSE)
     _bottom_rules = r"""
 ^
 \ --\ 
@@ -42,10 +43,10 @@ class Changelog(list):
 )
 \n
 """
-    _bottom_re = re.compile(_bottom_rules, re.X)
+    _bottom_re = re.compile(_bottom_rules, re.VERBOSE)
     _ignore_re = re.compile(r"^(?:  |\s*\n)")
 
-    class Entry(object):
+    class Entry:
         __slot__ = (
             "distribution",
             "source",
@@ -72,17 +73,14 @@ class Changelog(list):
 
     def _parse(self, version, f):
         top_match = None
-        line_no = 0
 
-        for line in f:
-            line_no += 1
-
+        for line_no, line in enumerate(f, start=1):
             if self._ignore_re.match(line):
                 pass
             elif top_match is None:
                 top_match = self._top_re.match(line)
                 if not top_match:
-                    raise ValueError("invalid top line %d in changelog" % line_no)
+                    raise ValueError(f"invalid top line {line_no} in changelog")
                 try:
                     v = version(top_match.group("version"))
                 except (ValueError, RuntimeError, AssertionError):
@@ -92,7 +90,7 @@ class Changelog(list):
             else:
                 bottom_match = self._bottom_re.match(line)
                 if not bottom_match:
-                    raise ValueError("invalid bottom line %d in changelog" % line_no)
+                    raise ValueError(f"invalid bottom line {line_no} in changelog")
 
                 self.append(
                     self.Entry(
@@ -107,7 +105,7 @@ class Changelog(list):
                 top_match = bottom_match = None
 
 
-class Version(object):
+class Version:
     _epoch_re = re.compile(r"\d+$")
     _upstream_re = re.compile(r"[0-9][A-Za-z0-9.+\-:~]*$")
     _revision_re = re.compile(r"[A-Za-z0-9+.~]+$")
@@ -141,13 +139,13 @@ class Version(object):
     @property
     def complete(self):
         if self.epoch is not None:
-            return "%d:%s" % (self.epoch, self.complete_noepoch)
+            return f"{self.epoch}:{self.complete_noepoch}"
         return self.complete_noepoch
 
     @property
     def complete_noepoch(self):
         if self.revision is not None:
-            return "%s-%s" % (self.upstream, self.revision)
+            return f"{self.upstream}-{self.revision}"
         return self.upstream
 
     @property
@@ -257,7 +255,7 @@ class VersionLinux(Version):
 )?
 $
     """,
-        re.X,
+        re.VERBOSE,
     )
     _revision_re = re.compile(
         r"""
@@ -282,11 +280,11 @@ $
 (?:\+b\d+)?
 $
     """,
-        re.X,
+        re.VERBOSE,
     )
 
     def __init__(self, version):
-        super(VersionLinux, self).__init__(version)
+        super().__init__(version)
         up_match = self._upstream_re.match(self.upstream)
         rev_match = self._revision_re.match(self.revision)
         if up_match is None or rev_match is None:
@@ -420,7 +418,7 @@ class _VersionLinuxTest(unittest.TestCase):
 
 
 class PackageArchitecture(collections.abc.MutableSet):
-    __slots__ = "_data"
+    __slots__ = ("_data",)
 
     def __init__(self, value=None):
         self._data = set()
@@ -450,11 +448,11 @@ class PackageArchitecture(collections.abc.MutableSet):
             for i in re.split(r"\s", value.strip()):
                 self.add(i)
         else:
-            raise RuntimeError
+            raise TypeError
 
 
-class PackageDescription(object):
-    __slots__ = "short", "long"
+class PackageDescription:
+    __slots__ = "long", "short"
 
     def __init__(self, value=None):
         self.short = []
@@ -510,12 +508,12 @@ class PackageRelation(list):
         if isinstance(value, str):
             value = PackageRelationGroup(value, override_arches)
         elif not isinstance(value, PackageRelationGroup):
-            raise ValueError("got %s" % type(value))
+            raise TypeError(f"got {type(value)}")
         j = self.search_value(value)
         if j:
             j.update_arches(value)
         else:
-            super(PackageRelation, self).append(value)
+            super().append(value)
 
     def extend(self, value, override_arches=None):
         if isinstance(value, str):
@@ -554,8 +552,8 @@ class PackageRelationGroup(list):
         if isinstance(value, str):
             value = PackageRelationEntry(value, override_arches)
         elif not isinstance(value, PackageRelationEntry):
-            raise ValueError
-        super(PackageRelationGroup, self).append(value)
+            raise TypeError
+        super().append(value)
 
     def extend(self, value, override_arches=None):
         if isinstance(value, str):
@@ -564,15 +562,15 @@ class PackageRelationGroup(list):
             self.append(i, override_arches)
 
 
-class PackageRelationEntry(object):
-    __slots__ = "name", "operator", "version", "arches", "restrictions"
+class PackageRelationEntry:
+    __slots__ = "arches", "name", "operator", "restrictions", "version"
 
     _re = re.compile(
         r"^(\S+)(?: \((<<|<=|=|!=|>=|>>)\s*([^)]+)\))?"
         r"(?: \[([^]]+)\])?(?: <([^>]+)>)?$"
     )
 
-    class _operator(object):
+    class _operator:
         OP_LT = 1
         OP_LE = 2
         OP_EQ = 3
@@ -580,7 +578,7 @@ class PackageRelationEntry(object):
         OP_GE = 5
         OP_GT = 6
 
-        operators = {
+        operators: ClassVar[dict[str, int]] = {
             "<<": OP_LT,
             "<=": OP_LE,
             "=": OP_EQ,
@@ -589,7 +587,7 @@ class PackageRelationEntry(object):
             ">>": OP_GT,
         }
 
-        operators_neg = {
+        operators_neg: ClassVar[dict[int, int]] = {
             OP_LT: OP_GE,
             OP_LE: OP_GT,
             OP_EQ: OP_NE,
@@ -598,7 +596,7 @@ class PackageRelationEntry(object):
             OP_GT: OP_LE,
         }
 
-        operators_text = dict((b, a) for a, b in operators.items())
+        operators_text: ClassVar[dict[int, str]] = {b: a for a, b in operators.items()}
 
         __slots__ = ("_op",)
 
@@ -616,7 +614,7 @@ class PackageRelationEntry(object):
 
     def __init__(self, value=None, override_arches=None):
         if not isinstance(value, str):
-            raise ValueError
+            raise TypeError
 
         self.parse(value)
 
@@ -636,7 +634,7 @@ class PackageRelationEntry(object):
     def parse(self, value):
         match = self._re.match(value)
         if match is None:
-            raise RuntimeError("Can't parse dependency %s" % value)
+            raise RuntimeError(f"Can't parse dependency {value}")
         match = match.groups()
         self.name = match[0]
         if match[1] is not None:
@@ -655,7 +653,7 @@ class PackageRelationEntry(object):
 
 
 class _ControlFileDict(dict):
-    _fields = {}
+    _fields: ClassVar[dict] = {}
 
     def __setitem__(self, key, value):
         try:
@@ -664,15 +662,15 @@ class _ControlFileDict(dict):
                 value = cls(value)
         except KeyError:
             pass
-        super(_ControlFileDict, self).__setitem__(key, value)
+        super().__setitem__(key, value)
 
     def keys(self):
-        keys = set(super(_ControlFileDict, self).keys())
-        for i in self._fields.keys():
+        keys = set(super().keys())
+        for i in self._fields:
             if i in self:
                 keys.remove(i)
                 yield i
-        for i in sorted(list(keys)):
+        for i in sorted(keys):
             yield i
 
     def items(self):
@@ -685,7 +683,7 @@ class _ControlFileDict(dict):
 
 
 class Package(_ControlFileDict):
-    _fields = collections.OrderedDict(
+    _fields: ClassVar[dict] = collections.OrderedDict(
         (
             ("Package", str),
             ("Source", str),
@@ -712,7 +710,7 @@ class Package(_ControlFileDict):
 
 
 class TestsControl(_ControlFileDict):
-    _fields = collections.OrderedDict(
+    _fields: ClassVar[dict] = collections.OrderedDict(
         (
             ("Tests", str),
             ("Test-Command", str),
