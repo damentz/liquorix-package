@@ -1311,7 +1311,7 @@ index c8d4b913f26c1..f74da642290aa 100644
  F:	include/linux/mfd/loongson-se.h
  
 diff --git a/Makefile b/Makefile
-index 408f070d49b8e..d3034e833cb31 100644
+index 408f070d49b8e..ec7f34b3cd9b0 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -1,9 +1,9 @@
@@ -1322,7 +1322,7 @@ index 408f070d49b8e..d3034e833cb31 100644
 -EXTRAVERSION =
 -NAME = Baby Opossum Posse
 +SUBLEVEL = 6
-+EXTRAVERSION = -lqx1
++EXTRAVERSION = -lqx2
 +NAME = Channeling Inner Peace for Peak Performance
  
  # *DOCUMENTATION*
@@ -118814,10 +118814,10 @@ index b1f1a367034ff..0c1f4f030509c 100644
  obj-y += build_utility.o
 diff --git a/kernel/sched/alt_core.c b/kernel/sched/alt_core.c
 new file mode 100644
-index 0000000000000..5b7097f479291
+index 0000000000000..75b8dfa7e5fd4
 --- /dev/null
 +++ b/kernel/sched/alt_core.c
-@@ -0,0 +1,8066 @@
+@@ -0,0 +1,8096 @@
 +/*
 + *  kernel/sched/alt_core.c
 + *
@@ -118891,7 +118891,7 @@ index 0000000000000..5b7097f479291
 +EXPORT_TRACEPOINT_SYMBOL_GPL(sched_exit_tp);
 +EXPORT_TRACEPOINT_SYMBOL_GPL(sched_set_need_resched_tp);
 +
-+#define sched_feat(x)	(1)
++#define sched_feat(x)	(0)
 +/*
 + * Print a warning if need_resched is set for the given duration (if
 + * LATENCY_WARN is enabled).
@@ -119524,10 +119524,13 @@ index 0000000000000..5b7097f479291
 +	add_nr_running(rq, 1);
 +}
 +
-+void requeue_task(struct task_struct *p, struct rq *rq)
++void requeue_task(struct task_struct *p, struct rq *rq, int flags)
 +{
 +	struct list_head *node = &p->sq_node;
 +	int deq_idx, idx, prio;
++
++	if (!rt_task(p))
++		flags &= ~ENQUEUE_HEAD;
 +
 +	TASK_SCHED_PRIO_IDX(p, rq, idx, prio);
 +#ifdef ALT_SCHED_DEBUG
@@ -119536,14 +119539,20 @@ index 0000000000000..5b7097f479291
 +	WARN_ONCE(task_rq(p) != rq, "sched: cpu[%d] requeue task reside on cpu%d\n",
 +		  cpu_of(rq), task_cpu(p));
 +#endif
-+	if (list_is_last(node, &rq->queue.heads[idx]))
++	if (flags & ENQUEUE_HEAD) {
++		if (list_is_first(node, &rq->queue.heads[idx]))
++			return;
++	} else if (list_is_last(node, &rq->queue.heads[idx]))
 +		return;
 +
 +	__list_del_entry(node);
 +	if (node->prev == node->next && (deq_idx = node->next - &rq->queue.heads[0]) != idx)
 +		clear_bit(sched_idx2prio(deq_idx, rq), rq->queue.bitmap);
 +
-+	list_add_tail(node, &rq->queue.heads[idx]);
++	if (flags & ENQUEUE_HEAD)
++		list_add(node, &rq->queue.heads[idx]);
++	else
++		list_add_tail(node, &rq->queue.heads[idx]);
 +	if (list_is_first(node, &rq->queue.heads[idx]))
 +		set_bit(prio, rq->queue.bitmap);
 +	update_sched_preempt_mask(rq);
@@ -120223,9 +120232,9 @@ index 0000000000000..5b7097f479291
 + *
 + * Context: rq->lock
 + */
-+static void activate_task(struct task_struct *p, struct rq *rq)
++static void activate_task(struct task_struct *p, struct rq *rq, int flags)
 +{
-+	enqueue_task(p, rq, ENQUEUE_WAKEUP);
++	enqueue_task(p, rq, flags);
 +
 +	WRITE_ONCE(p->on_rq, TASK_ON_RQ_QUEUED);
 +	ASSERT_EXCLUSIVE_WRITER(p->on_rq);
@@ -121200,17 +121209,22 @@ index 0000000000000..5b7097f479291
 +static inline void
 +ttwu_do_activate(struct rq *rq, struct task_struct *p, int wake_flags)
 +{
++	int en_flags = ENQUEUE_WAKEUP;
++
 +	lockdep_assert_rq_held(rq);
 +
 +	if (p->sched_contributes_to_load)
 +		rq->nr_uninterruptible--;
 +
-+	if (!(wake_flags & WF_MIGRATED) && p->in_iowait) {
++	if (wake_flags & WF_MIGRATED)
++		en_flags |= ENQUEUE_MIGRATED;
++	else
++	if (p->in_iowait) {
 +		delayacct_blkio_end(p);
 +		atomic_dec(&task_rq(p)->nr_iowait);
 +	}
 +
-+	activate_task(p, rq);
++	activate_task(p, rq, en_flags);
 +	wakeup_preempt(rq);
 +
 +	ttwu_do_wakeup(p);
@@ -122154,7 +122168,7 @@ index 0000000000000..5b7097f479291
 +	raw_spin_rq_lock(rq);
 +	update_rq_clock(rq);
 +
-+	activate_task(p, rq);
++	activate_task(p, rq, ENQUEUE_INITIAL);
 +	trace_sched_wakeup_new(p);
 +	wakeup_preempt(rq);
 +
@@ -122785,6 +122799,9 @@ index 0000000000000..5b7097f479291
 +{
 +	s64 ns = rq->clock_task - p->last_ran;
 +
++	if (unlikely(ns <= 0))
++		return;
++
 +	p->sched_time += ns;
 +	cgroup_account_cputime(p, ns);
 +	account_group_exec_runtime(p, ns);
@@ -122910,7 +122927,7 @@ index 0000000000000..5b7097f479291
 +{
 +	int cpu __maybe_unused = smp_processor_id();
 +	struct rq *rq = cpu_rq(cpu);
-+	struct task_struct *curr = rq->curr;
++	struct task_struct *curr;
 +	struct rq_flags rf;
 +	u64 resched_latency;
 +
@@ -122920,6 +122937,8 @@ index 0000000000000..5b7097f479291
 +	sched_clock_tick();
 +
 +	rq_lock(rq, &rf);
++	curr = rq->curr;
++
 +	psi_account_irqtime(rq, curr, NULL);
 +	update_rq_clock(rq);
 +
@@ -123341,7 +123360,7 @@ index 0000000000000..5b7097f479291
 +	sched_task_renew(p, rq);
 +
 +	if (SCHED_FIFO != p->policy && task_on_rq_queued(p))
-+		requeue_task(p, rq);
++		requeue_task(p, rq, 0);
 +}
 +
 +static inline int balance_select_task_rq(struct task_struct *p, cpumask_t *avail_mask)
@@ -124106,6 +124125,8 @@ index 0000000000000..5b7097f479291
 +	trace_sched_pi_setprio(p, pi_task);
 +
 +	scoped_guard (sched_change, p, queue_flag) {
++		if (rt_prio(prio) && p->prio < prio)
++			scope->flags |= ENQUEUE_HEAD;
 +		p->prio = prio;
 +	}
 +
@@ -126856,12 +126877,20 @@ index 0000000000000..5b7097f479291
 +struct sched_change_ctx *sched_change_begin(struct task_struct *p, unsigned int flags)
 +{
 +	struct sched_change_ctx *ctx = this_cpu_ptr(&sched_change_ctx);
++	struct rq *rq = task_rq(p);
 +
 +	/*
 +	 * Must exclusively use matched flags since this is both dequeue and
 +	 * enqueue.
 +	 */
 +	WARN_ON_ONCE(flags & 0xFFFF0000);
++
++	lockdep_assert_rq_held(rq);
++
++	if (!(flags & DEQUEUE_NOCLOCK)) {
++		update_rq_clock(rq);
++		flags |= DEQUEUE_NOCLOCK;
++	}
 +
 +	*ctx = (struct sched_change_ctx){
 +		.p = p,
@@ -126877,16 +126906,17 @@ index 0000000000000..5b7097f479291
 +	struct task_struct *p = ctx->p;
 +	struct rq *rq = task_rq(ctx->p);
 +
++	lockdep_assert_rq_held(rq);
++
 +	/* Trigger resched if task sched_prio has been modified. */
 +	if (ctx->queued) {
-+		update_rq_clock(rq);
-+		requeue_task(p, rq);
++		requeue_task(p, rq, ctx->flags);
 +		wakeup_preempt(rq);
 +	}
 +}
 diff --git a/kernel/sched/alt_core.h b/kernel/sched/alt_core.h
 new file mode 100644
-index 0000000000000..5438b5377a933
+index 0000000000000..85ef10fa95f57
 --- /dev/null
 +++ b/kernel/sched/alt_core.h
 @@ -0,0 +1,111 @@
@@ -126969,7 +126999,7 @@ index 0000000000000..5438b5377a933
 +	return list_next_entry(p, sq_node);
 +}
 +
-+extern void requeue_task(struct task_struct *p, struct rq *rq);
++extern void requeue_task(struct task_struct *p, struct rq *rq, int flags);
 +
 +#ifdef ALT_SCHED_DEBUG
 +extern void alt_sched_debug(void);
@@ -127041,10 +127071,10 @@ index 0000000000000..1dbd7eb6a4346
 +{}
 diff --git a/kernel/sched/alt_sched.h b/kernel/sched/alt_sched.h
 new file mode 100644
-index 0000000000000..0ef38442f4962
+index 0000000000000..12d2c1b84618b
 --- /dev/null
 +++ b/kernel/sched/alt_sched.h
-@@ -0,0 +1,1334 @@
+@@ -0,0 +1,1345 @@
 +#ifndef _KERNEL_SCHED_ALT_SCHED_H
 +#define _KERNEL_SCHED_ALT_SCHED_H
 +
@@ -127319,7 +127349,7 @@ index 0000000000000..0ef38442f4962
 +
 +	/* Scratch cpumask to be temporarily used under rq_lock */
 +	cpumask_var_t		scratch_mask;
-+};
++} __no_randomize_layout;
 +
 +static inline int cpu_of(const struct rq *rq)
 +{
@@ -127516,9 +127546,20 @@ index 0000000000000..0ef38442f4962
 +	raw_spinlock_t *lock;
 +};
 +
++extern struct balance_callback balance_push_callback;
++
++static inline void assert_balance_callbacks_empty(struct rq *rq)
++{
++	WARN_ON_ONCE(IS_ENABLED(CONFIG_PROVE_LOCKING) &&
++		     rq->balance_callback &&
++		     rq->balance_callback != &balance_push_callback);
++}
++
 +static inline void rq_pin_lock(struct rq *rq, struct rq_flags *rf)
 +{
 +	rf->cookie = lockdep_pin_lock(__rq_lockp(rq));
++
++	assert_balance_callbacks_empty(rq);
 +}
 +
 +static inline void rq_unpin_lock(struct rq *rq, struct rq_flags *rf)
@@ -127957,6 +127998,8 @@ index 0000000000000..0ef38442f4962
 +
 +extern void schedule_idle(void);
 +
++asmlinkage void schedule_user(void);
++
 +#ifdef CONFIG_MEMBARRIER
 +/*
 + * The scheduler provides memory barriers required by membarrier between:
@@ -128281,8 +128324,6 @@ index 0000000000000..0ef38442f4962
 +static inline void mm_cid_switch_to(struct task_struct *prev, struct task_struct *next) { }
 +#endif /* !CONFIG_SCHED_MM_CID */
 +
-+extern struct balance_callback balance_push_callback;
-+
 +static inline void
 +queue_balance_callback(struct rq *rq,
 +		       struct balance_callback *head,
@@ -128381,10 +128422,10 @@ index 0000000000000..0ef38442f4962
 +#endif /* _KERNEL_SCHED_ALT_SCHED_H */
 diff --git a/kernel/sched/alt_topology.c b/kernel/sched/alt_topology.c
 new file mode 100644
-index 0000000000000..b13c118cd53e0
+index 0000000000000..cb6fe0cd28425
 --- /dev/null
 +++ b/kernel/sched/alt_topology.c
-@@ -0,0 +1,713 @@
+@@ -0,0 +1,717 @@
 +#include "alt_core.h"
 +#include "alt_topology.h"
 +
@@ -128898,14 +128939,18 @@ index 0000000000000..b13c118cd53e0
 +		return;
 +	}
 +
-+	pr_info("sched/alt: %s topology, idle select: %s, active: %*pbl, SMT: %*pbl, P: %*pbl, E: %*pbl, UNKNOWN: %*pbl\n",
++	pr_info("sched/alt: %s topology, idle select: %s, active: %*pbl, SMT: %*pbl%s%*pbl%s%*pbl%s%*pbl\n",
 +		sched_heterogeneous ? "heterogeneous" : "homogeneous",
 +		sched_idle_select_mode_name(READ_ONCE(sched_idle_select_mode)),
 +		cpumask_pr_args(&sched_topology_active_mask),
 +		cpumask_pr_args(&sched_smt_mask),
++		cpumask_empty(&sched_pcore_mask) ? "" : ", P: ",
 +		cpumask_pr_args(&sched_pcore_mask),
++		cpumask_empty(&sched_ecore_mask) ? "" : ", E: ",
 +		cpumask_pr_args(&sched_ecore_mask),
-+		cpumask_pr_args(&sched_unknown_mask));
++		sched_mixed_cpu_types ? ", UNKNOWN: " : "",
++		cpumask_pr_args(sched_mixed_cpu_types ?
++				&sched_unknown_mask : cpu_none_mask));
 +}
 +
 +#ifdef CONFIG_SCHED_SMT
@@ -131097,7 +131142,7 @@ index a612cf253c873..ff5cc396daf03 100644
  		set = TSK_RUNNING;
  		if (p->in_memstall)
 diff --git a/kernel/sched/syscalls.c b/kernel/sched/syscalls.c
-index b215b0ead9a60..5d6976349b2a4 100644
+index b215b0ead9a60..6ce19b873a7f9 100644
 --- a/kernel/sched/syscalls.c
 +++ b/kernel/sched/syscalls.c
 @@ -16,6 +16,14 @@
@@ -131517,11 +131562,11 @@ index b215b0ead9a60..5d6976349b2a4 100644
 +	p = current;
 +	if (rt_task(p)) {
 +		if (task_on_rq_queued(p))
-+			requeue_task(p, rq);
++			requeue_task(p, rq, 0);
 +	} else if (rq->nr_running > 1) {
 +		do_sched_yield_type_1(p, rq);
 +		if (task_on_rq_queued(p))
-+			requeue_task(p, rq);
++			requeue_task(p, rq, 0);
 +	}
 +#else /* !CONFIG_SCHED_ALT */
 +	rq = this_rq_lock_irq(&rf);
