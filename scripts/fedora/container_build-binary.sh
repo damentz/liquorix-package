@@ -28,7 +28,8 @@ cp -v "$dir_base/$package_source" \
 
 # Copy liquorix patch to SOURCES
 log_info "Copying liquorix patch to rpmbuild SOURCES"
-cp -v "$dir_package/debian/patches/zen/v${version_upstream}-lqx1.patch" \
+# shellcheck disable=SC2154  # assigned in env.sh via eval
+cp -v "$dir_package/debian/patches/$version_patch_name" \
     "$rpmbuild_dir/SOURCES/"
 
 # Copy kernel config to SOURCES
@@ -42,8 +43,11 @@ cp -v "$dir_scripts/$spec_name" "$rpmbuild_dir/SPECS/"
 
 # Build RPMs
 log_info "Building RPM packages for $release"
+# shellcheck disable=SC2154  # version_* assigned in env.sh via eval
 $schedtool rpmbuild -bb \
     --define "version_upstream $version_upstream" \
+    --define "version_kernel $version_kernel" \
+    --define "version_lqx $version_lqx" \
     --define "version_build $version_build" \
     --define "fedora_release $release" \
     "$rpmbuild_dir/SPECS/$spec_name"

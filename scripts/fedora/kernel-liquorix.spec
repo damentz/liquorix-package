@@ -1,7 +1,9 @@
 # Version variables are provided by the build system via rpmbuild --define flags.
 # For local builds, pass them manually:
-#   rpmbuild -bb --define "version_upstream 6.18.15" \
-#                --define "version_build 3" \
+#   rpmbuild -bb --define "version_upstream 7.1.8" \
+#                --define "version_kernel 7.1" \
+#                --define "version_lqx 4" \
+#                --define "version_build 1" \
 #                --define "fedora_release 43" \
 #                kernel-liquorix.spec
 
@@ -11,7 +13,7 @@
 # Disable LTO in userspace packages
 %global _lto_cflags %{nil}
 
-%global lqxversion       lqx1
+%global lqxversion       lqx%{version_lqx}
 %global kversion         %{version_upstream}.%{lqxversion}-%{version_build}
 
 Name:           kernel-liquorix
@@ -22,7 +24,7 @@ License:        GPL-2.0-only
 URL:            https://liquorix.net
 ExclusiveArch:  x86_64
 
-Source0:        linux-%{lua:print(rpm.expand("%{version_upstream}"):match("(%d+%.%d+)"))}%{nil}.tar.xz
+Source0:        linux-%{version_kernel}.tar.xz
 Source1:        v%{version_upstream}-%{lqxversion}.patch
 Source2:        config-x86_64-liquorix
 
@@ -100,10 +102,10 @@ AutoProv:       yes
 Loadable kernel modules for the Liquorix kernel %{kversion}.
 
 %prep
-%setup -q -n linux-%{lua:print(rpm.expand("%{version_upstream}"):match("(%d+%.%d+)"))}%{nil}
+%setup -q -n linux-%{version_kernel}
 patch -p1 < %{SOURCE1}
 
-# Clear EXTRAVERSION set by the zen patch (-lqx1) since we control the full
+# Clear EXTRAVERSION set by the zen patch (-lqxN) since we control the full
 # version string via LOCALVERSION to match %%{kversion}
 sed -i 's/^EXTRAVERSION = .*/EXTRAVERSION =/' Makefile
 
