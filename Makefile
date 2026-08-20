@@ -27,7 +27,7 @@ require-release = \
         bootstrap-debian bootstrap-ubuntu bootstrap-arch bootstrap-fedora bootstrap-image \
         build-source-debian build-source-ubuntu build-source build-binary-debian build-binary-arch build-binary-fedora build-binary \
         upload-ppa repo-add-debian \
-        clean-ppa clean
+        clean-ppa clean check-version test
 
 help: ## Show available targets
 	@echo "Liquorix Build System"
@@ -109,3 +109,9 @@ clean-ppa: ## Delete PPA packages
 
 clean: ## Remove Liquorix Docker build images
 	$(SCRIPTS)/docker-clean.sh
+
+check-version: ## Verify changelog, defines and patches/series agree on the release version
+	$(SCRIPTS)/version check
+
+test: ## Run script tests
+	$(SCRIPTS)/tests/test-version.sh

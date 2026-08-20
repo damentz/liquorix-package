@@ -1,0 +1,98 @@
+#!/bin/bash
+# Release Version module: the single interface for every version string.
+#
+# Inputs (canonical): <tree>/debian/changelog line 1, <tree>/debian/config/defines abiname.
+# Validated:          <tree>/debian/patches/series zen patch entry.
+#
+# Usage:
+#   version [-C TREE] get KEY                      KEY: upstream kernel major lqx pkgrev abiname patch_name tag
+#   version [-C TREE] env                          eval-able shell assignments (version_*)
+#   version [-C TREE] release DISTRO RELEASE [BUILD]
+#   version [-C TREE] changes DISTRO RELEASE BUILD ARCH
+#   version [-C TREE] check                        exit 1 if series disagrees with changelog/defines
+#
+# TREE defaults to linux-liquorix/ next to this script's parent directory.
+set -euo pipefail
+
+dir_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+tree="${dir_script%/*}/linux-liquorix"
+package_name='linux-liquorix'
+
+usage() { sed -n '2,14p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+die()   { echo "version: $*" >&2; exit 1; }
+
+while getopts 'C:h' opt; do
+    case "$opt" in
+        C) tree="$OPTARG" ;;
+        *) usage ;;
+    esac
+done
+shift $((OPTIND - 1))
+[[ $# -ge 1 ]] || usage
+
+changelog="$tree/debian/changelog"
+defines="$tree/debian/config/defines"
+series="$tree/debian/patches/series"
+[[ -r "$changelog" ]] || die "cannot read $changelog"
+[[ -r "$defines" ]]   || die "cannot read $defines"
+
+# Parse the two canonical inputs.
+pkgver="$(head -n1 "$changelog" | grep -Po '(?<=\()[^)]+(?=\))')" || die "no version in $changelog:1"
+[[ "$pkgver" =~ ^([0-9]+)\.([0-9]+)-([0-9]+)$ ]] || die "unparseable changelog version '$pkgver'"
+version_major="${BASH_REMATCH[1]}"
+version_kernel="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}"
+version_pkgrev="${BASH_REMATCH[3]}"
+
+version_abiname="$(grep -Po '(?<=^abiname:\s)\S+' "$defines")" || die "no abiname in $defines"
+[[ "$version_abiname" =~ ^([0-9]+)-([0-9]+)$ ]] || die "unparseable abiname '$version_abiname'"
+version_upstream="${version_kernel}.${BASH_REMATCH[1]}"
+version_lqx="${BASH_REMATCH[2]}"
+
+version_tag="v${version_upstream}-lqx${version_lqx}"
+version_patch_name="zen/${version_tag}.patch"
+
+release_version() {
+    local distro="$1" release="$2" build="${3:-1}"
+    if [[ "$distro" == ubuntu ]]; then
+        echo "${version_kernel}-${version_pkgrev}ubuntu${build}~${release}"
+    else
+        echo "${version_kernel}-${version_pkgrev}.${build}~${release}"
+    fi
+}
+
+cmd="$1"; shift
+case "$cmd" in
+    get)
+        [[ $# -eq 1 ]] || usage
+        case "$1" in
+            upstream)   echo "$version_upstream" ;;
+            kernel)     echo "$version_kernel" ;;
+            major)      echo "$version_major" ;;
+            lqx)        echo "$version_lqx" ;;
+            pkgrev)     echo "$version_pkgrev" ;;
+            abiname)    echo "$version_abiname" ;;
+            patch_name) echo "$version_patch_name" ;;
+            tag)        echo "$version_tag" ;;
+            *) die "unknown key '$1'" ;;
+        esac ;;
+    env)
+        for v in upstream kernel major lqx pkgrev abiname tag patch_name; do
+            n="version_$v"
+            printf '%s=%q\n' "$n" "${!n}"
+        done ;;
+    release)
+        [[ $# -eq 2 || $# -eq 3 ]] || usage
+        release_version "$@" ;;
+    changes)
+        [[ $# -eq 4 ]] || usage
+        echo "${package_name}_$(release_version "$1" "$2" "$3")_$4.changes" ;;
+    check)
+        [[ -r "$series" ]] || die "cannot read $series"
+        found="$(grep -m1 -E '^zen/v[0-9].*\.patch$' "$series" || true)"
+        [[ -n "$found" ]] || die "no zen patch entry in $series"
+        if [[ "$found" != "$version_patch_name" ]]; then
+            die "series lists '$found' but changelog+defines give '$version_patch_name' ($series)"
+        fi
+        echo "version: ok ${version_kernel}-${version_pkgrev} / ${version_tag}" ;;
+    *) usage ;;
+esac
