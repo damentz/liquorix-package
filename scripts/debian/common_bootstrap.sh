@@ -10,5 +10,6 @@ source "$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/../lib.sh"
 
 if [[ ! -f "$dir_base/$package_source" ]]; then
     log_warn "Missing source file: $dir_base/$package_source, downloading now."
+    # shellcheck disable=SC2154  # version_* assigned in env.sh via eval
     wget -O "$dir_base/$package_source" "https://cdn.kernel.org/pub/linux/kernel/v${version_major}.x/linux-${version_kernel}.tar.xz"
 fi
