@@ -23,7 +23,7 @@ for arch in amd64; do
     distro='debian'
     for release in "${releases_debian[@]}"; do
         cd "$dir_artifacts/$distro/$release" || exit
-        changes="${package_name}_${version_package}.${build}~${release}_${arch}.changes"
+        changes="$("$dir_base/scripts/version" -C "$dir_package" changes "$distro" "$release" "$build" "$arch")"
 
         log_info "Including $changes to repo at $repo_local_path"
         reprepro -b "$repo_local_path" include "$release" "$changes"
