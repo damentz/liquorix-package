@@ -12,9 +12,10 @@ dir_build="$dir_base/build"
 dir_scripts="$dir_base/scripts/debian"
 dir_artifacts="$dir_base/artifacts"
 
-version_package="$( head -n1 "$dir_package"/debian/changelog | grep -Po '\d+\.\d+-\d+' )"
-version_kernel="$(  echo "$version_package"                   | grep -Po '\d+\.\d+' )"
-version_major="$(   echo "$version_kernel"                    | sed -r 's/\..*//' )"
+# Release Version strings come from the version module (see CONTEXT.md).
+eval "$("$dir_base/scripts/version" -C "$dir_package" env)"
+# shellcheck disable=SC2154  # assigned by eval above
+version_package="${version_kernel}-${version_pkgrev}"
 version_build="1"
 
 package_source="${package_name}_${version_kernel}.orig.tar.xz"
@@ -50,18 +51,7 @@ schedtool='schedtool -D -n19 -e'
 
 # Common routine to get correct release version for Debian / Ubuntu
 function get_release_version {
-    local distro="${1:-}"
-    local release="${2:-}"
-    local build="${3:-${version_build}}"
-
-    declare version=''
-    if [[ "$distro" == "ubuntu" ]]; then
-        version="${version_package}ubuntu${build}~${release}"
-    else
-        version="${version_package}.${build}~${release}"
-    fi
-
-    echo "$version"
+    "$dir_base/scripts/version" -C "$dir_package" release "$1" "$2" "${3:-${version_build}}"
 }
 
 function prepare_env {

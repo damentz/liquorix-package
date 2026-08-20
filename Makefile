@@ -104,3 +104,4 @@ check-version: ## Verify changelog, defines and patches/series agree on the rele
 
 test: ## Run script tests
 	$(SCRIPTS)/tests/test-version.sh
+	$(SCRIPTS)/tests/test-debian-env.sh
