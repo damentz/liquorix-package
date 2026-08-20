@@ -13,17 +13,12 @@ dir_build="/build"
 dir_scripts="$dir_base/scripts/fedora"
 dir_artifacts="$dir_base/artifacts"
 
-# Parse version from debian/changelog and config/defines (single source of truth)
-# Changelog has: linux-liquorix (6.18-17) => version_kernel=6.18
-# Config defines has: abiname: 15-3 => patch=15, lqx=3
-# Combined: version_upstream=6.18.15, version_build=3
-version_package="$( head -n1 "$dir_package"/debian/changelog | grep -Po '\d+\.\d+-\d+' )"
-version_kernel="$(  echo "$version_package" | grep -Po '\d+\.\d+' )"
-
-declare _abiname
-_abiname="$( grep -Po '(?<=^abiname:\s)\S+' "$dir_package"/debian/config/defines )"
-version_upstream="${version_kernel}.${_abiname%%-*}"
-version_build="${_abiname##*-}"
+# Release Version strings come from the version module (see CONTEXT.md).
+eval "$("$dir_base/scripts/version" -C "$dir_package" env)"
+# shellcheck disable=SC2154  # assigned by eval above
+version_package="${version_kernel}-${version_pkgrev}"
+# Build Number: rebuild of the same source, overridable by the BUILD argument.
+version_build="1"
 
 package_source="linux-liquorix_${version_kernel}.orig.tar.xz"
 

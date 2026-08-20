@@ -15,7 +15,8 @@ if [[ ! -f "$dir_base/$package_source" ]]; then
 fi
 
 # Verify liquorix patch exists
-declare patch_file="$dir_package/debian/patches/zen/v${version_upstream}-lqx1.patch"
+# shellcheck disable=SC2154  # assigned in env.sh via eval
+declare patch_file="$dir_package/debian/patches/$version_patch_name"
 if [[ ! -f "$patch_file" ]]; then
     log_error "Liquorix patch not found: $patch_file"
     exit 1
