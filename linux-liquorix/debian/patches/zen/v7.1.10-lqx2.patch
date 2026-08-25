@@ -1543,7 +1543,7 @@ index c8d4b913f26c1..624cfb6cf1d40 100644
  F:	include/linux/mfd/loongson-se.h
  
 diff --git a/Makefile b/Makefile
-index 408f070d49b8e..6487dcbcb059a 100644
+index 408f070d49b8e..2ffb4c318c4df 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -1,9 +1,9 @@
@@ -1554,7 +1554,7 @@ index 408f070d49b8e..6487dcbcb059a 100644
 -EXTRAVERSION =
 -NAME = Baby Opossum Posse
 +SUBLEVEL = 10
-+EXTRAVERSION = -lqx1
++EXTRAVERSION = -lqx2
 +NAME = Channeling Inner Peace for Peak Performance
  
  # *DOCUMENTATION*
@@ -145313,10 +145313,10 @@ index b1f1a367034ff..0c1f4f030509c 100644
  obj-y += build_utility.o
 diff --git a/kernel/sched/alt_core.c b/kernel/sched/alt_core.c
 new file mode 100644
-index 0000000000000..e8086f344f7ee
+index 0000000000000..351af68d33699
 --- /dev/null
 +++ b/kernel/sched/alt_core.c
-@@ -0,0 +1,8102 @@
+@@ -0,0 +1,8110 @@
 +/*
 + *  kernel/sched/alt_core.c
 + *
@@ -145462,7 +145462,15 @@ index 0000000000000..e8086f344f7ee
 +# define finish_arch_post_lock_switch()	do { } while (0)
 +#endif
 +
-+static cpumask_t sched_preempt_mask[SCHED_QUEUE_BITS + 3] ____cacheline_aligned_in_smp;
++static struct {
++	cpumask_t pad;
++	cpumask_t mask[SCHED_QUEUE_BITS + 3];
++} sched_preempt_masks ____cacheline_aligned_in_smp;
++
++#define sched_preempt_mask	sched_preempt_masks.mask
++
++static_assert(offsetof(typeof(sched_preempt_masks),
++		       mask[SCHED_QUEUE_BITS - 1]) % SMP_CACHE_BYTES == 0);
 +
 +cpumask_t *const sched_idle_mask = &sched_preempt_mask[SCHED_QUEUE_BITS - 1];
 +cpumask_t *const sched_sg_idle_mask = &sched_preempt_mask[SCHED_QUEUE_BITS];
@@ -153574,10 +153582,10 @@ index 0000000000000..1dbd7eb6a4346
 +{}
 diff --git a/kernel/sched/alt_sched.h b/kernel/sched/alt_sched.h
 new file mode 100644
-index 0000000000000..cd65a9c2fbd9b
+index 0000000000000..25d22b04983fc
 --- /dev/null
 +++ b/kernel/sched/alt_sched.h
-@@ -0,0 +1,1342 @@
+@@ -0,0 +1,1344 @@
 +#ifndef _KERNEL_SCHED_ALT_SCHED_H
 +#define _KERNEL_SCHED_ALT_SCHED_H
 +
@@ -153741,6 +153749,12 @@ index 0000000000000..cd65a9c2fbd9b
 +	struct task_struct		*stop;
 +	struct mm_struct		*prev_mm;
 +
++	/* switch count */
++	u64 nr_switches;
++
++	u64 last_seen_need_resched_ns;
++	int ticks_without_resched;
++
 +	struct sched_queue		queue		____cacheline_aligned;
 +
 +	int				prio;
@@ -153749,13 +153763,7 @@ index 0000000000000..cd65a9c2fbd9b
 +	u64				time_edge;
 +#endif
 +
-+	/* switch count */
-+	u64 nr_switches;
-+
 +	atomic_t nr_iowait;
-+
-+	u64 last_seen_need_resched_ns;
-+	int ticks_without_resched;
 +
 +#ifdef CONFIG_MEMBARRIER
 +	int membarrier_state;
@@ -153783,7 +153791,6 @@ index 0000000000000..cd65a9c2fbd9b
 +	unsigned int		nr_pinned;
 +
 +#ifdef CONFIG_IRQ_TIME_ACCOUNTING
-+	u64 prev_irq_time;
 +	u64 psi_irq_time;
 +#endif /* CONFIG_IRQ_TIME_ACCOUNTING */
 +#ifdef CONFIG_PARAVIRT
@@ -153793,11 +153800,6 @@ index 0000000000000..cd65a9c2fbd9b
 +	u64 prev_steal_time_rq;
 +#endif /* CONFIG_PARAVIRT_TIME_ACCOUNTING */
 +
-+	/* For genenal cpu load util */
-+	s32 load_history;
-+	u64 load_block;
-+	u64 load_stamp;
-+
 +	/* calc_load related fields */
 +	unsigned long calc_load_update;
 +	long calc_load_active;
@@ -153806,6 +153808,14 @@ index 0000000000000..cd65a9c2fbd9b
 +	u64			clock ____cacheline_aligned;
 +	u64			clock_task;
 +	u64			prio_balance_time;
++#ifdef CONFIG_IRQ_TIME_ACCOUNTING
++	u64 prev_irq_time;
++#endif /* CONFIG_IRQ_TIME_ACCOUNTING */
++
++	/* For genenal cpu load util */
++	u64 load_block;
++	u64 load_stamp;
++	s32 load_history;
 +
 +	unsigned int  nr_running;
 +	unsigned long nr_uninterruptible;
@@ -155645,10 +155655,10 @@ index 0000000000000..cb6fe0cd28425
 +#endif
 diff --git a/kernel/sched/alt_topology.h b/kernel/sched/alt_topology.h
 new file mode 100644
-index 0000000000000..066bc255bf36b
+index 0000000000000..126eeaaf42a37
 --- /dev/null
 +++ b/kernel/sched/alt_topology.h
-@@ -0,0 +1,172 @@
+@@ -0,0 +1,177 @@
 +#ifndef _KERNEL_SCHED_ALT_TOPOLOGY_H
 +#define _KERNEL_SCHED_ALT_TOPOLOGY_H
 +
@@ -155704,12 +155714,17 @@ index 0000000000000..066bc255bf36b
 +{
 +#ifdef CONFIG_SCHED_SMT
 +	if (cpumask_test_cpu(cpu, &sched_smt_mask)) {
++		cpumask_set_cpu(cpu, sched_idle_mask);
++		smp_mb__after_atomic();
++
++		if (!sched_smt_active_group_idle(cpu))
++			return;
++
 +		unsigned int leader =
 +			cpumask_first_and(cpu_smt_mask(cpu), &sched_smt_mask);
 +		raw_spinlock_t *lock = &per_cpu(sched_smt_idle_lock, leader);
 +
 +		raw_spin_lock(lock);
-+		cpumask_set_cpu(cpu, sched_idle_mask);
 +		if (sched_smt_active_group_idle(cpu))
 +			sched_set_smt_idle_masks(cpu);
 +		raw_spin_unlock(lock);
