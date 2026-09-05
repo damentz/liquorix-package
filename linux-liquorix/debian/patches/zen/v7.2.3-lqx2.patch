@@ -192,7 +192,7 @@ index 0000000000000..05c84eec0f31a
 +priority boost from unblocking while background threads that do most of the
 +processing receive the priority penalty for using their entire timeslice.
 diff --git a/Makefile b/Makefile
-index ddcc6dca1ece8..60b201e3202d0 100644
+index ddcc6dca1ece8..abc8d637024ff 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -1,9 +1,9 @@
@@ -203,7 +203,7 @@ index ddcc6dca1ece8..60b201e3202d0 100644
 -EXTRAVERSION =
 -NAME = Baby Opossum Posse
 +SUBLEVEL = 3
-+EXTRAVERSION = -lqx3
++EXTRAVERSION = -lqx2
 +NAME = Channeling Inner Peace for Peak Performance
  
  # *DOCUMENTATION*
@@ -10127,7 +10127,7 @@ index 31ce349ed42ce..23db2b3d81161 100644
  	}
  }
 diff --git a/include/linux/sched.h b/include/linux/sched.h
-index 373bcc0598d10..ab80121a2cf57 100644
+index 373bcc0598d10..f5af9b73f13cb 100644
 --- a/include/linux/sched.h
 +++ b/include/linux/sched.h
 @@ -862,6 +862,7 @@ struct task_struct {
@@ -10152,13 +10152,13 @@ index 373bcc0598d10..ab80121a2cf57 100644
 +#ifdef CONFIG_SCHED_ALT
 +	u64				last_ran;
 +	s64				time_slice;
-+	u64				sleep_start;
 +	struct list_head		sq_node;
 +#ifdef CONFIG_SCHED_BMQ
 +	int				boost_prio;
 +#endif /* CONFIG_SCHED_BMQ */
 +#ifdef CONFIG_SCHED_PDS
 +	u64				deadline;
++	u64				sleep_start;
 +	u64				sleep_credit;
 +#endif /* CONFIG_SCHED_PDS */
 +	/* sched_clock time spent running */
@@ -12580,10 +12580,10 @@ index b1f1a367034ff..0c1f4f030509c 100644
  obj-y += build_utility.o
 diff --git a/kernel/sched/alt_core.c b/kernel/sched/alt_core.c
 new file mode 100644
-index 0000000000000..5dc24c1c1010e
+index 0000000000000..300f7677438c4
 --- /dev/null
 +++ b/kernel/sched/alt_core.c
-@@ -0,0 +1,8178 @@
+@@ -0,0 +1,8144 @@
 +/*
 + *  kernel/sched/alt_core.c
 + *
@@ -14557,11 +14557,11 @@ index 0000000000000..5dc24c1c1010e
 +	 */
 +	if (time_after(jiffies, current->wakee_flip_decay_ts + HZ)) {
 +		current->wakee_flips >>= 1;
-+		WRITE_ONCE(current->wakee_flip_decay_ts, jiffies);
++		current->wakee_flip_decay_ts = jiffies;
 +	}
 +
 +	if (current->last_wakee != p) {
-+		WRITE_ONCE(current->last_wakee, p);
++		current->last_wakee = p;
 +		current->wakee_flips++;
 +	}
 +}
@@ -14673,17 +14673,16 @@ index 0000000000000..5dc24c1c1010e
 +	}
 +
 +	if (want_affine) {
-+		int affine_cpu = nr_cpu_ids;
++		int affine_cpu = wake_affine_idle(cpu, prev_cpu, sync);
 +
-+		if (!is_idle_task(current)) {
++		if (affine_cpu == cpu && cpumask_test_cpu(cpu, &allow_mask)) {
++			int i;
++
 +			cpumask_and(&mask, cpu_smt_mask(cpu), &allow_mask);
-+			affine_cpu = cpumask_any_but(&mask, cpu);
++			i = cpumask_any_but(&mask, cpu);
++			new_cpu = i < nr_cpu_ids ? i : cpu;
++			goto out;
 +		}
-+		if (affine_cpu >= nr_cpu_ids)
-+			affine_cpu = wake_affine_idle(cpu, prev_cpu, sync);
-+		else if (!available_idle_cpu(affine_cpu) &&
-+			 cpumask_intersects(&allow_mask, sched_idle_mask))
-+			affine_cpu = nr_cpu_ids;
 +		if (affine_cpu < nr_cpu_ids &&
 +		    cpumask_test_cpu(affine_cpu, &allow_mask)) {
 +			new_cpu = affine_cpu;
@@ -16750,38 +16749,6 @@ index 0000000000000..5dc24c1c1010e
 +}
 +__setup("resched_latency_warn_ms=", setup_resched_latency_warn_ms);
 +
-+#ifdef CONFIG_SCHED_SMT
-+static void smt_balance_kick(struct rq *rq)
-+{
-+	int cpu = cpu_of(rq), sibling, target;
-+	struct rq *target_rq;
-+
-+	if (rq->nr_running != 1 || cpumask_empty(sched_sg_idle_mask) ||
-+	    !cpumask_test_cpu(cpu, &sched_smt_mask) ||
-+	    !cpumask_intersects(rq->curr->cpus_ptr, sched_sg_idle_mask))
-+		return;
-+
-+	for_each_cpu_and(sibling, cpu_smt_mask(cpu), &sched_smt_mask)
-+		if (sibling != cpu &&
-+		    (cpumask_test_cpu(sibling, sched_idle_mask) ||
-+		     cpumask_test_cpu(sibling, &sched_rq_pending_mask)))
-+			return;
-+
-+	if (sched_smt_group_paired(rq, cpu))
-+		return;
-+
-+	target = best_mask_cpu(cpu, sched_sg_idle_mask);
-+	target_rq = cpu_rq(target);
-+	if (raw_spin_rq_trylock(target_rq)) {
-+		if (is_idle_task(target_rq->curr))
-+			resched_curr(target_rq);
-+		raw_spin_rq_unlock(target_rq);
-+	}
-+}
-+#else
-+static inline void smt_balance_kick(struct rq *rq) { }
-+#endif
-+
 +/*
 + * This function gets called by the timer code, with HZ frequency.
 + * We call it with interrupts disabled.
@@ -16809,7 +16776,6 @@ index 0000000000000..5dc24c1c1010e
 +		resched_curr(rq);
 +
 +	scheduler_task_tick(rq);
-+	smt_balance_kick(rq);
 +	if (sched_feat(LATENCY_WARN))
 +		resched_latency = cpu_resched_latency(rq);
 +	calc_global_load_tick(rq);
@@ -22269,10 +22235,10 @@ index 0000000000000..ab674929683aa
 +#endif /* _KERNEL_SCHED_ALT_SCHED_H */
 diff --git a/kernel/sched/alt_topology.c b/kernel/sched/alt_topology.c
 new file mode 100644
-index 0000000000000..93b43c9648cb4
+index 0000000000000..cb6fe0cd28425
 --- /dev/null
 +++ b/kernel/sched/alt_topology.c
-@@ -0,0 +1,749 @@
+@@ -0,0 +1,717 @@
 +#include "alt_core.h"
 +#include "alt_topology.h"
 +
@@ -22611,37 +22577,6 @@ index 0000000000000..93b43c9648cb4
 +	return true;
 +}
 +
-+static bool sched_wakee_recent(struct task_struct *p, u64 now)
-+{
-+	return time_before(jiffies, READ_ONCE(p->wakee_flip_decay_ts) + 2 * HZ) &&
-+	       now - READ_ONCE(p->sleep_start) < TICK_NSEC;
-+}
-+
-+bool sched_smt_group_paired(struct rq *rq, int cpu)
-+{
-+	struct task_struct *p = rcu_dereference_all(cpu_rq(cpu)->curr);
-+	u64 now = rq_clock(rq);
-+	int sibling;
-+
-+	if (!sched_wakee_recent(p, now))
-+		return false;
-+
-+	for_each_cpu_and(sibling, cpu_smt_mask(cpu), &sched_smt_mask) {
-+		struct task_struct *q;
-+
-+		if (sibling == cpu)
-+			continue;
-+
-+		q = rcu_dereference_all(cpu_rq(sibling)->curr);
-+		if (READ_ONCE(p->last_wakee) == q &&
-+		    READ_ONCE(q->last_wakee) == p &&
-+		    sched_wakee_recent(q, now))
-+			return true;
-+	}
-+
-+	return false;
-+}
-+
 +static inline int
 +smt_source_balance(struct rq *rq, cpumask_t *single_task_mask,
 +		   const struct cpumask *source_mask, cpumask_t *target_mask)
@@ -22658,7 +22593,6 @@ index 0000000000000..93b43c9648cb4
 +
 +		for_each_cpu_wrap(i, &smt_single_mask, cpu) {
 +			if (sched_smt_group_busy(i, &smt_single_mask) &&
-+			    !sched_smt_group_paired(rq, i) &&
 +			    trigger_active_balance(rq, cpu_rq(i), target_mask))
 +				return 1;
 +		}
@@ -23024,10 +22958,10 @@ index 0000000000000..93b43c9648cb4
 +#endif
 diff --git a/kernel/sched/alt_topology.h b/kernel/sched/alt_topology.h
 new file mode 100644
-index 0000000000000..9deb40cce9700
+index 0000000000000..126eeaaf42a37
 --- /dev/null
 +++ b/kernel/sched/alt_topology.h
-@@ -0,0 +1,178 @@
+@@ -0,0 +1,177 @@
 +#ifndef _KERNEL_SCHED_ALT_TOPOLOGY_H
 +#define _KERNEL_SCHED_ALT_TOPOLOGY_H
 +
@@ -23166,7 +23100,6 @@ index 0000000000000..9deb40cce9700
 +#ifdef CONFIG_SCHED_SMT
 +extern void ecore_balance(struct rq *rq);
 +extern void smt_balance(struct rq *rq);
-+bool sched_smt_group_paired(struct rq *rq, int cpu);
 +extern void smt_pcore_balance(struct rq *rq);
 +#endif
 +
@@ -23425,10 +23358,10 @@ index 0000000000000..6bdf2d4f1ced9
 +kunit_test_suite(sched_topology_test_suite);
 diff --git a/kernel/sched/bmq.h b/kernel/sched/bmq.h
 new file mode 100644
-index 0000000000000..d288586dab77a
+index 0000000000000..78144ea0f3de8
 --- /dev/null
 +++ b/kernel/sched/bmq.h
-@@ -0,0 +1,108 @@
+@@ -0,0 +1,107 @@
 +#ifndef _KERNEL_SCHED_BMQ_H
 +#define _KERNEL_SCHED_BMQ_H
 +
@@ -23532,7 +23465,6 @@ index 0000000000000..d288586dab77a
 +
 +static inline void sched_task_deactivate(struct task_struct *p, struct rq *rq)
 +{
-+	WRITE_ONCE(p->sleep_start, rq->clock);
 +	boost_task(p, 1);
 +}
 +
@@ -23927,7 +23859,7 @@ index 052435f4d3e3c..2c436e70af365 100644
 +#endif
 diff --git a/kernel/sched/pds.h b/kernel/sched/pds.h
 new file mode 100644
-index 0000000000000..93e1a3a4e3967
+index 0000000000000..3edc22ec964be
 --- /dev/null
 +++ b/kernel/sched/pds.h
 @@ -0,0 +1,198 @@
@@ -24125,7 +24057,7 @@ index 0000000000000..93e1a3a4e3967
 +
 +static inline void sched_task_deactivate(struct task_struct *p, struct rq *rq)
 +{
-+	WRITE_ONCE(p->sleep_start, rq->clock);
++	p->sleep_start = rq->clock;
 +}
 +
 +#endif /* _KERNEL_SCHED_PDS_H */
