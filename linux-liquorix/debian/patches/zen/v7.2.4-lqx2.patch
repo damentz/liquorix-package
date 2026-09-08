@@ -226,7 +226,7 @@ index 0000000000000..05c84eec0f31a
 +priority boost from unblocking while background threads that do most of the
 +processing receive the priority penalty for using their entire timeslice.
 diff --git a/Makefile b/Makefile
-index ddcc6dca1ece8..0030b0196365a 100644
+index ddcc6dca1ece8..2791f8b7b989d 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -1,9 +1,9 @@
@@ -237,7 +237,7 @@ index ddcc6dca1ece8..0030b0196365a 100644
 -EXTRAVERSION =
 -NAME = Baby Opossum Posse
 +SUBLEVEL = 4
-+EXTRAVERSION = -lqx1
++EXTRAVERSION = -lqx2
 +NAME = Channeling Inner Peace for Peak Performance
  
  # *DOCUMENTATION*
@@ -6388,18 +6388,6 @@ index 0a295ccf1644a..b8ec2e6f615fa 100644
  	return ret;
  }
  
-diff --git a/drivers/gpu/drm/Kconfig b/drivers/gpu/drm/Kconfig
-index 323422861e8f6..e74713378f579 100644
---- a/drivers/gpu/drm/Kconfig
-+++ b/drivers/gpu/drm/Kconfig
-@@ -199,6 +199,7 @@ config DRM_TTM
- 	tristate
- 	depends on DRM && MMU
- 	select SHMEM
-+       select DRM_EXEC
- 	help
- 	  GPU memory management subsystem for devices with multiple
- 	  GPU memory types. Will be enabled automatically if a device driver
 diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu.h b/drivers/gpu/drm/amd/amdgpu/amdgpu.h
 index 7b09410d6d8f0..0dd8e2375c4da 100644
 --- a/drivers/gpu/drm/amd/amdgpu/amdgpu.h
@@ -6412,409 +6400,6 @@ index 7b09410d6d8f0..0dd8e2375c4da 100644
  extern int amdgpu_vis_vram_limit;
  extern int amdgpu_gart_size;
  extern int amdgpu_gtt_size;
-diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_amdkfd.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_amdkfd.c
-index da325863ad764..f9a10e1bdcf9a 100644
---- a/drivers/gpu/drm/amd/amdgpu/amdgpu_amdkfd.c
-+++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_amdkfd.c
-@@ -381,7 +381,7 @@ int amdgpu_amdkfd_alloc_kernel_mem(struct amdgpu_device *adev, size_t size,
- 		goto allocate_mem_reserve_bo_failed;
- 	}
- 
--	r = amdgpu_bo_pin(bo, domain);
-+	r = amdgpu_bo_pin(bo, NULL, domain);
- 	if (r) {
- 		dev_err(adev->dev, "(%d) failed to pin bo for amdkfd\n", r);
- 		goto allocate_mem_pin_bo_failed;
-diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_amdkfd_gpuvm.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_amdkfd_gpuvm.c
-index f0f516a79424f..228049541e2c4 100644
---- a/drivers/gpu/drm/amd/amdgpu/amdgpu_amdkfd_gpuvm.c
-+++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_amdkfd_gpuvm.c
-@@ -1531,7 +1531,7 @@ static int amdgpu_amdkfd_gpuvm_pin_bo(struct amdgpu_bo *bo, u32 domain)
- 		}
- 	}
- 
--	ret = amdgpu_bo_pin(bo, domain);
-+	ret = amdgpu_bo_pin(bo, NULL, domain);
- 	if (ret)
- 		pr_err("Error in Pinning BO to domain: %d\n", domain);
- 
-@@ -2241,7 +2241,7 @@ int amdgpu_amdkfd_map_gtt_bo_to_gart(struct amdgpu_bo *bo, struct amdgpu_bo **bo
- 		goto err_reserve_bo_failed;
- 	}
- 
--	ret = amdgpu_bo_pin(bo, AMDGPU_GEM_DOMAIN_GTT);
-+	ret = amdgpu_bo_pin(bo, NULL, AMDGPU_GEM_DOMAIN_GTT);
- 	if (ret) {
- 		pr_err("Failed to pin bo. ret %d\n", ret);
- 		goto err_pin_bo_failed;
-@@ -2303,7 +2303,7 @@ int amdgpu_amdkfd_gpuvm_map_gtt_bo_to_kernel(struct kgd_mem *mem,
- 		goto bo_reserve_failed;
- 	}
- 
--	ret = amdgpu_bo_pin(bo, AMDGPU_GEM_DOMAIN_GTT);
-+	ret = amdgpu_bo_pin(bo, NULL, AMDGPU_GEM_DOMAIN_GTT);
- 	if (ret) {
- 		pr_err("Failed to pin bo. ret %d\n", ret);
- 		goto pin_failed;
-diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_cs.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_cs.c
-index 35d76cfbc88af..d9016d232f70f 100644
---- a/drivers/gpu/drm/amd/amdgpu/amdgpu_cs.c
-+++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_cs.c
-@@ -822,14 +822,38 @@ static int amdgpu_cs_bo_validate(void *param, struct amdgpu_bo *bo)
- 	struct ttm_operation_ctx ctx = {
- 		.interruptible = true,
- 		.no_wait_gpu = false,
--		.resv = bo->tbo.base.resv
-+		.cgroup_throttle = p->num_unsuccessful_evicts > 0 ||
-+				   p->vm_eviction_throttle_soft,
-+		.exec = &p->exec,
- 	};
-+	struct amdgpu_fpriv *fpriv = p->filp->driver_priv;
-+	struct amdgpu_bo_va *bo_va;
-+	bool in_allowed_domains;
- 	uint32_t domain;
- 	int r;
- 
- 	if (bo->tbo.pin_count)
- 		return 0;
- 
-+	in_allowed_domains =
-+		bo->tbo.resource &&
-+		amdgpu_mem_type_to_domain(bo->tbo.resource->mem_type) &
-+			bo->allowed_domains;
-+
-+	if (p->vm_eviction_throttle_hard && in_allowed_domains)
-+		return 0;
-+
-+	if (amdgpu_vm_is_bo_always_valid(&fpriv->vm, bo) &&
-+	    bo->tbo.type != ttm_bo_type_kernel) {
-+		ctx.allow_bulk_evict = true;
-+		bo_va = amdgpu_vm_bo_find(&fpriv->vm, bo);
-+		if (bo_va->priority == 0 && in_allowed_domains) {
-+			drm_dbg(adev_to_drm(p->adev),
-+				"priority 0, skipping validation\n");
-+			return 0;
-+		}
-+	}
-+
- 	/* Don't move this buffer if we have depleted our allowance
- 	 * to move it. Don't move anything if the threshold is zero.
- 	 */
-@@ -856,6 +880,7 @@ static int amdgpu_cs_bo_validate(void *param, struct amdgpu_bo *bo)
- retry:
- 	amdgpu_bo_placement_from_domain(bo, domain);
- 	r = ttm_bo_validate(&bo->tbo, &bo->placement, &ctx);
-+	p->num_unsuccessful_evicts += ctx.unsuccessful_evicts;
- 
- 	p->bytes_moved += ctx.bytes_moved;
- 	if (!amdgpu_gmc_vram_full_visible(&adev->gmc) &&
-@@ -874,10 +899,12 @@ static int amdgpu_cs_parser_bos(struct amdgpu_cs_parser *p,
- 				union drm_amdgpu_cs *cs)
- {
- 	struct amdgpu_fpriv *fpriv = p->filp->driver_priv;
--	struct ttm_operation_ctx ctx = { true, false };
-+	struct ttm_operation_ctx ctx = { .interruptible = true,
-+					 .exec = &p->exec };
- 	struct amdgpu_vm *vm = &fpriv->vm;
- 	struct amdgpu_bo_list_entry *e;
- 	struct drm_gem_object *obj;
-+	u64 us_since_eviction_throttle;
- 	unsigned int i;
- 	int r;
- 
-@@ -934,6 +961,14 @@ static int amdgpu_cs_parser_bos(struct amdgpu_cs_parser *p,
- 		if (unlikely(r))
- 			goto out_free_user_pages;
- 
-+		us_since_eviction_throttle =
-+			ktime_to_us(ktime_get()) -
-+			READ_ONCE(fpriv->vm.last_evict_throttle_start_us);
-+		p->vm_eviction_throttle_soft = us_since_eviction_throttle <=
-+					       VM_EVICT_THROTTLE_SOFT_TIMEOUT;
-+		p->vm_eviction_throttle_hard = us_since_eviction_throttle <=
-+					       VM_EVICT_THROTTLE_HARD_TIMEOUT;
-+
- 		amdgpu_bo_list_for_each_entry(e, p->bo_list) {
- 			r = drm_exec_prepare_obj(&p->exec, &e->bo->tbo.base,
- 						 TTM_NUM_MOVE_FENCES + p->gang_size);
-@@ -951,47 +986,53 @@ static int amdgpu_cs_parser_bos(struct amdgpu_cs_parser *p,
- 			if (unlikely(r))
- 				goto out_free_user_pages;
- 		}
--	}
- 
--	amdgpu_bo_list_for_each_userptr_entry(e, p->bo_list) {
--		struct mm_struct *usermm;
-+		amdgpu_bo_list_for_each_userptr_entry(e, p->bo_list) {
-+			struct mm_struct *usermm;
- 
--		usermm = amdgpu_ttm_tt_get_usermm(e->bo->tbo.ttm);
--		if (usermm && usermm != current->mm) {
--			r = -EPERM;
--			goto out_free_user_pages;
--		}
--
--		if (amdgpu_ttm_tt_is_userptr(e->bo->tbo.ttm) &&
--		    e->user_invalidated) {
--			amdgpu_bo_placement_from_domain(e->bo,
--							AMDGPU_GEM_DOMAIN_CPU);
--			r = ttm_bo_validate(&e->bo->tbo, &e->bo->placement,
--					    &ctx);
--			if (r)
-+			usermm = amdgpu_ttm_tt_get_usermm(e->bo->tbo.ttm);
-+			if (usermm && usermm != current->mm) {
-+				r = -EPERM;
- 				goto out_free_user_pages;
-+			}
- 
--			amdgpu_ttm_tt_set_user_pages(e->bo->tbo.ttm,
--						     e->range);
-+			if (amdgpu_ttm_tt_is_userptr(e->bo->tbo.ttm) &&
-+			    e->user_invalidated) {
-+				amdgpu_bo_placement_from_domain(e->bo,
-+								AMDGPU_GEM_DOMAIN_CPU);
-+				r = ttm_bo_validate(&e->bo->tbo, &e->bo->placement,
-+						    &ctx);
-+				drm_exec_retry_on_contention(&p->exec);
-+				if (r)
-+					goto out_free_user_pages;
-+
-+				amdgpu_ttm_tt_set_user_pages(e->bo->tbo.ttm,
-+							     e->range);
-+			}
- 		}
--	}
- 
--	amdgpu_cs_get_threshold_for_moves(p->adev, &p->bytes_moved_threshold,
--					  &p->bytes_moved_vis_threshold);
--	p->bytes_moved = 0;
--	p->bytes_moved_vis = 0;
-+		amdgpu_cs_get_threshold_for_moves(p->adev, &p->bytes_moved_threshold,
-+						  &p->bytes_moved_vis_threshold);
-+		p->bytes_moved = 0;
-+		p->bytes_moved_vis = 0;
- 
--	r = amdgpu_vm_validate(p->adev, &fpriv->vm, NULL,
--			       amdgpu_cs_bo_validate, p);
--	if (r) {
--		drm_err(adev_to_drm(p->adev), "amdgpu_vm_validate() failed.\n");
--		goto out_free_user_pages;
--	}
--
--	drm_exec_for_each_locked_object(&p->exec, obj) {
--		r = amdgpu_cs_bo_validate(p, gem_to_amdgpu_bo(obj));
--		if (unlikely(r))
-+		r = amdgpu_vm_validate(p->adev, &fpriv->vm, NULL,
-+				       amdgpu_cs_bo_validate, p);
-+		drm_exec_retry_on_contention(&p->exec);
-+		if (r) {
-+			drm_err(adev_to_drm(p->adev), "amdgpu_vm_validate() failed.\n");
- 			goto out_free_user_pages;
-+		}
-+
-+		drm_exec_for_each_locked_object(&p->exec, obj) {
-+			r = amdgpu_cs_bo_validate(p, gem_to_amdgpu_bo(obj));
-+			drm_exec_retry_on_contention(&p->exec);
-+			if (unlikely(r))
-+				goto out_free_user_pages;
-+		}
-+
-+		amdgpu_cs_report_moved_bytes(p->adev, p->bytes_moved,
-+					     p->bytes_moved_vis);
- 	}
- 
- 	if (p->uf_bo) {
-@@ -1002,9 +1043,6 @@ static int amdgpu_cs_parser_bos(struct amdgpu_cs_parser *p,
- 		p->gang_leader->uf_addr += amdgpu_bo_gpu_offset(p->uf_bo);
- 	}
- 
--	amdgpu_cs_report_moved_bytes(p->adev, p->bytes_moved,
--				     p->bytes_moved_vis);
--
- 	for (i = 0; i < p->gang_size; ++i)
- 		amdgpu_job_set_resources(p->jobs[i], p->bo_list->gds_obj,
- 					 p->bo_list->gws_obj,
-@@ -1392,10 +1430,16 @@ static int amdgpu_cs_submit(struct amdgpu_cs_parser *p,
- /* Cleanup the parser structure */
- static void amdgpu_cs_parser_fini(struct amdgpu_cs_parser *parser)
- {
-+	struct amdgpu_fpriv *fpriv = parser->filp->driver_priv;
- 	struct amdgpu_device *adev = parser->adev;
- 	struct amdgpu_bo_list_entry *e;
- 	unsigned int i;
- 
-+	if (parser->num_unsuccessful_evicts) {
-+		WRITE_ONCE(fpriv->vm.last_evict_throttle_start_us,
-+			   ktime_to_us(ktime_get()));
-+	}
-+
- 	amdgpu_sync_free(&parser->sync);
- 	drm_exec_fini(&parser->exec);
- 
-diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_cs.h b/drivers/gpu/drm/amd/amdgpu/amdgpu_cs.h
-index 39c33ad100cb7..de3defe72a41d 100644
---- a/drivers/gpu/drm/amd/amdgpu/amdgpu_cs.h
-+++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_cs.h
-@@ -71,6 +71,9 @@ struct amdgpu_cs_parser {
- 	uint64_t			bytes_moved_vis_threshold;
- 	uint64_t			bytes_moved;
- 	uint64_t			bytes_moved_vis;
-+	uint32_t			num_unsuccessful_evicts;
-+	bool				vm_eviction_throttle_soft;
-+	bool				vm_eviction_throttle_hard;
- 
- 	/* user fence */
- 	struct amdgpu_bo		*uf_bo;
-diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_display.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_display.c
-index f5cd685424427..d94522fc7253b 100644
---- a/drivers/gpu/drm/amd/amdgpu/amdgpu_display.c
-+++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_display.c
-@@ -42,6 +42,7 @@
- #include <drm/drm_damage_helper.h>
- #include <drm/drm_drv.h>
- #include <drm/drm_edid.h>
-+#include <drm/drm_exec.h>
- #include <drm/drm_fb_helper.h>
- #include <drm/drm_gem_framebuffer_helper.h>
- #include <drm/drm_fourcc.h>
-@@ -200,6 +201,7 @@ int amdgpu_display_crtc_page_flip_target(struct drm_crtc *crtc,
- 	struct drm_gem_object *obj;
- 	struct amdgpu_flip_work *work;
- 	struct amdgpu_bo *new_abo;
-+	struct drm_exec exec;
- 	unsigned long flags;
- 	u64 tiling_flags;
- 	int i, r;
-@@ -227,20 +229,28 @@ int amdgpu_display_crtc_page_flip_target(struct drm_crtc *crtc,
- 	new_abo = gem_to_amdgpu_bo(obj);
- 
- 	/* pin the new buffer */
--	r = amdgpu_bo_reserve(new_abo, false);
--	if (unlikely(r != 0)) {
--		DRM_ERROR("failed to reserve new abo buffer before flip\n");
--		goto cleanup;
--	}
--
--	if (!adev->enable_virtual_display) {
--		new_abo->flags |= AMDGPU_GEM_CREATE_VRAM_CONTIGUOUS;
--		r = amdgpu_bo_pin(new_abo,
--				  amdgpu_display_supported_domains(adev, new_abo->flags));
-+	drm_exec_init(&exec, 0, 0);
-+	drm_exec_until_all_locked(&exec) {
-+		r = drm_exec_lock_obj(&exec, &new_abo->tbo.base);
-+		drm_exec_retry_on_contention(&exec);
- 		if (unlikely(r != 0)) {
--			DRM_ERROR("failed to pin new abo buffer before flip\n");
-+			DRM_ERROR(
-+				"failed to reserve new abo buffer before flip\n");
- 			goto unreserve;
- 		}
-+
-+		if (!adev->enable_virtual_display) {
-+			new_abo->flags |= AMDGPU_GEM_CREATE_VRAM_CONTIGUOUS;
-+			r = amdgpu_bo_pin(new_abo, &exec,
-+					  amdgpu_display_supported_domains(
-+						  adev, new_abo->flags));
-+			drm_exec_retry_on_contention(&exec);
-+			if (unlikely(r != 0)) {
-+				DRM_ERROR(
-+					"failed to pin new abo buffer before flip\n");
-+				goto unreserve;
-+			}
-+		}
- 	}
- 
- 	r = amdgpu_ttm_alloc_gart(&new_abo->tbo);
-@@ -258,7 +268,7 @@ int amdgpu_display_crtc_page_flip_target(struct drm_crtc *crtc,
- 	}
- 
- 	amdgpu_bo_get_tiling_flags(new_abo, &tiling_flags);
--	amdgpu_bo_unreserve(new_abo);
-+	drm_exec_fini(&exec);
- 
- 	if (!adev->enable_virtual_display)
- 		work->base = amdgpu_bo_gpu_offset(new_abo);
-@@ -296,7 +306,7 @@ int amdgpu_display_crtc_page_flip_target(struct drm_crtc *crtc,
- 		amdgpu_bo_unpin(new_abo);
- 
- unreserve:
--	amdgpu_bo_unreserve(new_abo);
-+	drm_exec_fini(&exec);
- 
- cleanup:
- 	amdgpu_bo_unref(&work->old_abo);
-@@ -1793,25 +1803,37 @@ int amdgpu_display_resume_helper(struct amdgpu_device *adev)
- 	struct drm_connector *connector;
- 	struct drm_connector_list_iter iter;
- 	struct drm_crtc *crtc;
-+	struct drm_exec exec;
- 	int r;
- 
- 	/* pin cursors */
- 	list_for_each_entry(crtc, &dev->mode_config.crtc_list, head) {
- 		struct amdgpu_crtc *amdgpu_crtc = to_amdgpu_crtc(crtc);
- 
--		if (amdgpu_crtc->cursor_bo && !adev->enable_virtual_display) {
--			struct amdgpu_bo *aobj = gem_to_amdgpu_bo(amdgpu_crtc->cursor_bo);
-+		if (!amdgpu_crtc->cursor_bo || adev->enable_virtual_display)
-+			continue;
-+		drm_exec_init(&exec, 0, 0);
- 
--			r = amdgpu_bo_reserve(aobj, true);
--			if (r == 0) {
--				aobj->flags |= AMDGPU_GEM_CREATE_VRAM_CONTIGUOUS;
--				r = amdgpu_bo_pin(aobj, AMDGPU_GEM_DOMAIN_VRAM);
--				if (r != 0)
--					dev_err(adev->dev, "Failed to pin cursor BO (%d)\n", r);
--				amdgpu_crtc->cursor_addr = amdgpu_bo_gpu_offset(aobj);
--				amdgpu_bo_unreserve(aobj);
--			}
-+		drm_exec_until_all_locked(&exec)
-+		{
-+			r = drm_exec_lock_obj(&exec, amdgpu_crtc->cursor_bo);
-+			drm_exec_retry_on_contention(&exec);
-+			if (r)
-+				goto err_exec;
-+
-+			struct amdgpu_bo *aobj = gem_to_amdgpu_bo(amdgpu_crtc->cursor_bo);
-+			aobj->flags |= AMDGPU_GEM_CREATE_VRAM_CONTIGUOUS;
-+			r = amdgpu_bo_pin(aobj, &exec, AMDGPU_GEM_DOMAIN_VRAM);
-+			drm_exec_retry_on_contention(&exec);
-+			if (r != 0)
-+				dev_err(adev->dev,
-+					"Failed to pin cursor BO (%d)\n", r);
-+
-+			amdgpu_crtc->cursor_addr = amdgpu_bo_gpu_offset(aobj);
- 		}
-+
-+err_exec:
-+		drm_exec_fini(&exec);
- 	}
- 
- 	drm_helper_resume_force_mode(dev);
-diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_dma_buf.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_dma_buf.c
-index b33c300e26e2e..eb96e6f5bd804 100644
---- a/drivers/gpu/drm/amd/amdgpu/amdgpu_dma_buf.c
-+++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_dma_buf.c
-@@ -144,7 +144,7 @@ static int amdgpu_dma_buf_pin(struct dma_buf_attachment *attach)
- 	if (WARN_ON(!domains))
- 		return -EINVAL;
- 
--	return amdgpu_bo_pin(bo, domains);
-+	return amdgpu_bo_pin(bo, NULL, domains);
- }
- 
- /**
-@@ -329,7 +329,8 @@ static int amdgpu_dma_buf_vmap(struct dma_buf *dma_buf, struct iosys_map *map)
- 	 * domain is not that important as long as it's mapable. Using
- 	 * GTT and VRAM should be compatible with most use cases.
- 	 */
--	ret = amdgpu_bo_pin(bo, AMDGPU_GEM_DOMAIN_GTT | AMDGPU_GEM_DOMAIN_VRAM);
-+	ret = amdgpu_bo_pin(bo, NULL,
-+			    AMDGPU_GEM_DOMAIN_GTT | AMDGPU_GEM_DOMAIN_VRAM);
- 	if (ret)
- 		return ret;
- 	ret = drm_gem_dmabuf_vmap(dma_buf, map);
 diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c
 index 1aed121f4ddb6..10d74512caa6a 100644
 --- a/drivers/gpu/drm/amd/amdgpu/amdgpu_drv.c
@@ -6843,733 +6428,6 @@ index 1aed121f4ddb6..10d74512caa6a 100644
  /**
   * DOC: vramlimit (int)
   * Restrict the total amount of VRAM in MiB for testing.  The default is 0 (Use full VRAM).
-diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_gart.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_gart.c
-index c4c21dbbbdbf8..670bce86a0509 100644
---- a/drivers/gpu/drm/amd/amdgpu/amdgpu_gart.c
-+++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_gart.c
-@@ -191,7 +191,7 @@ int amdgpu_gart_table_ram_alloc(struct amdgpu_device *adev)
- 		goto error;
- 	}
- 
--	ret = amdgpu_bo_pin(bo, AMDGPU_GEM_DOMAIN_GTT);
-+	ret = amdgpu_bo_pin(bo, NULL, AMDGPU_GEM_DOMAIN_GTT);
- 	WARN(ret, "Pinning the GART table failed");
- 	if (ret)
- 		goto error_resv;
-diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_gem.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_gem.c
-index f754a4a3a1c22..92ffd58e78819 100644
---- a/drivers/gpu/drm/amd/amdgpu/amdgpu_gem.c
-+++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_gem.c
-@@ -473,6 +473,8 @@ int amdgpu_gem_create_ioctl(struct drm_device *dev, void *data,
- 	}
- 
- 	initial_domain = (u32)(0xffffffff & args->in.domains);
-+	if (initial_domain == AMDGPU_GEM_DOMAIN_VRAM)
-+		initial_domain |= AMDGPU_GEM_DOMAIN_GTT;
- retry:
- 	r = amdgpu_gem_object_create(adev, size, args->in.alignment,
- 				     initial_domain,
-@@ -483,10 +485,6 @@ int amdgpu_gem_create_ioctl(struct drm_device *dev, void *data,
- 			goto retry;
- 		}
- 
--		if (initial_domain == AMDGPU_GEM_DOMAIN_VRAM) {
--			initial_domain |= AMDGPU_GEM_DOMAIN_GTT;
--			goto retry;
--		}
- 		DRM_DEBUG("Failed to allocate GEM object (%llu, %d, %llu, %d)\n",
- 				size, initial_domain, args->in.alignment, r);
- 	}
-@@ -1163,6 +1161,30 @@ int amdgpu_gem_op_ioctl(struct drm_device *dev, void *data,
- 		kvfree(vm_entries);
- 		break;
- 	}
-+	case AMDGPU_GEM_OP_SET_PRIORITY: {
-+		if (!amdgpu_vm_is_bo_always_valid(&fpriv->vm, robj) ||
-+		    args->value > U32_MAX) {
-+			drm_exec_fini(&exec);
-+			r = -EINVAL;
-+			break;
-+		}
-+
-+		struct amdgpu_bo_va *bo_va =
-+			amdgpu_vm_bo_find(&fpriv->vm, robj);
-+		if (!bo_va) {
-+			r = -EINVAL;
-+		} else {
-+			bo_va->priority = args->value;
-+			ttm_bo_set_bulk_move_ordered(
-+				&robj->tbo, robj->tbo.bulk_move, args->value);
-+			/* Invalidate the buffer to get it reshuffled in the soft-evicted
-+			 * list, if it's there.
-+			 */
-+			amdgpu_vm_bo_invalidate(robj, false);
-+		}
-+		drm_exec_fini(&exec);
-+		break;
-+	}
- 	default:
- 		drm_exec_fini(&exec);
- 		r = -EINVAL;
-diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_gmc.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_gmc.c
-index 5d6149ba7ab78..179c77a49000f 100644
---- a/drivers/gpu/drm/amd/amdgpu/amdgpu_gmc.c
-+++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_gmc.c
-@@ -80,7 +80,7 @@ int amdgpu_gmc_pdb0_alloc(struct amdgpu_device *adev)
- 	if (unlikely(r != 0))
- 		goto bo_reserve_failure;
- 
--	r = amdgpu_bo_pin(adev->gmc.pdb0_bo, AMDGPU_GEM_DOMAIN_VRAM);
-+	r = amdgpu_bo_pin(adev->gmc.pdb0_bo, NULL, AMDGPU_GEM_DOMAIN_VRAM);
- 	if (r)
- 		goto bo_pin_failure;
- 	r = amdgpu_bo_kmap(adev->gmc.pdb0_bo, &adev->gmc.ptr_pdb0);
-diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_object.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_object.c
-index 718937777e532..4648a5404b34a 100644
---- a/drivers/gpu/drm/amd/amdgpu/amdgpu_object.c
-+++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_object.c
-@@ -277,7 +277,7 @@ int amdgpu_bo_create_reserved(struct amdgpu_device *adev,
- 	}
- 
- 	if (free) {
--		r = amdgpu_bo_pin(*bo_ptr, domain);
-+		r = amdgpu_bo_pin(*bo_ptr, NULL, domain);
- 		if (r) {
- 			dev_err(adev->dev, "(%d) kernel bo pin failed\n", r);
- 			goto error_unreserve;
-@@ -396,7 +396,7 @@ int amdgpu_bo_create_isp_user(struct amdgpu_device *adev,
- 		return r;
- 	}
- 
--	r = amdgpu_bo_pin(*bo, domain);
-+	r = amdgpu_bo_pin(*bo, NULL, domain);
- 	if (r) {
- 		dev_err(adev->dev, "(%d) isp user bo pin failed\n", r);
- 		goto error_unreserve;
-@@ -929,10 +929,14 @@ void amdgpu_bo_unref(struct amdgpu_bo **bo)
-  * Returns:
-  * 0 for success or a negative error code on failure.
-  */
--int amdgpu_bo_pin(struct amdgpu_bo *bo, u32 domain)
-+int amdgpu_bo_pin(struct amdgpu_bo *bo, struct drm_exec *exec, u32 domain)
- {
- 	struct amdgpu_device *adev = amdgpu_ttm_adev(bo->tbo.bdev);
--	struct ttm_operation_ctx ctx = { false, false };
-+	struct ttm_operation_ctx ctx = {
-+		.interruptible = false,
-+		.no_wait_gpu = false,
-+		.exec = exec,
-+	};
- 	int r, i;
- 
- 	if (amdgpu_ttm_tt_get_usermm(bo->tbo.ttm))
-@@ -986,7 +990,8 @@ int amdgpu_bo_pin(struct amdgpu_bo *bo, u32 domain)
- 
- 	r = ttm_bo_validate(&bo->tbo, &bo->placement, &ctx);
- 	if (unlikely(r)) {
--		dev_err(adev->dev, "%p pin failed\n", bo);
-+		if (r != -EDEADLOCK || !exec)
-+			dev_err(adev->dev, "%p pin failed\n", bo);
- 		goto error;
- 	}
- 
-@@ -1275,7 +1280,10 @@ void amdgpu_bo_move_notify(struct ttm_buffer_object *bo,
- 		return;
- 
- 	abo = ttm_to_amdgpu_bo(bo);
--	amdgpu_vm_bo_move(abo, new_mem, evict);
-+	bool soft_evict = new_mem &&
-+			  amdgpu_mem_type_to_domain(new_mem->mem_type) &
-+				  abo->allowed_domains;
-+	amdgpu_vm_bo_move(abo, new_mem, evict, soft_evict);
- 
- 	amdgpu_bo_kunmap(abo);
- 
-diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_object.h b/drivers/gpu/drm/amd/amdgpu/amdgpu_object.h
-index 4d68732d62235..98afd1804702b 100644
---- a/drivers/gpu/drm/amd/amdgpu/amdgpu_object.h
-+++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_object.h
-@@ -36,6 +36,8 @@
- #include <linux/mmu_notifier.h>
- #endif
- 
-+struct drm_exec;
-+
- #define AMDGPU_BO_INVALID_OFFSET	LONG_MAX
- #define AMDGPU_BO_MAX_PLACEMENTS	3
- 
-@@ -79,6 +81,13 @@ struct amdgpu_bo_va {
- 	/* protected by bo being reserved */
- 	unsigned			ref_count;
- 
-+	/* For VM_ALWAYS_VALID buffers - eviction priority.
-+	 * Opaque value passed by userspace. May only be compared to
-+	 * other priority values from VM_ALWAYS_VALID buffers of the
-+	 * same VM. UINT32_MAX means unset.
-+	 */
-+	uint32_t			priority;
-+
- 	/* all other members protected by the VM PD being reserved */
- 	struct dma_fence	        *last_pt_update;
- 
-@@ -283,7 +292,7 @@ void *amdgpu_bo_kptr(struct amdgpu_bo *bo);
- void amdgpu_bo_kunmap(struct amdgpu_bo *bo);
- struct amdgpu_bo *amdgpu_bo_ref(struct amdgpu_bo *bo);
- void amdgpu_bo_unref(struct amdgpu_bo **bo);
--int amdgpu_bo_pin(struct amdgpu_bo *bo, u32 domain);
-+int amdgpu_bo_pin(struct amdgpu_bo *bo, struct drm_exec *exec, u32 domain);
- void amdgpu_bo_unpin(struct amdgpu_bo *bo);
- int amdgpu_bo_init(struct amdgpu_device *adev);
- void amdgpu_bo_fini(struct amdgpu_device *adev);
-diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_ttm.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_ttm.c
-index eaa86e32912e5..715208684faa5 100644
---- a/drivers/gpu/drm/amd/amdgpu/amdgpu_ttm.c
-+++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_ttm.c
-@@ -1496,10 +1496,18 @@ static bool amdgpu_ttm_bo_eviction_valuable(struct ttm_buffer_object *bo,
- 	if (bo->resource->mem_type == TTM_PL_SYSTEM)
- 		return true;
- 
--	if (bo->type == ttm_bo_type_kernel &&
--	    !amdgpu_vm_evictable(ttm_to_amdgpu_bo(bo)))
-+	/*
-+	 * XXX: Trying to evict page-table BOs is super scuffed and can lead
-+	 * to spurious lost devices. This really needs to be reworked!
-+	 * For the time being, just don't try.
-+	 */
-+	if (bo->type == ttm_bo_type_kernel)
- 		return false;
- 
-+	/*if (bo->type == ttm_bo_type_kernel &&
-+	    !amdgpu_vm_evictable(ttm_to_amdgpu_bo(bo)))
-+		return false;*/
-+
- 	/* If bo is a KFD BO, check if the bo belongs to the current process.
- 	 * If true, then return false as any KFD process needs all its BOs to
- 	 * be resident to run successfully
-diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_userq.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_userq.c
-index b18d787206562..b940775b2ee20 100644
---- a/drivers/gpu/drm/amd/amdgpu/amdgpu_userq.c
-+++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_userq.c
-@@ -457,7 +457,7 @@ amdgpu_userq_get_doorbell_index(struct amdgpu_userq_mgr *uq_mgr,
- 	}
- 
- 	/* Pin the BO before generating the index, unpin in queue destroy */
--	r = amdgpu_bo_pin(db_obj->obj, AMDGPU_GEM_DOMAIN_DOORBELL);
-+	r = amdgpu_bo_pin(db_obj->obj, NULL, AMDGPU_GEM_DOMAIN_DOORBELL);
- 	if (r) {
- 		drm_file_err(uq_mgr->file, "[Usermode queues] Failed to pin doorbell object\n");
- 		goto unresv_bo;
-diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_uvd.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_uvd.c
-index de3dbc95e376c..21f7426225030 100644
---- a/drivers/gpu/drm/amd/amdgpu/amdgpu_uvd.c
-+++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_uvd.c
-@@ -162,7 +162,7 @@ static int amdgpu_uvd_create_msg_bo_helper(struct amdgpu_device *adev,
- 	r = ttm_bo_validate(&bo->tbo, &bo->placement, &ctx);
- 	if (r)
- 		goto err;
--	r = amdgpu_bo_pin(bo, AMDGPU_GEM_DOMAIN_VRAM);
-+	r = amdgpu_bo_pin(bo, NULL, AMDGPU_GEM_DOMAIN_VRAM);
- 	if (r)
- 		goto err_pin;
- 	r = amdgpu_bo_kmap(bo, &addr);
-diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_vkms.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_vkms.c
-index 170adaf7e76ab..d922179209ba1 100644
---- a/drivers/gpu/drm/amd/amdgpu/amdgpu_vkms.c
-+++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_vkms.c
-@@ -226,7 +226,7 @@ static int amdgpu_vkms_prepare_fb(struct drm_plane *plane,
- 		domain = AMDGPU_GEM_DOMAIN_VRAM;
- 
- 	rbo->flags |= AMDGPU_GEM_CREATE_VRAM_CONTIGUOUS;
--	r = amdgpu_bo_pin(rbo, domain);
-+	r = amdgpu_bo_pin(rbo, NULL, domain);
- 	if (unlikely(r != 0)) {
- 		if (r != -ERESTARTSYS)
- 			DRM_ERROR("Failed to pin framebuffer with error %d\n", r);
-diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_vm.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_vm.c
-index 1baad7624f1f9..98b1ce3304f87 100644
---- a/drivers/gpu/drm/amd/amdgpu/amdgpu_vm.c
-+++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_vm.c
-@@ -142,6 +142,7 @@ static void amdgpu_vm_assert_locked(struct amdgpu_vm *vm)
- static void amdgpu_vm_bo_status_init(struct amdgpu_vm_bo_status *lists)
- {
- 	INIT_LIST_HEAD(&lists->evicted);
-+	INIT_LIST_HEAD(&lists->soft_evicted);
- 	INIT_LIST_HEAD(&lists->needs_update);
- 	INIT_LIST_HEAD(&lists->idle);
- }
-@@ -193,23 +194,77 @@ bool amdgpu_vm_is_bo_always_valid(struct amdgpu_vm *vm, struct amdgpu_bo *bo)
- 	return bo && bo->tbo.base.resv == vm->root.bo->tbo.base.resv;
- }
- 
-+static void amdgpu_vm_bo_insert_soft_evicted(struct amdgpu_vm_bo_status *lists,
-+					     struct amdgpu_vm_bo_base *vm_bo)
-+{
-+	struct amdgpu_vm_bo_base *insert_point;
-+
-+	struct amdgpu_bo_va *bo_va =
-+		container_of(vm_bo, struct amdgpu_bo_va, base);
-+
-+	list_for_each_entry(insert_point, &lists->soft_evicted, vm_status) {
-+		struct amdgpu_bo_va *insert_va =
-+			container_of(insert_point, struct amdgpu_bo_va, base);
-+		if (insert_va->priority < bo_va->priority)
-+			return list_move_tail(&vm_bo->vm_status,
-+					      &insert_point->vm_status);
-+	}
-+
-+	list_move_tail(&vm_bo->vm_status, &lists->soft_evicted);
-+}
-+
-+
- /**
-  * amdgpu_vm_bo_evicted - vm_bo is evicted
-  *
-  * @vm_bo: vm_bo which is evicted
-+ * @soft: Whether the bo is "soft evicted", i.e. it can also stay in its current
-+ * location
-  *
-  * State for vm_bo objects meaning the underlying BO was evicted and need to
-  * move in place again.
-  */
--static void amdgpu_vm_bo_evicted(struct amdgpu_vm_bo_base *vm_bo)
-+static void amdgpu_vm_bo_evicted(struct amdgpu_vm_bo_base *vm_bo, bool soft)
- {
- 	struct amdgpu_vm_bo_status *lists;
- 
- 	lists = amdgpu_vm_bo_lock_lists(vm_bo);
- 	vm_bo->moved = true;
--	list_move(&vm_bo->vm_status, &lists->evicted);
-+	if (soft)
-+		amdgpu_vm_bo_insert_soft_evicted(lists, vm_bo);
-+	else
-+		list_move_tail(&vm_bo->vm_status, &lists->evicted);
- 	amdgpu_vm_bo_unlock_lists(vm_bo);
- }
-+
-+/**
-+ * amdgpu_vm_bo_needs_eviction - check if a vm_bo is in a suboptimal place
-+ *
-+ * @adev: device the vm_bo belongs to
-+ * @base: vm_bo to possibly evict
-+ *
-+ * Returns whether an eviction should take place.
-+ */
-+static bool amdgpu_vm_bo_needs_eviction(struct amdgpu_device *adev,
-+					struct amdgpu_vm_bo_base *vm_bo)
-+{
-+	struct amdgpu_bo *bo = vm_bo->bo;
-+	uint32_t preferred_domains;
-+	uint32_t current_domain;
-+
-+	/* For VRAM|GTT BOs, VRAM is actually preferred and we should try moving
-+	 * it back into VRAM if it ends up in GTT.
-+	 */
-+	preferred_domains = bo->preferred_domains;
-+	if (preferred_domains == (AMDGPU_GEM_DOMAIN_VRAM | AMDGPU_GEM_DOMAIN_GTT) &&
-+	    !(adev->flags & AMD_IS_APU))
-+		preferred_domains = AMDGPU_GEM_DOMAIN_VRAM;
-+
-+	current_domain = amdgpu_mem_type_to_domain(bo->tbo.resource->mem_type);
-+
-+	return !(preferred_domains & current_domain);
-+}
-+
- /**
-  * amdgpu_vm_bo_needs_update - vm_bo needs pagetable update
-  *
-@@ -395,6 +450,7 @@ void amdgpu_vm_update_stats(struct amdgpu_vm_bo_base *base,
- /**
-  * amdgpu_vm_bo_base_init - Adds bo to the list of bos associated with the vm
-  *
-+ * @adev: the amdgpu_device the vm belongs to
-  * @base: base structure for tracking BO usage in a VM
-  * @vm: vm to which bo is to be added
-  * @bo: amdgpu buffer object
-@@ -402,9 +458,12 @@ void amdgpu_vm_update_stats(struct amdgpu_vm_bo_base *base,
-  * Initialize a bo_va_base structure and add it to the appropriate lists
-  *
-  */
--void amdgpu_vm_bo_base_init(struct amdgpu_vm_bo_base *base,
-+void amdgpu_vm_bo_base_init(struct amdgpu_device *adev,
-+			    struct amdgpu_vm_bo_base *base,
- 			    struct amdgpu_vm *vm, struct amdgpu_bo *bo)
- {
-+	uint32_t current_domain;
-+
- 	base->vm = vm;
- 	base->bo = bo;
- 	base->next = NULL;
-@@ -427,7 +486,9 @@ void amdgpu_vm_bo_base_init(struct amdgpu_vm_bo_base *base,
- 		return;
- 	}
- 
--	ttm_bo_set_bulk_move(&bo->tbo, &vm->lru_bulk_move);
-+	ttm_bo_set_bulk_move_ordered(&bo->tbo, &vm->lru_bulk_move, U32_MAX);
-+
-+	current_domain = amdgpu_mem_type_to_domain(bo->tbo.resource->mem_type);
- 
- 	/*
- 	 * When a per VM isn't in the desired domain put it into the evicted
-@@ -437,7 +498,7 @@ void amdgpu_vm_bo_base_init(struct amdgpu_vm_bo_base *base,
- 	    amdgpu_mem_type_to_domain(bo->tbo.resource->mem_type))
- 		amdgpu_vm_bo_needs_update(base);
- 	else
--		amdgpu_vm_bo_evicted(base);
-+		amdgpu_vm_bo_evicted(base, bo->preferred_domains & current_domain);
- }
- 
- /**
-@@ -658,6 +719,26 @@ int amdgpu_vm_validate(struct amdgpu_device *adev, struct amdgpu_vm *vm,
- 	}
- 	spin_unlock(&vm->individual_lock);
- 
-+	list_for_each_entry_safe(bo_base, tmp, &vm->always_valid.soft_evicted,
-+				 vm_status) {
-+		r = validate(param, bo_base->bo);
-+		if (r)
-+			return r;
-+
-+		bo_base->moved = true;
-+		amdgpu_vm_bo_needs_update(bo_base);
-+
-+		/*
-+		 * If the vm_bo is still in a suboptimal place after
-+		 * validate(), we failed to find enough space in the
-+		 * optimal place, so back off for now and retry on the
-+		 * next submission.
-+		 */
-+		if (amdgpu_vm_bo_needs_eviction(adev, bo_base))
-+			goto out;
-+
-+	}
-+out:
- 	return 0;
- }
- 
-@@ -1268,6 +1349,7 @@ int amdgpu_vm_bo_update(struct amdgpu_device *adev, struct amdgpu_bo_va *bo_va,
- 	struct dma_fence **last_update;
- 	dma_addr_t *pages_addr = NULL;
- 	struct ttm_resource *mem;
-+	uint32_t current_domain;
- 	struct amdgpu_sync sync;
- 	bool flush_tlb = clear;
- 	uint64_t vram_base;
-@@ -1381,10 +1463,12 @@ int amdgpu_vm_bo_update(struct amdgpu_device *adev, struct amdgpu_bo_va *bo_va,
- 	 * next command submission.
- 	 */
- 	if (amdgpu_vm_is_bo_always_valid(vm, bo)) {
--		if (bo->tbo.resource &&
--		    !(bo->preferred_domains &
--		      amdgpu_mem_type_to_domain(bo->tbo.resource->mem_type)))
--			amdgpu_vm_bo_evicted(&bo_va->base);
-+		current_domain = amdgpu_mem_type_to_domain(
-+					bo->tbo.resource->mem_type);
-+		if (amdgpu_vm_bo_needs_eviction(adev, &bo_va->base))
-+			amdgpu_vm_bo_evicted(&bo_va->base,
-+					     bo->preferred_domains &
-+					     current_domain);
- 		else
- 			amdgpu_vm_bo_idle(&bo_va->base);
- 	} else {
-@@ -1664,7 +1748,7 @@ int amdgpu_vm_handle_moved(struct amdgpu_device *adev,
- 		    drm_gem_is_imported(&bo_va->base.bo->tbo.base) &&
- 		    (!bo_va->base.bo->tbo.resource ||
- 		     bo_va->base.bo->tbo.resource->mem_type == TTM_PL_SYSTEM))
--			amdgpu_vm_bo_evicted(&bo_va->base);
-+			amdgpu_vm_bo_evicted(&bo_va->base, false);
- 
- 		spin_lock(&vm->individual_lock);
- 	}
-@@ -1745,10 +1829,11 @@ struct amdgpu_bo_va *amdgpu_vm_bo_add(struct amdgpu_device *adev,
- 	if (bo_va == NULL) {
- 		return NULL;
- 	}
--	amdgpu_vm_bo_base_init(&bo_va->base, vm, bo);
-+	amdgpu_vm_bo_base_init(adev, &bo_va->base, vm, bo);
- 
- 	bo_va->ref_count = 1;
- 	bo_va->last_pt_update = dma_fence_get_stub();
-+	bo_va->priority = U32_MAX;
- 	INIT_LIST_HEAD(&bo_va->valids);
- 	INIT_LIST_HEAD(&bo_va->invalids);
- 
-@@ -2282,7 +2367,7 @@ void amdgpu_vm_bo_invalidate(struct amdgpu_bo *bo, bool evicted)
- 		struct amdgpu_vm *vm = bo_base->vm;
- 
- 		if (evicted && amdgpu_vm_is_bo_always_valid(vm, bo)) {
--			amdgpu_vm_bo_evicted(bo_base);
-+			amdgpu_vm_bo_evicted(bo_base, false);
- 			continue;
- 		}
- 
-@@ -2303,7 +2388,7 @@ void amdgpu_vm_bo_invalidate(struct amdgpu_bo *bo, bool evicted)
-  * Update the memory stats for the new placement and mark @bo as invalid.
-  */
- void amdgpu_vm_bo_move(struct amdgpu_bo *bo, struct ttm_resource *new_mem,
--		       bool evicted)
-+		       bool evicted, bool soft_evicted)
- {
- 	struct amdgpu_vm_bo_base *bo_base;
- 
-@@ -2316,7 +2401,7 @@ void amdgpu_vm_bo_move(struct amdgpu_bo *bo, struct ttm_resource *new_mem,
- 		spin_unlock(&vm->stats_lock);
- 	}
- 
--	amdgpu_vm_bo_invalidate(bo, evicted);
-+	amdgpu_vm_bo_invalidate(bo, evicted && !soft_evicted);
- }
- 
- /**
-@@ -2585,7 +2670,7 @@ int amdgpu_vm_init(struct amdgpu_device *adev, struct amdgpu_vm *vm,
- 	if (r)
- 		return r;
- 
--	ttm_lru_bulk_move_init(&vm->lru_bulk_move);
-+	ttm_lru_bulk_move_init(&vm->lru_bulk_move, true);
- 
- 	vm->is_compute_context = false;
- 	vm->need_tlb_fence = amdgpu_userq_enabled(&adev->ddev);
-@@ -2593,6 +2678,8 @@ int amdgpu_vm_init(struct amdgpu_device *adev, struct amdgpu_vm *vm,
- 	vm->use_cpu_for_update = !!(adev->vm_manager.vm_update_mode &
- 				    AMDGPU_VM_USE_CPU_FOR_GFX);
- 
-+	vm->last_evict_throttle_start_us = 0;
-+
- 	dev_dbg(adev->dev, "VM update mode is %s\n",
- 		vm->use_cpu_for_update ? "CPU" : "SDMA");
- 	WARN_ONCE((vm->use_cpu_for_update &&
-@@ -2625,7 +2712,7 @@ int amdgpu_vm_init(struct amdgpu_device *adev, struct amdgpu_vm *vm,
- 		goto error_free_delayed;
- 	}
- 
--	amdgpu_vm_bo_base_init(&vm->root, vm, root_bo);
-+	amdgpu_vm_bo_base_init(adev, &vm->root, vm, root_bo);
- 	r = dma_resv_reserve_fences(root_bo->tbo.base.resv, 1);
- 	if (r)
- 		goto error_free_root;
-diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_vm.h b/drivers/gpu/drm/amd/amdgpu/amdgpu_vm.h
-index 5822836fa4a30..6824be050482f 100644
---- a/drivers/gpu/drm/amd/amdgpu/amdgpu_vm.h
-+++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_vm.h
-@@ -227,6 +227,12 @@ struct amdgpu_vm_bo_status {
- 	/* BOs evicted which need to move into place again */
- 	struct list_head		evicted;
- 
-+	/*
-+	 * BOs that are not in the optimal place but don't strictly
-+	 * require being moved.
-+	 */
-+	struct list_head	soft_evicted;
-+
- 	/* BOs whose mappings changed but PDs/PTs haven't been updated */
- 	struct list_head		needs_update;
- 
-@@ -352,6 +358,11 @@ struct amdgpu_mem_stats {
- 	uint64_t evicted;
- };
- 
-+/* TODO: Make these module parameters? */
-+#define VM_EVICT_THROTTLE_SOFT_ALLOWED_DEADLOCKS 4
-+#define VM_EVICT_THROTTLE_SOFT_TIMEOUT 200000
-+#define VM_EVICT_THROTTLE_HARD_TIMEOUT 50000
-+
- struct amdgpu_vm {
- 	/* tree of virtual addresses mapped */
- 	struct rb_root_cached	va;
-@@ -369,6 +380,8 @@ struct amdgpu_vm {
- 
- 	/* BO's belonging to PD/PT which are internal to the kernel. */
- 	struct amdgpu_vm_bo_status	kernel;
-+	/* Timestamp for tracking when to throttle VM allocations. */
-+	u64			last_evict_throttle_start_us;
- 
- 	/*
- 	 * BOs allocated by userspace where the dma_resv is shared with the
-@@ -528,7 +541,8 @@ int amdgpu_vm_flush_compute_tlb(struct amdgpu_device *adev,
- 				struct amdgpu_vm *vm,
- 				uint32_t flush_type,
- 				uint32_t xcc_mask);
--void amdgpu_vm_bo_base_init(struct amdgpu_vm_bo_base *base,
-+void amdgpu_vm_bo_base_init(struct amdgpu_device *adev,
-+			    struct amdgpu_vm_bo_base *base,
- 			    struct amdgpu_vm *vm, struct amdgpu_bo *bo);
- int amdgpu_vm_update_range(struct amdgpu_device *adev, struct amdgpu_vm *vm,
- 			   bool immediate, bool unlocked, bool flush_tlb,
-@@ -546,7 +560,7 @@ void amdgpu_vm_update_stats(struct amdgpu_vm_bo_base *base,
- 			    struct ttm_resource *new_res, int sign);
- void amdgpu_vm_bo_update_shared(struct amdgpu_bo *bo);
- void amdgpu_vm_bo_move(struct amdgpu_bo *bo, struct ttm_resource *new_mem,
--		       bool evicted);
-+		       bool evicted, bool soft_evicted);
- uint64_t amdgpu_vm_map_gart(const dma_addr_t *pages_addr, uint64_t addr);
- struct amdgpu_bo_va *amdgpu_vm_bo_find(struct amdgpu_vm *vm,
- 				       struct amdgpu_bo *bo);
-diff --git a/drivers/gpu/drm/amd/amdgpu/amdgpu_vm_pt.c b/drivers/gpu/drm/amd/amdgpu/amdgpu_vm_pt.c
-index e43a60d098082..ac8b63d1b3f03 100644
---- a/drivers/gpu/drm/amd/amdgpu/amdgpu_vm_pt.c
-+++ b/drivers/gpu/drm/amd/amdgpu/amdgpu_vm_pt.c
-@@ -518,7 +518,7 @@ static int amdgpu_vm_pt_alloc(struct amdgpu_device *adev,
- 	 */
- 	pt_bo = &pt->bo;
- 	pt_bo->parent = amdgpu_bo_ref(cursor->parent->bo);
--	amdgpu_vm_bo_base_init(entry, vm, pt_bo);
-+	amdgpu_vm_bo_base_init(adev, entry, vm, pt_bo);
- 	r = amdgpu_vm_pt_clear(adev, vm, pt, immediate);
- 	if (r)
- 		goto error_free_pt;
-diff --git a/drivers/gpu/drm/amd/amdgpu/dce_v10_0.c b/drivers/gpu/drm/amd/amdgpu/dce_v10_0.c
-index c8f465158e711..1fc1516999f89 100644
---- a/drivers/gpu/drm/amd/amdgpu/dce_v10_0.c
-+++ b/drivers/gpu/drm/amd/amdgpu/dce_v10_0.c
-@@ -22,6 +22,7 @@
-  */
- 
- #include <drm/drm_edid.h>
-+#include <drm/drm_exec.h>
- #include <drm/drm_fourcc.h>
- #include <drm/drm_modeset_helper.h>
- #include <drm/drm_modeset_helper_vtables.h>
-@@ -1846,6 +1847,7 @@ static int dce_v10_0_crtc_do_set_base(struct drm_crtc *crtc,
- 	struct drm_framebuffer *target_fb;
- 	struct drm_gem_object *obj;
- 	struct amdgpu_bo *abo;
-+	struct drm_exec exec;
- 	uint64_t fb_location, tiling_flags;
- 	uint32_t fb_format, fb_pitch_pixels;
- 	u32 fb_swap = REG_SET_FIELD(0, GRPH_SWAP_CNTL, GRPH_ENDIAN_SWAP, ENDIAN_NONE);
-@@ -1867,20 +1869,31 @@ static int dce_v10_0_crtc_do_set_base(struct drm_crtc *crtc,
- 	 */
- 	obj = target_fb->obj[0];
- 	abo = gem_to_amdgpu_bo(obj);
--	r = amdgpu_bo_reserve(abo, false);
--	if (unlikely(r != 0))
--		return r;
- 
- 	abo->flags |= AMDGPU_GEM_CREATE_VRAM_CONTIGUOUS;
--	r = amdgpu_bo_pin(abo, AMDGPU_GEM_DOMAIN_VRAM);
--	if (unlikely(r != 0)) {
--		amdgpu_bo_unreserve(abo);
--		return -EINVAL;
-+
-+	drm_exec_init(&exec, 0, 0);
-+
-+	drm_exec_until_all_locked(&exec) {
-+		r = drm_exec_lock_obj(&exec, obj);
-+		drm_exec_retry_on_contention(&exec);
-+		if (unlikely(r != 0)) {
-+			drm_exec_fini(&exec);
-+			return r;
-+		}
-+
-+		abo->flags |= AMDGPU_GEM_CREATE_VRAM_CONTIGUOUS;
-+		r = amdgpu_bo_pin(abo, &exec, AMDGPU_GEM_DOMAIN_VRAM);
-+		drm_exec_retry_on_contention(&exec);
-+		if (unlikely(r != 0)) {
-+			drm_exec_fini(&exec);
-+			return -EINVAL;
-+		}
- 	}
- 	fb_location = amdgpu_bo_gpu_offset(abo);
- 
- 	amdgpu_bo_get_tiling_flags(abo, &tiling_flags);
--	amdgpu_bo_unreserve(abo);
-+	drm_exec_fini(&exec);
- 
- 	pipe_config = AMDGPU_TILING_GET(tiling_flags, PIPE_CONFIG);
- 
-@@ -2363,6 +2376,7 @@ static int dce_v10_0_crtc_cursor_set2(struct drm_crtc *crtc,
- 	struct amdgpu_crtc *amdgpu_crtc = to_amdgpu_crtc(crtc);
- 	struct drm_gem_object *obj;
- 	struct amdgpu_bo *aobj;
-+	struct drm_exec exec;
- 	int ret;
- 
- 	if (!handle) {
-@@ -2385,20 +2399,28 @@ static int dce_v10_0_crtc_cursor_set2(struct drm_crtc *crtc,
- 	}
- 
- 	aobj = gem_to_amdgpu_bo(obj);
--	ret = amdgpu_bo_reserve(aobj, false);
--	if (ret != 0) {
--		drm_gem_object_put(obj);
--		return ret;
--	}
- 
--	aobj->flags |= AMDGPU_GEM_CREATE_VRAM_CONTIGUOUS;
--	ret = amdgpu_bo_pin(aobj, AMDGPU_GEM_DOMAIN_VRAM);
--	amdgpu_bo_unreserve(aobj);
--	if (ret) {
--		DRM_ERROR("Failed to pin new cursor BO (%d)\n", ret);
--		drm_gem_object_put(obj);
--		return ret;
-+	drm_exec_init(&exec, 0, 0);
-+	drm_exec_until_all_locked(&exec) {
-+		ret = drm_exec_lock_obj(&exec, obj);
-+		drm_exec_retry_on_contention(&exec);
-+		if (unlikely(ret != 0)) {
-+			drm_exec_fini(&exec);
-+			drm_gem_object_put(obj);
-+			return ret;
-+		}
-+
-+		aobj->flags |= AMDGPU_GEM_CREATE_VRAM_CONTIGUOUS;
-+		ret = amdgpu_bo_pin(aobj, &exec, AMDGPU_GEM_DOMAIN_VRAM);
-+		drm_exec_retry_on_contention(&exec);
-+		if (unlikely(ret != 0)) {
-+			DRM_ERROR("Failed to pin new cursor BO (%d)\n", ret);
-+			drm_exec_fini(&exec);
-+			drm_gem_object_put(obj);
-+			return ret;
-+		}
- 	}
-+	drm_exec_fini(&exec);
- 	amdgpu_crtc->cursor_addr = amdgpu_bo_gpu_offset(aobj);
- 
- 	dce_v10_0_lock_cursor(crtc, true);
-diff --git a/drivers/gpu/drm/amd/amdgpu/dce_v6_0.c b/drivers/gpu/drm/amd/amdgpu/dce_v6_0.c
-index 58d0da5c2a74f..5316808dd15a9 100644
---- a/drivers/gpu/drm/amd/amdgpu/dce_v6_0.c
-+++ b/drivers/gpu/drm/amd/amdgpu/dce_v6_0.c
-@@ -1909,7 +1909,7 @@ static int dce_v6_0_crtc_do_set_base(struct drm_crtc *crtc,
- 		return r;
- 
- 	abo->flags |= AMDGPU_GEM_CREATE_VRAM_CONTIGUOUS;
--	r = amdgpu_bo_pin(abo, AMDGPU_GEM_DOMAIN_VRAM);
-+	r = amdgpu_bo_pin(abo, NULL, AMDGPU_GEM_DOMAIN_VRAM);
- 	if (unlikely(r != 0)) {
- 		amdgpu_bo_unreserve(abo);
- 		return -EINVAL;
-@@ -2365,7 +2365,7 @@ static int dce_v6_0_crtc_cursor_set2(struct drm_crtc *crtc,
- 	}
- 
- 	aobj->flags |= AMDGPU_GEM_CREATE_VRAM_CONTIGUOUS;
--	ret = amdgpu_bo_pin(aobj, AMDGPU_GEM_DOMAIN_VRAM);
-+	ret = amdgpu_bo_pin(aobj, NULL, AMDGPU_GEM_DOMAIN_VRAM);
- 	amdgpu_bo_unreserve(aobj);
- 	if (ret) {
- 		DRM_ERROR("Failed to pin new cursor BO (%d)\n", ret);
-diff --git a/drivers/gpu/drm/amd/amdgpu/dce_v8_0.c b/drivers/gpu/drm/amd/amdgpu/dce_v8_0.c
-index 6d19f6d94d252..d4ae6fb50a1bf 100644
---- a/drivers/gpu/drm/amd/amdgpu/dce_v8_0.c
-+++ b/drivers/gpu/drm/amd/amdgpu/dce_v8_0.c
-@@ -1819,7 +1819,7 @@ static int dce_v8_0_crtc_do_set_base(struct drm_crtc *crtc,
- 		return r;
- 
- 	abo->flags |= AMDGPU_GEM_CREATE_VRAM_CONTIGUOUS;
--	r = amdgpu_bo_pin(abo, AMDGPU_GEM_DOMAIN_VRAM);
-+	r = amdgpu_bo_pin(abo, NULL, AMDGPU_GEM_DOMAIN_VRAM);
- 	if (unlikely(r != 0)) {
- 		amdgpu_bo_unreserve(abo);
- 		return -EINVAL;
-@@ -2311,7 +2311,7 @@ static int dce_v8_0_crtc_cursor_set2(struct drm_crtc *crtc,
- 	}
- 
- 	aobj->flags |= AMDGPU_GEM_CREATE_VRAM_CONTIGUOUS;
--	ret = amdgpu_bo_pin(aobj, AMDGPU_GEM_DOMAIN_VRAM);
-+	ret = amdgpu_bo_pin(aobj, NULL, AMDGPU_GEM_DOMAIN_VRAM);
- 	amdgpu_bo_unreserve(aobj);
- 	if (ret) {
- 		DRM_ERROR("Failed to pin new cursor BO (%d)\n", ret);
 diff --git a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
 index 941c1a3128249..9320e49e44289 100644
 --- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm.c
@@ -7751,169 +6609,6 @@ index 6be7f6edd0b29..41aa8f9bb152b 100644
  	default:
  		return;
  	}
-diff --git a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_plane.c b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_plane.c
-index c7f8e08feaf4b..a58534fcd3cf6 100644
---- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_plane.c
-+++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_plane.c
-@@ -26,6 +26,7 @@
- 
- #include <drm/drm_atomic_helper.h>
- #include <drm/drm_blend.h>
-+#include <drm/drm_exec.h>
- #include "drm/drm_framebuffer.h"
- #include <drm/drm_gem_atomic_helper.h>
- #include <drm/drm_plane_helper.h>
-@@ -930,6 +931,7 @@ static int amdgpu_dm_plane_helper_prepare_fb(struct drm_plane *plane,
- 	struct drm_gem_object *obj;
- 	struct amdgpu_device *adev;
- 	struct amdgpu_bo *rbo;
-+	struct drm_exec exec;
- 	struct dm_plane_state *dm_plane_state_new, *dm_plane_state_old;
- 	uint32_t domain;
- 	int r;
-@@ -948,27 +950,31 @@ static int amdgpu_dm_plane_helper_prepare_fb(struct drm_plane *plane,
- 
- 	rbo = gem_to_amdgpu_bo(obj);
- 	adev = amdgpu_ttm_adev(rbo->tbo.bdev);
--	r = amdgpu_bo_reserve(rbo, true);
--	if (r) {
--		drm_err(adev_to_drm(adev), "fail to reserve bo (%d)\n", r);
--		return r;
--	}
- 
--	r = dma_resv_reserve_fences(rbo->tbo.base.resv, TTM_NUM_MOVE_FENCES);
--	if (r)
--		goto error_unlock;
-+	drm_exec_init(&exec, 0, 0);
-+	drm_exec_until_all_locked(&exec)
-+	{
-+		r = drm_exec_prepare_obj(&exec, obj, TTM_NUM_MOVE_FENCES);
-+		drm_exec_retry_on_contention(&exec);
-+		if (r)
-+			goto error_unlock;
- 
--	if (plane->type != DRM_PLANE_TYPE_CURSOR)
--		domain = amdgpu_display_supported_domains(adev, rbo->flags);
--	else
--		domain = AMDGPU_GEM_DOMAIN_VRAM;
-+		if (plane->type != DRM_PLANE_TYPE_CURSOR)
-+			domain = amdgpu_display_supported_domains(adev,
-+								  rbo->flags);
-+		else
-+			domain = AMDGPU_GEM_DOMAIN_VRAM;
- 
--	rbo->flags |= AMDGPU_GEM_CREATE_VRAM_CONTIGUOUS;
--	r = amdgpu_bo_pin(rbo, domain);
--	if (unlikely(r != 0)) {
--		if (r != -ERESTARTSYS)
--			DRM_ERROR("Failed to pin framebuffer with error %d\n", r);
--		goto error_unlock;
-+		rbo->flags |= AMDGPU_GEM_CREATE_VRAM_CONTIGUOUS;
-+		r = amdgpu_bo_pin(rbo, &exec, domain);
-+		drm_exec_retry_on_contention(&exec);
-+		if (unlikely(r != 0)) {
-+			if (r != -ERESTARTSYS)
-+				DRM_ERROR(
-+					"Failed to pin framebuffer with error %d\n",
-+					r);
-+			goto error_unlock;
-+		}
- 	}
- 
- 	r = amdgpu_ttm_alloc_gart(&rbo->tbo);
-@@ -981,7 +987,7 @@ static int amdgpu_dm_plane_helper_prepare_fb(struct drm_plane *plane,
- 	if (unlikely(r != 0))
- 		goto error_unpin;
- 
--	amdgpu_bo_unreserve(rbo);
-+	drm_exec_fini(&exec);
- 
- 	afb->address = amdgpu_bo_gpu_offset(rbo);
- 
-@@ -1017,7 +1023,7 @@ static int amdgpu_dm_plane_helper_prepare_fb(struct drm_plane *plane,
- 	amdgpu_bo_unpin(rbo);
- 
- error_unlock:
--	amdgpu_bo_unreserve(rbo);
-+	drm_exec_fini(&exec);
- 	return r;
- }
- 
-diff --git a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_wb.c b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_wb.c
-index 110f0173eee67..83f49ffe5a2b2 100644
---- a/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_wb.c
-+++ b/drivers/gpu/drm/amd/display/amdgpu_dm/amdgpu_dm_wb.c
-@@ -33,6 +33,7 @@
- #include "dc.h"
- 
- #include <drm/drm_edid.h>
-+#include <drm/drm_exec.h>
- #include <drm/drm_atomic_state_helper.h>
- #include <drm/drm_modeset_helper_vtables.h>
- 
-@@ -87,6 +88,7 @@ static int amdgpu_dm_wb_prepare_job(struct drm_writeback_connector *wb_connector
- 	struct drm_gem_object *obj;
- 	struct amdgpu_device *adev;
- 	struct amdgpu_bo *rbo;
-+	struct drm_exec exec;
- 	uint32_t domain;
- 	int r;
- 
-@@ -100,24 +102,29 @@ static int amdgpu_dm_wb_prepare_job(struct drm_writeback_connector *wb_connector
- 	rbo = gem_to_amdgpu_bo(obj);
- 	adev = amdgpu_ttm_adev(rbo->tbo.bdev);
- 
--	r = amdgpu_bo_reserve(rbo, true);
--	if (r) {
--		drm_err(adev_to_drm(adev), "fail to reserve bo (%d)\n", r);
--		return r;
--	}
-+	drm_exec_init(&exec, 0, 0);
-+	drm_exec_until_all_locked(&exec)
-+	{
-+		r = drm_exec_prepare_obj(&exec, obj, TTM_NUM_MOVE_FENCES);
-+		drm_exec_retry_on_contention(&exec);
-+		if (r) {
-+			drm_err(adev_to_drm(adev),
-+				"Failed to prepare framebuffer BO (%d)\n", r);
-+			goto error_unlock;
-+		}
- 
--	r = dma_resv_reserve_fences(rbo->tbo.base.resv, TTM_NUM_MOVE_FENCES);
--	if (r)
--		goto error_unlock;
-+		domain = amdgpu_display_supported_domains(adev, rbo->flags);
- 
--	domain = amdgpu_display_supported_domains(adev, rbo->flags);
--
--	rbo->flags |= AMDGPU_GEM_CREATE_VRAM_CONTIGUOUS;
--	r = amdgpu_bo_pin(rbo, domain);
--	if (unlikely(r != 0)) {
--		if (r != -ERESTARTSYS)
--			DRM_ERROR("Failed to pin framebuffer with error %d\n", r);
--		goto error_unlock;
-+		rbo->flags |= AMDGPU_GEM_CREATE_VRAM_CONTIGUOUS;
-+		r = amdgpu_bo_pin(rbo, &exec, domain);
-+		drm_exec_retry_on_contention(&exec);
-+		if (unlikely(r != 0)) {
-+			if (r != -ERESTARTSYS)
-+				DRM_ERROR(
-+					"Failed to pin framebuffer with error %d\n",
-+					r);
-+			goto error_unlock;
-+		}
- 	}
- 
- 	r = amdgpu_ttm_alloc_gart(&rbo->tbo);
-@@ -126,7 +133,7 @@ static int amdgpu_dm_wb_prepare_job(struct drm_writeback_connector *wb_connector
- 		goto error_unpin;
- 	}
- 
--	amdgpu_bo_unreserve(rbo);
-+	drm_exec_fini(&exec);
- 
- 	afb->address = amdgpu_bo_gpu_offset(rbo);
- 
 diff --git a/drivers/gpu/drm/amd/display/dc/dc_types.h b/drivers/gpu/drm/amd/display/dc/dc_types.h
 index 4ed1efa172709..6482e275e63bf 100644
 --- a/drivers/gpu/drm/amd/display/dc/dc_types.h
@@ -7965,143 +6660,6 @@ index 3969a76704820..f148c70d3e9e0 100644
  			dev_err(smu->adev->dev,
  				"New power limit (%d) is out of range [%d,%d]\n",
  				limit, smu->min_power_limit, smu->max_power_limit);
-diff --git a/drivers/gpu/drm/drm_exec.c b/drivers/gpu/drm/drm_exec.c
-index 7988f5e7d56a3..ec33ed4a523cc 100644
---- a/drivers/gpu/drm/drm_exec.c
-+++ b/drivers/gpu/drm/drm_exec.c
-@@ -190,18 +190,9 @@ static int drm_exec_lock_contended(struct drm_exec *exec)
- 	return ret;
- }
- 
--/**
-- * drm_exec_lock_obj - lock a GEM object for use
-- * @exec: the drm_exec object with the state
-- * @obj: the GEM object to lock
-- *
-- * Lock a GEM object for use and grab a reference to it.
-- *
-- * Returns: -EDEADLK if a contention is detected, -EALREADY when object is
-- * already locked (can be suppressed by setting the DRM_EXEC_IGNORE_DUPLICATES
-- * flag), -ENOMEM when memory allocation failed and zero for success.
-- */
--int drm_exec_lock_obj(struct drm_exec *exec, struct drm_gem_object *obj)
-+static int __drm_exec_lock_obj(struct drm_exec *exec,
-+			       struct drm_gem_object *obj,
-+			       bool ignore_duplicates)
- {
- 	int ret;
- 
-@@ -226,8 +217,7 @@ int drm_exec_lock_obj(struct drm_exec *exec, struct drm_gem_object *obj)
- 		return -EDEADLK;
- 	}
- 
--	if (unlikely(ret == -EALREADY) &&
--	    exec->flags & DRM_EXEC_IGNORE_DUPLICATES)
-+	if (unlikely(ret == -EALREADY) && ignore_duplicates)
- 		return 0;
- 
- 	if (unlikely(ret))
-@@ -243,8 +233,44 @@ int drm_exec_lock_obj(struct drm_exec *exec, struct drm_gem_object *obj)
- 	dma_resv_unlock(obj->resv);
- 	return ret;
- }
-+
-+/**
-+ * drm_exec_lock_obj - lock a GEM object for use
-+ * @exec: the drm_exec object with the state
-+ * @obj: the GEM object to lock
-+ *
-+ * Lock a GEM object for use and grab a reference to it.
-+ *
-+ * Returns: -EDEADLK if a contention is detected, -EALREADY when object is
-+ * already locked (can be suppressed by setting the DRM_EXEC_IGNORE_DUPLICATES
-+ * flag), -ENOMEM when memory allocation failed and zero for success.
-+ */
-+int drm_exec_lock_obj(struct drm_exec *exec, struct drm_gem_object *obj)
-+{
-+	return __drm_exec_lock_obj(exec, obj,
-+				   exec->flags & DRM_EXEC_IGNORE_DUPLICATES);
-+}
- EXPORT_SYMBOL(drm_exec_lock_obj);
- 
-+/**
-+ * drm_exec_lock_obj_report_dup - lock a GEM object for use, but always report duplicates
-+ * @exec: the drm_exec object with the state
-+ * @obj: the GEM object to lock
-+ *
-+ * Like drm_exec_lock_obj, lock a GEM object for use and grab a reference to it.
-+ * Unlike drm_exec_lock_obj, DRM_EXEC_IGNORE_DUPLICATES is ignored and duplicates are
-+ * always reported.
-+ *
-+ * Returns: -EDEADLK if a contention is detected, -EALREADY when object is
-+ * already locked, -ENOMEM when memory allocation failed and zero for success.
-+ */
-+int drm_exec_lock_obj_report_dup(struct drm_exec *exec,
-+				 struct drm_gem_object *obj)
-+{
-+	return __drm_exec_lock_obj(exec, obj, false);
-+}
-+EXPORT_SYMBOL(drm_exec_lock_obj_report_dup);
-+
- /**
-  * drm_exec_unlock_obj - unlock a GEM object in this exec context
-  * @exec: the drm_exec object with the state
-diff --git a/drivers/gpu/drm/i915/gem/i915_gem_ttm.c b/drivers/gpu/drm/i915/gem/i915_gem_ttm.c
-index df3fcc2b1248e..642296602de69 100644
---- a/drivers/gpu/drm/i915/gem/i915_gem_ttm.c
-+++ b/drivers/gpu/drm/i915/gem/i915_gem_ttm.c
-@@ -939,7 +939,7 @@ void i915_ttm_adjust_lru(struct drm_i915_gem_object *obj)
- 	 * Don't manipulate the TTM LRUs while in TTM bo destruction.
- 	 * We're called through i915_ttm_delete_mem_notify().
- 	 */
--	if (!kref_read(&bo->kref))
-+	if (!kref_read(&bo->base.refcount))
- 		return;
- 
- 	/*
-@@ -957,30 +957,21 @@ void i915_ttm_adjust_lru(struct drm_i915_gem_object *obj)
- 	 *
- 	 * TODO: consider maybe also bumping the shrinker list here when we have
- 	 * already unpinned it, which should give us something more like an LRU.
--	 *
--	 * TODO: There is a small window of opportunity for this function to
--	 * get called from eviction after we've dropped the last GEM refcount,
--	 * but before the TTM deleted flag is set on the object. Avoid
--	 * adjusting the shrinker list in such cases, since the object is
--	 * not available to the shrinker anyway due to its zero refcount.
--	 * To fix this properly we should move to a TTM shrinker LRU list for
--	 * these objects.
- 	 */
--	if (kref_get_unless_zero(&obj->base.refcount)) {
--		if (shrinkable != obj->mm.ttm_shrinkable) {
--			if (shrinkable) {
--				if (obj->mm.madv == I915_MADV_WILLNEED)
--					__i915_gem_object_make_shrinkable(obj);
--				else
--					__i915_gem_object_make_purgeable(obj);
--			} else {
--				i915_gem_object_make_unshrinkable(obj);
--			}
--
--			obj->mm.ttm_shrinkable = shrinkable;
-+	i915_gem_object_get(obj);
-+	if (shrinkable != obj->mm.ttm_shrinkable) {
-+		if (shrinkable) {
-+			if (obj->mm.madv == I915_MADV_WILLNEED)
-+				__i915_gem_object_make_shrinkable(obj);
-+			else
-+				__i915_gem_object_make_purgeable(obj);
-+		} else {
-+			i915_gem_object_make_unshrinkable(obj);
- 		}
--		i915_gem_object_put(obj);
-+
-+		obj->mm.ttm_shrinkable = shrinkable;
- 	}
-+	i915_gem_object_put(obj);
- 
- 	/*
- 	 * Put on the correct LRU list depending on the MADV status
 diff --git a/drivers/gpu/drm/nouveau/nouveau_gem.c b/drivers/gpu/drm/nouveau/nouveau_gem.c
 index 20dba02d6175b..c5a24dff4b69b 100644
 --- a/drivers/gpu/drm/nouveau/nouveau_gem.c
@@ -8128,308 +6686,13 @@ index 20dba02d6175b..c5a24dff4b69b 100644
  	} else
  		rep->offset = 0;
  
-diff --git a/drivers/gpu/drm/ttm/tests/ttm_bo_validate_test.c b/drivers/gpu/drm/ttm/tests/ttm_bo_validate_test.c
-index 2db221f6fc3a1..25d1d03f63e8d 100644
---- a/drivers/gpu/drm/ttm/tests/ttm_bo_validate_test.c
-+++ b/drivers/gpu/drm/ttm/tests/ttm_bo_validate_test.c
-@@ -127,7 +127,7 @@ static void ttm_bo_init_reserved_sys_man(struct kunit *test)
- 	dma_resv_unlock(bo->base.resv);
- 
- 	KUNIT_EXPECT_EQ(test, err, 0);
--	KUNIT_EXPECT_EQ(test, kref_read(&bo->kref), 1);
-+	KUNIT_EXPECT_EQ(test, kref_read(&bo->base.refcount), 1);
- 	KUNIT_EXPECT_PTR_EQ(test, bo->bdev, priv->ttm_dev);
- 	KUNIT_EXPECT_EQ(test, bo->type, bo_type);
- 	KUNIT_EXPECT_EQ(test, bo->page_alignment, PAGE_SIZE);
-@@ -176,7 +176,7 @@ static void ttm_bo_init_reserved_mock_man(struct kunit *test)
- 	dma_resv_unlock(bo->base.resv);
- 
- 	KUNIT_EXPECT_EQ(test, err, 0);
--	KUNIT_EXPECT_EQ(test, kref_read(&bo->kref), 1);
-+	KUNIT_EXPECT_EQ(test, kref_read(&bo->base.refcount), 1);
- 	KUNIT_EXPECT_PTR_EQ(test, bo->bdev, priv->ttm_dev);
- 	KUNIT_EXPECT_EQ(test, bo->type, bo_type);
- 	KUNIT_EXPECT_EQ(test, ctx.bytes_moved, size);
-@@ -969,6 +969,8 @@ static void ttm_bo_validate_allowed_only_evict(struct kunit *test)
- 	ttm_mock_manager_fini(priv->ttm_dev, mem_multihop);
- }
- 
-+extern const struct drm_gem_object_funcs ttm_deleted_object_funcs;
-+
- static void ttm_bo_validate_deleted_evict(struct kunit *test)
- {
- 	struct ttm_operation_ctx ctx_init = { }, ctx_val  = { };
-@@ -999,7 +1001,7 @@ static void ttm_bo_validate_deleted_evict(struct kunit *test)
- 	KUNIT_EXPECT_EQ(test, ttm_resource_manager_usage(man), big);
- 
- 	dma_resv_unlock(bo_big->base.resv);
--	bo_big->deleted = true;
-+	bo_big->base.funcs = &ttm_deleted_object_funcs;
- 
- 	bo_small = ttm_bo_kunit_init(test, test->priv, small, NULL);
- 	bo_small->type = bo_type;
-diff --git a/drivers/gpu/drm/ttm/tests/ttm_kunit_helpers.c b/drivers/gpu/drm/ttm/tests/ttm_kunit_helpers.c
-index 5cfe8f3f80d75..b7ab19e0e4b2b 100644
---- a/drivers/gpu/drm/ttm/tests/ttm_kunit_helpers.c
-+++ b/drivers/gpu/drm/ttm/tests/ttm_kunit_helpers.c
-@@ -189,8 +189,6 @@ struct ttm_buffer_object *ttm_bo_kunit_init(struct kunit *test,
- 	bo->bdev = devs->ttm_dev;
- 	bo->destroy = dummy_ttm_bo_destroy;
- 
--	kref_init(&bo->kref);
--
- 	return bo;
- }
- EXPORT_SYMBOL_GPL(ttm_bo_kunit_init);
 diff --git a/drivers/gpu/drm/ttm/ttm_bo.c b/drivers/gpu/drm/ttm/ttm_bo.c
-index bcd76f6bb7f02..a885333e9f7ca 100644
+index bcd76f6bb7f02..55764365b3c49 100644
 --- a/drivers/gpu/drm/ttm/ttm_bo.c
 +++ b/drivers/gpu/drm/ttm/ttm_bo.c
-@@ -86,6 +86,16 @@ void ttm_bo_move_to_lru_tail(struct ttm_buffer_object *bo)
+@@ -488,6 +488,118 @@ int ttm_bo_evict_first(struct ttm_device *bdev, struct ttm_resource_manager *man
+ 	return ret;
  }
- EXPORT_SYMBOL(ttm_bo_move_to_lru_tail);
- 
-+static void ttm_bo_set_bulk_move_locked(struct ttm_buffer_object *bo,
-+					struct ttm_lru_bulk_move *bulk)
-+{
-+	if (bo->resource)
-+		ttm_resource_del_bulk_move(bo->resource, bo);
-+	bo->bulk_move = bulk;
-+	if (bo->resource)
-+		ttm_resource_add_bulk_move(bo->resource, bo);
-+}
-+
- /**
-  * ttm_bo_set_bulk_move - update BOs bulk move object
-  *
-@@ -105,19 +115,40 @@ void ttm_bo_set_bulk_move(struct ttm_buffer_object *bo,
- {
- 	dma_resv_assert_held(bo->base.resv);
- 
-+	/* Unordered insertions into ordered bulk moves are forbidden. */
-+	WARN_ON_ONCE(bulk && bulk->ordered);
-+
- 	if (bo->bulk_move == bulk)
- 		return;
- 
- 	spin_lock(&bo->bdev->lru_lock);
--	if (bo->resource)
--		ttm_resource_del_bulk_move(bo->resource, bo);
--	bo->bulk_move = bulk;
--	if (bo->resource)
--		ttm_resource_add_bulk_move(bo->resource, bo);
-+	ttm_bo_set_bulk_move_locked(bo, bulk);
- 	spin_unlock(&bo->bdev->lru_lock);
- }
- EXPORT_SYMBOL(ttm_bo_set_bulk_move);
- 
-+void ttm_bo_set_bulk_move_ordered(struct ttm_buffer_object *bo,
-+				  struct ttm_lru_bulk_move *bulk,
-+				  uint32_t bulk_order)
-+{
-+	dma_resv_assert_held(bo->base.resv);
-+
-+	if (!bulk)
-+		return ttm_bo_set_bulk_move(bo, NULL);
-+
-+	/* Ordered insertions into unordered bulk moves are forbidden. */
-+	WARN_ON_ONCE(!bulk->ordered);
-+
-+	if (bo->bulk_move == bulk && bo->bulk_move_order == bulk_order)
-+		return;
-+
-+	spin_lock(&bo->bdev->lru_lock);
-+	bo->bulk_move_order = bulk_order;
-+	ttm_bo_set_bulk_move_locked(bo, bulk);
-+	spin_unlock(&bo->bdev->lru_lock);
-+}
-+EXPORT_SYMBOL(ttm_bo_set_bulk_move_ordered);
-+
- static int ttm_bo_handle_move_mem(struct ttm_buffer_object *bo,
- 				  struct ttm_resource *mem, bool evict,
- 				  struct ttm_operation_ctx *ctx,
-@@ -246,88 +277,84 @@ static void ttm_bo_delayed_delete(struct work_struct *work)
- 	ttm_bo_put(bo);
- }
- 
--static void ttm_bo_release(struct kref *kref)
-+/*
-+ * All other callbacks should never ever be called on a deleted TTM object.
-+ */
-+const struct drm_gem_object_funcs ttm_deleted_object_funcs = {
-+	.free = ttm_bo_free
-+};
-+EXPORT_SYMBOL_FOR_TESTS_ONLY(ttm_deleted_object_funcs);
-+
-+/* Returns true if the BO is about to get deleted */
-+static bool ttm_bo_is_zombie(struct ttm_buffer_object *bo)
-+{
-+	return bo->base.funcs == &ttm_deleted_object_funcs;
-+}
-+
-+void ttm_bo_fini(struct ttm_buffer_object *bo)
- {
--	struct ttm_buffer_object *bo =
--	    container_of(kref, struct ttm_buffer_object, kref);
- 	struct ttm_device *bdev = bo->bdev;
- 	int ret;
- 
- 	WARN_ON_ONCE(bo->pin_count);
- 	WARN_ON_ONCE(bo->bulk_move);
- 
--	if (!bo->deleted) {
--		ret = ttm_bo_individualize_resv(bo);
--		if (ret) {
--			/* Last resort, if we fail to allocate memory for the
--			 * fences block for the BO to become idle
--			 */
--			dma_resv_wait_timeout(bo->base.resv,
--					      DMA_RESV_USAGE_BOOKKEEP, false,
--					      30 * HZ);
--		}
--
--		if (bdev->funcs->release_notify)
--			bdev->funcs->release_notify(bo);
--
--		drm_vma_offset_remove(bdev->vma_manager, &bo->base.vma_node);
--		ttm_mem_io_free(bdev, bo->resource);
--
--		if (!dma_resv_test_signaled(&bo->base._resv,
--					    DMA_RESV_USAGE_BOOKKEEP) ||
--		    (want_init_on_free() && (bo->ttm != NULL)) ||
--		    bo->type == ttm_bo_type_sg ||
--		    !dma_resv_trylock(bo->base.resv)) {
--			/* The BO is not idle, resurrect it for delayed destroy */
--			ttm_bo_flush_all_fences(bo);
--			bo->deleted = true;
--
--			spin_lock(&bdev->lru_lock);
--
--			/*
--			 * Make pinned bos immediately available to
--			 * shrinkers, now that they are queued for
--			 * destruction.
--			 *
--			 * FIXME: QXL is triggering this. Can be removed when the
--			 * driver is fixed.
--			 */
--			if (bo->pin_count) {
--				bo->pin_count = 0;
--				ttm_resource_move_to_lru_tail(bo->resource);
--			}
--
--			kref_init(&bo->kref);
--			spin_unlock(&bdev->lru_lock);
--
--			INIT_WORK(&bo->delayed_delete, ttm_bo_delayed_delete);
--
--			/* Schedule the worker on the closest NUMA node. This
--			 * improves performance since system memory might be
--			 * cleared on free and that is best done on a CPU core
--			 * close to it.
--			 */
--			queue_work_node(bdev->pool.nid, bdev->wq, &bo->delayed_delete);
--			return;
--		}
--
--		ttm_bo_cleanup_memtype_use(bo);
--		dma_resv_unlock(bo->base.resv);
-+	ret = ttm_bo_individualize_resv(bo);
-+	if (ret) {
-+		/* Last resort, if we fail to allocate memory for the
-+		 * fences block for the BO to become idle
-+		 */
-+		dma_resv_wait_timeout(bo->base.resv, DMA_RESV_USAGE_BOOKKEEP,
-+				      false, 30 * HZ);
- 	}
- 
--	atomic_dec(&ttm_glob.bo_count);
--	bo->destroy(bo);
--}
-+	if (bo->bdev->funcs->release_notify)
-+		bo->bdev->funcs->release_notify(bo);
- 
--/* TODO: remove! */
--void ttm_bo_put(struct ttm_buffer_object *bo)
--{
--	kref_put(&bo->kref, ttm_bo_release);
--}
-+	drm_vma_offset_remove(bdev->vma_manager, &bo->base.vma_node);
-+	ttm_mem_io_free(bdev, bo->resource);
- 
--void ttm_bo_fini(struct ttm_buffer_object *bo)
--{
--	ttm_bo_put(bo);
-+	if (!dma_resv_test_signaled(&bo->base._resv, DMA_RESV_USAGE_BOOKKEEP) ||
-+	    (want_init_on_free() && (bo->ttm != NULL)) ||
-+	    bo->type == ttm_bo_type_sg ||
-+	    !dma_resv_trylock(bo->base.resv)) {
-+		/* The BO is not idle, resurrect it for delayed destroy */
-+		ttm_bo_flush_all_fences(bo);
-+
-+		spin_lock(&bo->bdev->lru_lock);
-+
-+		/*
-+		 * Make pinned bos immediately available to
-+		 * shrinkers, now that they are queued for
-+		 * destruction.
-+		 *
-+		 * FIXME: QXL is triggering this. Can be removed when the
-+		 * driver is fixed.
-+		 */
-+		if (bo->pin_count) {
-+			bo->pin_count = 0;
-+			ttm_resource_move_to_lru_tail(bo->resource);
-+		}
-+
-+		kref_init(&bo->base.refcount);
-+		bo->base.funcs = &ttm_deleted_object_funcs;
-+		spin_unlock(&bo->bdev->lru_lock);
-+
-+		INIT_WORK(&bo->delayed_delete, ttm_bo_delayed_delete);
-+
-+		/* Schedule the worker on the closest NUMA node. This
-+		 * improves performance since system memory might be
-+		 * cleared on free and that is best done on a CPU core
-+		 * close to it.
-+		 */
-+		queue_work_node(bdev->pool.nid, bdev->wq, &bo->delayed_delete);
-+	} else {
-+		ttm_bo_cleanup_memtype_use(bo);
-+		dma_resv_unlock(bo->base.resv);
-+
-+		atomic_dec(&ttm_glob.bo_count);
-+		bo->destroy(bo);
-+	}
- }
- EXPORT_SYMBOL(ttm_bo_fini);
- 
-@@ -355,14 +382,20 @@ static int ttm_bo_bounce_temp_buffer(struct ttm_buffer_object *bo,
- 	return 0;
- }
- 
--static int ttm_bo_evict(struct ttm_buffer_object *bo,
--			struct ttm_operation_ctx *ctx)
-+int ttm_bo_evict(struct ttm_buffer_object *bo, struct ttm_operation_ctx *ctx)
- {
- 	struct ttm_resource *evict_mem;
- 	struct ttm_placement placement;
- 	struct ttm_place hop;
- 	int ret = 0;
- 
-+	if (ttm_bo_is_zombie(bo)) {
-+		ret = ttm_bo_wait_ctx(bo, ctx);
-+		if (!ret)
-+			ttm_bo_cleanup_memtype_use(bo);
-+		return ret;
-+	}
-+
- 	memset(&hop, 0, sizeof(hop));
- 
- 	dma_resv_assert_held(bo->base.resv);
-@@ -434,58 +467,117 @@ bool ttm_bo_eviction_valuable(struct ttm_buffer_object *bo,
- }
- EXPORT_SYMBOL(ttm_bo_eviction_valuable);
  
 +struct ttm_bo_alloc_state {
 +	/** @charge_pool: The memory pool the resource is charged to */
@@ -8444,11 +6707,7 @@ index bcd76f6bb7f02..a885333e9f7ca 100644
 +	bool may_try_low;
 +};
 +
- /**
-- * ttm_bo_evict_first() - Evict the first bo on the manager's LRU list.
-- * @bdev: The ttm device.
-- * @man: The manager whose bo to evict.
-- * @ctx: The TTM operation ctx governing the eviction.
++/**
 + * ttm_bo_alloc_at_place - Attempt allocating a BO's backing store in a place
 + *
 + * @bo: The buffer to allocate the backing store of
@@ -8462,32 +6721,17 @@ index bcd76f6bb7f02..a885333e9f7ca 100644
 + * -EBUSY: No space available, but allocation should be retried with ttm_bo_evict_alloc.
 + * -ENOSPC: No space available, allocation should not be retried.
 + * -ERESTARTSYS: An interruptible sleep was interrupted by a signal.
-  *
-- * Return: 0 if successful or the resource disappeared. Negative error code on error.
-  */
--int ttm_bo_evict_first(struct ttm_device *bdev, struct ttm_resource_manager *man,
--		       struct ttm_operation_ctx *ctx)
++ *
++ */
 +static int ttm_bo_alloc_at_place(struct ttm_buffer_object *bo,
 +				 const struct ttm_place *place,
 +				 bool force_space,
 +				 struct ttm_resource **res,
 +				 struct ttm_bo_alloc_state *alloc_state)
- {
--	struct ttm_resource_cursor cursor;
--	struct ttm_buffer_object *bo;
--	struct ttm_resource *res;
--	unsigned int mem_type;
--	int ret = 0;
++{
 +	bool may_evict;
 +	int ret;
- 
--	spin_lock(&bdev->lru_lock);
--	ttm_resource_cursor_init(&cursor, man);
--	res = ttm_resource_manager_first(&cursor);
--	ttm_resource_cursor_fini(&cursor);
--	if (!res) {
--		ret = -ENOENT;
--		goto out_no_ref;
++
 +	may_evict = !alloc_state->in_evict && force_space &&
 +		    place->mem_type != TTM_PL_SYSTEM;
 +	if (!alloc_state->charge_pool) {
@@ -8509,24 +6753,8 @@ index bcd76f6bb7f02..a885333e9f7ca 100644
 +				ret = may_evict ? -EBUSY : -ENOSPC;
 +			return ret;
 +		}
- 	}
--	bo = res->bo;
--	if (!ttm_bo_get_unless_zero(bo))
--		goto out_no_ref;
--	mem_type = res->mem_type;
--	spin_unlock(&bdev->lru_lock);
--	ret = ttm_bo_reserve(bo, ctx->interruptible, ctx->no_wait_gpu, NULL);
--	if (ret)
--		goto out_no_lock;
--	if (!bo->resource || bo->resource->mem_type != mem_type)
--		goto out_bo_moved;
- 
--	if (bo->deleted) {
--		ret = ttm_bo_wait_ctx(bo, ctx);
--		if (!ret)
--			ttm_bo_cleanup_memtype_use(bo);
--	} else {
--		ret = ttm_bo_evict(bo, ctx);
++	}
++
 +	/*
 +	 * cgroup protection plays a special role in eviction.
 +	 * Conceptually, protection of memory via the dmem cgroup controller
@@ -8560,18 +6788,9 @@ index bcd76f6bb7f02..a885333e9f7ca 100644
 +		may_evict |= dmem_cgroup_below_min(NULL, alloc_state->charge_pool);
 +		alloc_state->may_try_low = may_evict;
 +
-+		may_evict |=
-+			dmem_cgroup_below_low(NULL, alloc_state->charge_pool);
- 	}
--out_bo_moved:
--	dma_resv_unlock(bo->base.resv);
--out_no_lock:
--	ttm_bo_put(bo);
--	return ret;
- 
--out_no_ref:
--	spin_unlock(&bdev->lru_lock);
--	return ret;
++		may_evict |= dmem_cgroup_below_low(NULL, alloc_state->charge_pool);
++	}
++
 +	ret = ttm_resource_alloc(bo, place, res, alloc_state->charge_pool);
 +	if (ret) {
 +		if (ret == -ENOSPC && may_evict)
@@ -8585,10 +6804,12 @@ index bcd76f6bb7f02..a885333e9f7ca 100644
 +	 */
 +	alloc_state->charge_pool = NULL;
 +	return 0;
- }
- 
++}
++
  /**
-@@ -503,42 +595,99 @@ struct ttm_bo_evict_walk {
+  * struct ttm_bo_evict_walk - Parameters for the evict walk.
+  */
+@@ -503,22 +615,61 @@ struct ttm_bo_evict_walk {
  	/** @evicted: Number of successful evictions. */
  	unsigned long evicted;
  
@@ -8598,14 +6819,6 @@ index bcd76f6bb7f02..a885333e9f7ca 100644
  	bool try_low;
  	/** @hit_low: If we cannot evict a bo when @try_low is false (first pass) */
  	bool hit_low;
-+
-+	/** @from_bulk: True if we're evicting from the same ordered bulk move. */
-+	bool from_bulk;
-+
-+	/** @try_contiguous: True if we should try evicting contiguous resources. */
-+	bool try_contiguous;
-+	/** @hit_contiguous: True if we hit a contiguous resources we refused to evict. */
-+	bool hit_contiguous;
 +
 +	/** @alloc_state: State associated with the allocation attempt. */
 +	struct ttm_bo_alloc_state *alloc_state;
@@ -8621,14 +6834,6 @@ index bcd76f6bb7f02..a885333e9f7ca 100644
  
 -	if (!dmem_cgroup_state_evict_valuable(evict_walk->limit_pool, bo->resource->css,
 -					      evict_walk->try_low, &evict_walk->hit_low))
-+	if (bo->resource && bo->resource->needs_contiguous &&
-+	    ktime_to_us(ktime_get()) - bo->last_pin_us <=
-+		    TTM_CONTIGUOUS_PIN_TIMEOUT) {
-+		evict_walk->hit_contiguous = true;
-+		if (!evict_walk->try_contiguous)
-+			return 0;
-+	}
-+
 +	/*
 +	 * If may_try_low is not set, then we're trying to evict unprotected
 +	 * buffers in favor of a protected allocation for charge_pool. Explicitly skip
@@ -8637,8 +6842,7 @@ index bcd76f6bb7f02..a885333e9f7ca 100644
 +	 * cgroup is always allowed to evict from itself even if it is protected.
 +	 */
 +	if (!evict_walk->alloc_state->may_try_low &&
-+	    bo->resource->css == evict_walk->alloc_state->charge_pool &&
-+	    !evict_walk->from_bulk)
++			bo->resource->css == evict_walk->alloc_state->charge_pool)
 +		return 0;
 +
 +	limit_pool = evict_walk->alloc_state->limit_pool;
@@ -8664,12 +6868,6 @@ index bcd76f6bb7f02..a885333e9f7ca 100644
 +	evict_valuable = dmem_cgroup_state_evict_valuable(limit_pool, bo->resource->css,
 +							  evict_walk->try_low,
 +							  &evict_walk->hit_low);
-+	/* FIXME: Buffers from the same bulk move always belong to the same VM, but the charged
-+	 * owner may errnoneously change when the buffer is evicted. That should be fixed instead
-+	 * of having this condition here!
-+	 */
-+	evict_valuable |= evict_walk->from_bulk;
-+
 +	if (ancestor)
 +		dmem_cgroup_pool_state_put(ancestor);
 +
@@ -8677,19 +6875,7 @@ index bcd76f6bb7f02..a885333e9f7ca 100644
  		return 0;
  
  	if (bo->pin_count || !bo->bdev->funcs->eviction_valuable(bo, evict_walk->place))
- 		return 0;
- 
--	if (bo->deleted) {
--		lret = ttm_bo_wait_ctx(bo, walk->arg.ctx);
--		if (!lret)
--			ttm_bo_cleanup_memtype_use(bo);
--	} else {
--		lret = ttm_bo_evict(bo, walk->arg.ctx);
--	}
--
-+	lret = ttm_bo_evict(bo, walk->arg.ctx);
- 	if (lret)
- 		goto out;
+@@ -537,8 +688,10 @@ static s64 ttm_bo_evict_cb(struct ttm_lru_walk *walk, struct ttm_buffer_object *
  
  	evict_walk->evicted++;
  	if (evict_walk->res)
@@ -8702,18 +6888,7 @@ index bcd76f6bb7f02..a885333e9f7ca 100644
  	if (lret == 0)
  		return 1;
  out:
-@@ -549,10 +698,6 @@ static s64 ttm_bo_evict_cb(struct ttm_lru_walk *walk, struct ttm_buffer_object *
- 	return lret;
- }
- 
--static const struct ttm_lru_walk_ops ttm_evict_walk_ops = {
--	.process_bo = ttm_bo_evict_cb,
--};
--
- static int ttm_bo_evict_alloc(struct ttm_device *bdev,
- 			      struct ttm_resource_manager *man,
- 			      const struct ttm_place *place,
-@@ -560,11 +705,11 @@ static int ttm_bo_evict_alloc(struct ttm_device *bdev,
+@@ -560,7 +713,7 @@ static int ttm_bo_evict_alloc(struct ttm_device *bdev,
  			      struct ttm_operation_ctx *ctx,
  			      struct ww_acquire_ctx *ticket,
  			      struct ttm_resource **res,
@@ -8722,12 +6897,7 @@ index bcd76f6bb7f02..a885333e9f7ca 100644
  {
  	struct ttm_bo_evict_walk evict_walk = {
  		.walk = {
--			.ops = &ttm_evict_walk_ops,
-+			.process_bo = ttm_bo_evict_cb,
- 			.arg = {
- 				.ctx = ctx,
- 				.ticket = ticket,
-@@ -573,15 +718,38 @@ static int ttm_bo_evict_alloc(struct ttm_device *bdev,
+@@ -573,15 +726,21 @@ static int ttm_bo_evict_alloc(struct ttm_device *bdev,
  		.place = place,
  		.evictor = evictor,
  		.res = res,
@@ -8737,23 +6907,6 @@ index bcd76f6bb7f02..a885333e9f7ca 100644
  	s64 lret;
  
 +	state->in_evict = true;
-+
-+	if (ctx->allow_bulk_evict && evictor->bulk_move &&
-+	    evictor->bulk_move_order != U32_MAX) {
-+		evict_walk.from_bulk = true;
-+		lret = ttm_lru_walk_ordered_bulk_for_evict(&evict_walk.walk,
-+							   bdev, man,
-+							   place->mem_type,
-+							   evictor, 1);
-+		if (lret)
-+			goto out;
-+		evict_walk.from_bulk = false;
-+	}
-+
-+	if (!state->may_try_low && ctx->cgroup_throttle) {
-+		lret = 0;
-+		goto out;
-+	}
 +
  	evict_walk.walk.arg.trylock_only = true;
  	lret = ttm_lru_walk_for_evict(&evict_walk.walk, bdev, man, 1);
@@ -8769,7 +6922,7 @@ index bcd76f6bb7f02..a885333e9f7ca 100644
  		evict_walk.try_low = true;
  		lret = ttm_lru_walk_for_evict(&evict_walk.walk, bdev, man, 1);
  	}
-@@ -602,11 +770,22 @@ static int ttm_bo_evict_alloc(struct ttm_device *bdev,
+@@ -602,11 +761,13 @@ static int ttm_bo_evict_alloc(struct ttm_device *bdev,
  	} while (!lret && evict_walk.evicted);
  
  	/* We hit the low limit? Try once more */
@@ -8779,39 +6932,12 @@ index bcd76f6bb7f02..a885333e9f7ca 100644
  		evict_walk.try_low = true;
  		goto retry;
  	}
-+
-+	if (!lret && !evict_walk.try_contiguous && !evict_walk.hit_contiguous &&
-+	    state->may_try_low) {
-+		evict_walk.try_contiguous = true;
-+		goto retry;
-+	}
-+
-+	if (!lret)
-+		++ctx->unsuccessful_evicts;
  out:
 +	state->in_evict = false;
  	if (lret < 0)
  		return lret;
  	if (lret == 0)
-@@ -624,8 +803,8 @@ static int ttm_bo_evict_alloc(struct ttm_device *bdev,
- void ttm_bo_pin(struct ttm_buffer_object *bo)
- {
- 	dma_resv_assert_held(bo->base.resv);
--	WARN_ON_ONCE(!kref_read(&bo->kref));
- 	spin_lock(&bo->bdev->lru_lock);
-+	bo->last_pin_us = ktime_to_us(ktime_get());
- 	if (bo->resource)
- 		ttm_resource_del_bulk_move(bo->resource, bo);
- 	if (!bo->pin_count++ && bo->resource)
-@@ -643,7 +822,6 @@ EXPORT_SYMBOL(ttm_bo_pin);
- void ttm_bo_unpin(struct ttm_buffer_object *bo)
- {
- 	dma_resv_assert_held(bo->base.resv);
--	WARN_ON_ONCE(!kref_read(&bo->kref));
- 	if (WARN_ON_ONCE(!bo->pin_count))
- 		return;
- 
-@@ -724,9 +902,8 @@ static int ttm_bo_alloc_resource(struct ttm_buffer_object *bo,
+@@ -724,9 +885,8 @@ static int ttm_bo_alloc_resource(struct ttm_buffer_object *bo,
  
  	for (i = 0; i < placement->num_placement; ++i) {
  		const struct ttm_place *place = &placement->placement[i];
@@ -8822,7 +6948,7 @@ index bcd76f6bb7f02..a885333e9f7ca 100644
  
  		man = ttm_manager_type(bdev, place->mem_type);
  		if (!man || !ttm_resource_manager_used(man))
-@@ -736,25 +913,30 @@ static int ttm_bo_alloc_resource(struct ttm_buffer_object *bo,
+@@ -736,25 +896,30 @@ static int ttm_bo_alloc_resource(struct ttm_buffer_object *bo,
  				    TTM_PL_FLAG_FALLBACK))
  			continue;
  
@@ -8869,531 +6995,11 @@ index bcd76f6bb7f02..a885333e9f7ca 100644
  		}
  
  		ret = ttm_bo_add_pipelined_eviction_fences(bo, man, ctx->no_wait_gpu);
-@@ -934,12 +1116,12 @@ int ttm_bo_init_reserved(struct ttm_device *bdev, struct ttm_buffer_object *bo,
- {
- 	int ret;
- 
--	kref_init(&bo->kref);
- 	bo->bdev = bdev;
- 	bo->type = type;
- 	bo->page_alignment = alignment;
- 	bo->destroy = destroy;
- 	bo->pin_count = 0;
-+	bo->last_pin_us = 0;
- 	bo->sg = sg;
- 	bo->bulk_move = NULL;
- 	if (resv)
-@@ -1091,25 +1273,18 @@ int ttm_bo_wait_ctx(struct ttm_buffer_object *bo, struct ttm_operation_ctx *ctx)
- EXPORT_SYMBOL(ttm_bo_wait_ctx);
- 
- /**
-- * struct ttm_bo_swapout_walk - Parameters for the swapout walk
-+ * ttm_bo_swapout() - Swap out buffer objects on the LRU list to shmem.
-+ * @bo: The buffer to swap out.
-+ * @ctx: The ttm_operation_ctx governing the swapout operation.
-+ * @gfp_flags: The gfp flags used for shmem page allocations.
-+ *
-+ * Return: The number of bytes actually swapped out, or negative error code
-+ * on error.
-  */
--struct ttm_bo_swapout_walk {
--	/** @walk: The walk base parameters. */
--	struct ttm_lru_walk walk;
--	/** @gfp_flags: The gfp flags to use for ttm_tt_swapout() */
--	gfp_t gfp_flags;
--	/** @hit_low: Whether we should attempt to swap BO's with low watermark threshold */
--	/** @evict_low: If we cannot swap a bo when @try_low is false (first pass) */
--	bool hit_low, evict_low;
--};
--
--static s64
--ttm_bo_swapout_cb(struct ttm_lru_walk *walk, struct ttm_buffer_object *bo)
-+s64 ttm_bo_swapout(struct ttm_buffer_object *bo, struct ttm_operation_ctx *ctx,
-+		   gfp_t gfp_flags)
- {
- 	struct ttm_place place = { .mem_type = bo->resource->mem_type };
--	struct ttm_bo_swapout_walk *swapout_walk =
--		container_of(walk, typeof(*swapout_walk), walk);
--	struct ttm_operation_ctx *ctx = walk->arg.ctx;
- 	struct ttm_device *bdev = bo->bdev;
- 	struct ttm_tt *tt = bo->ttm;
- 	s64 ret;
-@@ -1131,8 +1306,8 @@ ttm_bo_swapout_cb(struct ttm_lru_walk *walk, struct ttm_buffer_object *bo)
- 		goto out;
- 	}
- 
--	if (bo->deleted) {
--		pgoff_t num_pages = tt->num_pages;
-+	if (ttm_bo_is_zombie(bo)) {
-+		pgoff_t num_pages = bo->ttm->num_pages;
- 
- 		ret = ttm_bo_wait_ctx(bo, ctx);
- 		if (ret)
-@@ -1177,7 +1352,7 @@ ttm_bo_swapout_cb(struct ttm_lru_walk *walk, struct ttm_buffer_object *bo)
- 		bdev->funcs->swap_notify(bo);
- 
- 	if (ttm_tt_is_populated(tt)) {
--		ret = ttm_tt_swapout(bdev, tt, swapout_walk->gfp_flags);
-+		ret = ttm_tt_swapout(bdev, tt, gfp_flags);
- 		if (!ret) {
- 			spin_lock(&bdev->lru_lock);
- 			ttm_resource_del_bulk_move_unevictable(bo->resource, bo);
-@@ -1194,41 +1369,6 @@ ttm_bo_swapout_cb(struct ttm_lru_walk *walk, struct ttm_buffer_object *bo)
- 	return ret;
- }
- 
--const struct ttm_lru_walk_ops ttm_swap_ops = {
--	.process_bo = ttm_bo_swapout_cb,
--};
--
--/**
-- * ttm_bo_swapout() - Swap out buffer objects on the LRU list to shmem.
-- * @bdev: The ttm device.
-- * @ctx: The ttm_operation_ctx governing the swapout operation.
-- * @man: The resource manager whose resources / buffer objects are
-- * goint to be swapped out.
-- * @gfp_flags: The gfp flags used for shmem page allocations.
-- * @target: The desired number of pages to swap out.
-- *
-- * Return: The number of pages actually swapped out, or negative error code
-- * on error.
-- */
--s64 ttm_bo_swapout(struct ttm_device *bdev, struct ttm_operation_ctx *ctx,
--		   struct ttm_resource_manager *man, gfp_t gfp_flags,
--		   s64 target)
--{
--	struct ttm_bo_swapout_walk swapout_walk = {
--		.walk = {
--			.ops = &ttm_swap_ops,
--			.arg = {
--				.ctx = ctx,
--				.trylock_only = true,
--			},
--		},
--		.gfp_flags = gfp_flags,
--	};
--
--	return ttm_lru_walk_for_evict(&swapout_walk.walk, bdev, man, target);
--}
--EXPORT_SYMBOL_FOR_TESTS_ONLY(ttm_bo_swapout);
--
- void ttm_bo_tt_destroy(struct ttm_buffer_object *bo)
- {
- 	if (bo->ttm == NULL)
-diff --git a/drivers/gpu/drm/ttm/ttm_bo_internal.h b/drivers/gpu/drm/ttm/ttm_bo_internal.h
-index e0d48eac74b03..ded2a47be0bcb 100644
---- a/drivers/gpu/drm/ttm/ttm_bo_internal.h
-+++ b/drivers/gpu/drm/ttm/ttm_bo_internal.h
-@@ -27,6 +27,14 @@
- 
- #include <drm/ttm/ttm_bo.h>
- 
-+static inline void ttm_bo_free(struct drm_gem_object *gobj)
-+{
-+	struct ttm_buffer_object *bo = container_of(gobj, typeof(*bo), base);
-+
-+	atomic_dec(&ttm_glob.bo_count);
-+	bo->destroy(bo);
-+}
-+
- /**
-  * ttm_bo_get - reference a struct ttm_buffer_object
-  *
-@@ -34,7 +42,7 @@
-  */
- static inline void ttm_bo_get(struct ttm_buffer_object *bo)
- {
--	kref_get(&bo->kref);
-+	drm_gem_object_get(&bo->base);
- }
- 
- /**
-@@ -50,11 +58,14 @@ static inline void ttm_bo_get(struct ttm_buffer_object *bo)
- static inline __must_check struct ttm_buffer_object *
- ttm_bo_get_unless_zero(struct ttm_buffer_object *bo)
- {
--	if (!kref_get_unless_zero(&bo->kref))
-+	if (!kref_get_unless_zero(&bo->base.refcount))
- 		return NULL;
- 	return bo;
- }
- 
--void ttm_bo_put(struct ttm_buffer_object *bo);
-+static inline void ttm_bo_put(struct ttm_buffer_object *bo)
-+{
-+	drm_gem_object_put(&bo->base);
-+}
- 
- #endif
-diff --git a/drivers/gpu/drm/ttm/ttm_bo_util.c b/drivers/gpu/drm/ttm/ttm_bo_util.c
-index 3e3c201a02226..76b503c02ad77 100644
---- a/drivers/gpu/drm/ttm/ttm_bo_util.c
-+++ b/drivers/gpu/drm/ttm/ttm_bo_util.c
-@@ -29,6 +29,7 @@
-  * Authors: Thomas Hellstrom <thellstrom-at-vmware-dot-com>
-  */
- 
-+#include "drm/ttm/ttm_resource.h"
- #include <linux/export.h>
- #include <linux/swap.h>
- #include <linux/vmalloc.h>
-@@ -38,9 +39,22 @@
- #include <drm/ttm/ttm_tt.h>
- 
- #include <drm/drm_cache.h>
-+#include <drm/drm_exec.h>
- 
- #include "ttm_bo_internal.h"
- 
-+static void ttm_transfer_object_free(struct drm_gem_object *obj)
-+{
-+	struct ttm_buffer_object *bo =
-+		container_of(obj, struct ttm_buffer_object, base);
-+
-+	ttm_bo_fini(bo);
-+}
-+
-+const struct drm_gem_object_funcs ttm_transfer_object_funcs = {
-+	.free = ttm_transfer_object_free,
-+};
-+
- struct ttm_transfer_obj {
- 	struct ttm_buffer_object base;
- 	struct ttm_buffer_object *bo;
-@@ -247,7 +261,8 @@ static int ttm_buffer_object_transfer(struct ttm_buffer_object *bo,
- 	atomic_inc(&ttm_glob.bo_count);
- 	drm_vma_node_reset(&fbo->base.base.vma_node);
- 
--	kref_init(&fbo->base.kref);
-+	kref_init(&fbo->base.base.refcount);
-+	fbo->base.base.funcs = &ttm_transfer_object_funcs;
- 	fbo->base.destroy = &ttm_transfered_destroy;
- 	fbo->base.pin_count = 0;
- 	if (bo->type != ttm_bo_type_sg)
-@@ -824,13 +839,17 @@ static bool ttm_lru_walk_trylock(struct ttm_bo_lru_cursor *curs,
- 	struct ttm_operation_ctx *ctx = curs->arg->ctx;
- 
- 	curs->needs_unlock = false;
-+	if (ctx->exec)
-+		return false;
- 
- 	if (dma_resv_trylock(bo->base.resv)) {
- 		curs->needs_unlock = true;
- 		return true;
- 	}
- 
--	if (bo->base.resv == ctx->resv && ctx->allow_res_evict) {
-+	if (bo->base.resv == ctx->resv &&
-+	    (ctx->allow_res_evict ||
-+	     (ctx->allow_bulk_evict && curs->bulk_move))) {
- 		dma_resv_assert_held(bo->base.resv);
- 		return true;
- 	}
-@@ -844,7 +863,9 @@ static int ttm_lru_walk_ticketlock(struct ttm_bo_lru_cursor *curs,
- 	struct ttm_lru_walk_arg *arg = curs->arg;
- 	int ret;
- 
--	if (arg->ctx->interruptible)
-+	if (arg->ctx->exec)
-+		ret = drm_exec_lock_obj_report_dup(arg->ctx->exec, &bo->base);
-+	else if (arg->ctx->interruptible)
- 		ret = dma_resv_lock_interruptible(bo->base.resv, arg->ticket);
- 	else
- 		ret = dma_resv_lock(bo->base.resv, arg->ticket);
-@@ -858,14 +879,59 @@ static int ttm_lru_walk_ticketlock(struct ttm_bo_lru_cursor *curs,
- 		 * trylocking for this walk.
- 		 */
- 		arg->ticket = NULL;
--	} else if (ret == -EDEADLK) {
-+
-+	} else if (arg->ctx->exec && arg->ctx->allow_res_evict &&
-+		   ret == -EALREADY) {
-+		ret = 0;
-+	} else if (!arg->ctx->exec && ret == -EDEADLK) {
- 		/* Caller needs to exit the ww transaction. */
- 		ret = -ENOSPC;
-+	} else if (arg->ctx->exec && ret == -EALREADY &&
-+		   (arg->ctx->allow_res_evict ||
-+		    (arg->ctx->allow_bulk_evict && curs->bulk_move))) {
-+		ret = 0;
- 	}
- 
- 	return ret;
- }
- 
-+s64 ttm_lru_walk_ordered_bulk_for_evict(struct ttm_lru_walk *walk,
-+					struct ttm_device *bdev,
-+					struct ttm_resource_manager *man,
-+					u32 mem_type,
-+					struct ttm_buffer_object *evictor,
-+					s64 target)
-+{
-+	struct ttm_bo_lru_cursor cursor;
-+	struct ttm_buffer_object *bo;
-+	s64 progress = 0;
-+	s64 lret;
-+
-+	if (!evictor->bulk_move || !evictor->bulk_move->ordered)
-+		return 0;
-+
-+	ttm_bo_lru_for_each_on_bulk_reserved_guarded(
-+		&cursor, man, &walk->arg, bo, mem_type, evictor->bulk_move)
-+	{
-+		/* FIXME: We would actually need to hold bdev->lru_lock to read the orders safely here??? */
-+		if (READ_ONCE(bo->bulk_move_order) >=
-+		    READ_ONCE(evictor->bulk_move_order))
-+			break;
-+
-+		lret = walk->process_bo(walk, bo);
-+		if (lret == -EBUSY)
-+			lret = 0;
-+		progress = (lret < 0) ? lret : progress + lret;
-+		if (progress < 0 || progress >= target)
-+			break;
-+	}
-+	if (IS_ERR(bo))
-+		return PTR_ERR(bo);
-+
-+	return progress;
-+}
-+EXPORT_SYMBOL(ttm_lru_walk_ordered_bulk_for_evict);
-+
- /**
-  * ttm_lru_walk_for_evict() - Perform a LRU list walk, with actions taken on
-  * valid items.
-@@ -906,7 +972,7 @@ s64 ttm_lru_walk_for_evict(struct ttm_lru_walk *walk, struct ttm_device *bdev,
- 	s64 lret;
- 
- 	ttm_bo_lru_for_each_reserved_guarded(&cursor, man, &walk->arg, bo) {
--		lret = walk->ops->process_bo(walk, bo);
-+		lret = walk->process_bo(walk, bo);
- 		if (lret == -EBUSY || lret == -EALREADY)
- 			lret = 0;
- 		progress = (lret < 0) ? lret : progress + lret;
-@@ -924,12 +990,17 @@ static void ttm_bo_lru_cursor_cleanup_bo(struct ttm_bo_lru_cursor *curs)
- {
- 	struct ttm_buffer_object *bo = curs->bo;
- 
--	if (bo) {
--		if (curs->needs_unlock)
-+	if (!bo)
-+		return;
-+
-+	if (curs->needs_unlock) {
-+		if (curs->arg->ctx->exec)
-+			drm_exec_unlock_obj(curs->arg->ctx->exec, &bo->base);
-+		else
- 			dma_resv_unlock(bo->base.resv);
--		ttm_bo_put(bo);
--		curs->bo = NULL;
- 	}
-+	ttm_bo_put(bo);
-+	curs->bo = NULL;
- }
- 
- /**
-@@ -953,6 +1024,8 @@ EXPORT_SYMBOL(ttm_bo_lru_cursor_fini);
-  * @curs: The ttm_bo_lru_cursor to initialize.
-  * @man: The ttm resource_manager whose LRU lists to iterate over.
-  * @arg: The ttm_lru_walk_arg to govern the walk.
-+ * @bulk: Optional ttm_lru_bulk_move; if set, only resource from that
-+ * bulk are included in iteration.
-  *
-  * Initialize a struct ttm_bo_lru_cursor.
-  *
-@@ -961,11 +1034,14 @@ EXPORT_SYMBOL(ttm_bo_lru_cursor_fini);
- struct ttm_bo_lru_cursor *
- ttm_bo_lru_cursor_init(struct ttm_bo_lru_cursor *curs,
- 		       struct ttm_resource_manager *man,
--		       struct ttm_lru_walk_arg *arg)
-+		       struct ttm_lru_walk_arg *arg, u32 mem_type,
-+		       struct ttm_lru_bulk_move *bulk)
- {
- 	memset(curs, 0, sizeof(*curs));
- 	ttm_resource_cursor_init(&curs->res_curs, man);
-+	curs->res_curs.mem_type = mem_type;
- 	curs->arg = arg;
-+	curs->bulk_move = bulk;
- 
- 	return curs;
- }
-@@ -988,23 +1064,32 @@ __ttm_bo_lru_cursor_next(struct ttm_bo_lru_cursor *curs)
- 		bool bo_locked = false;
- 
- 		if (first) {
--			res = ttm_resource_manager_first(&curs->res_curs);
-+			if (curs->bulk_move)
-+				res = ttm_resource_manager_first_on_bulk(&curs->res_curs, curs->bulk_move);
-+			else
-+				res = ttm_resource_manager_first(&curs->res_curs);
- 			first = false;
- 		} else {
--			res = ttm_resource_manager_next(&curs->res_curs);
-+			if (curs->bulk_move)
-+				res = ttm_resource_manager_next_on_bulk(&curs->res_curs);
-+			else
-+				res = ttm_resource_manager_next(&curs->res_curs);
- 		}
- 		if (!res)
- 			break;
- 
- 		bo = res->bo;
--		if (ttm_lru_walk_trylock(curs, bo))
--			bo_locked = true;
--		else if (!arg->ticket || arg->ctx->no_wait_gpu || arg->trylock_only)
-+		if (!ttm_bo_get_unless_zero(bo))
- 			continue;
- 
--		if (!ttm_bo_get_unless_zero(bo)) {
--			if (curs->needs_unlock)
--				dma_resv_unlock(bo->base.resv);
-+		if (ttm_lru_walk_trylock(curs, bo)) {
-+			bo_locked = true;
-+
-+		} else if ((!arg->ticket || arg->ctx->no_wait_gpu ||
-+			    arg->trylock_only) && !arg->ctx->exec) {
-+			spin_unlock(lru_lock);
-+			ttm_bo_put(bo);
-+			spin_lock(lru_lock);
- 			continue;
- 		}
- 
-diff --git a/drivers/gpu/drm/ttm/ttm_device.c b/drivers/gpu/drm/ttm/ttm_device.c
-index d3bfb9a696a74..06fc5255d4091 100644
---- a/drivers/gpu/drm/ttm/ttm_device.c
-+++ b/drivers/gpu/drm/ttm/ttm_device.c
-@@ -171,6 +171,12 @@ int ttm_device_swapout(struct ttm_device *bdev, struct ttm_operation_ctx *ctx,
- 		       gfp_t gfp_flags)
- {
- 	struct ttm_resource_manager *man;
-+	struct ttm_bo_lru_cursor cursor;
-+	struct ttm_buffer_object *bo;
-+	struct ttm_lru_walk_arg arg = {
-+		.ctx = ctx,
-+		.trylock_only = true
-+	};
- 	unsigned i;
- 	s64 lret;
- 
-@@ -179,10 +185,14 @@ int ttm_device_swapout(struct ttm_device *bdev, struct ttm_operation_ctx *ctx,
- 		if (!man || !man->use_tt)
- 			continue;
- 
--		lret = ttm_bo_swapout(bdev, ctx, man, gfp_flags, 1);
--		/* Can be both positive (num_pages) and negative (error) */
--		if (lret)
--			return lret;
-+		ttm_bo_lru_for_each_reserved_guarded(&cursor, man, &arg, bo) {
-+			lret = ttm_bo_swapout(bo, ctx, gfp_flags);
-+			/* Can be both positive (num_pages) and negative (error) */
-+			if (lret && lret != -EBUSY && lret != -EALREADY)
-+				return lret;
-+		}
-+		if (IS_ERR(bo))
-+			return PTR_ERR(bo);
- 	}
- 	return 0;
- }
 diff --git a/drivers/gpu/drm/ttm/ttm_resource.c b/drivers/gpu/drm/ttm/ttm_resource.c
-index 154d6739256f8..071779e7c8e64 100644
+index 154d6739256f8..02eca679cb68c 100644
 --- a/drivers/gpu/drm/ttm/ttm_resource.c
 +++ b/drivers/gpu/drm/ttm/ttm_resource.c
-@@ -122,10 +122,11 @@ void ttm_resource_cursor_fini(struct ttm_resource_cursor *cursor)
-  *
-  * For now just memset the structure to zero.
-  */
--void ttm_lru_bulk_move_init(struct ttm_lru_bulk_move *bulk)
-+void ttm_lru_bulk_move_init(struct ttm_lru_bulk_move *bulk, bool ordered)
- {
- 	memset(bulk, 0, sizeof(*bulk));
- 	INIT_LIST_HEAD(&bulk->cursor_list);
-+	bulk->ordered = ordered;
- }
- EXPORT_SYMBOL(ttm_lru_bulk_move_init);
- 
-@@ -222,6 +223,49 @@ static void ttm_lru_bulk_move_pos_tail(struct ttm_lru_bulk_move_pos *pos,
- 	}
- }
- 
-+/* Move the resource to the appropriate ordered position in the bulk move */
-+static void ttm_lru_bulk_move_pos_ordered(struct ttm_lru_bulk_move_pos *pos,
-+					  struct ttm_resource *res)
-+{
-+	struct ttm_resource *insert_point;
-+
-+	if (pos->first == res && pos->last == res)
-+		return;
-+
-+	if (pos->last == res)
-+		pos->last = ttm_lru_prev_res(res);
-+	if (pos->first == res)
-+		pos->first = ttm_lru_next_res(res);
-+
-+	WARN_ON(pos->last->bo->base.resv != res->bo->base.resv);
-+	WARN_ON(pos->first->bo->base.resv != res->bo->base.resv);
-+
-+	insert_point = pos->last;
-+	while (insert_point != pos->first) {
-+		if (insert_point == res) {
-+			insert_point = ttm_lru_prev_res(insert_point);
-+			WARN_ON(insert_point->bo->base.resv !=
-+				res->bo->base.resv);
-+			continue;
-+		}
-+		if (insert_point->bo->bulk_move_order <=
-+		    res->bo->bulk_move_order)
-+			break;
-+		insert_point = ttm_lru_prev_res(insert_point);
-+		WARN_ON(insert_point->bo->base.resv != res->bo->base.resv);
-+	}
-+
-+	if (insert_point->bo->bulk_move_order > res->bo->bulk_move_order) {
-+		WARN_ON(insert_point != pos->first);
-+		list_move_tail(&res->lru.link, &pos->first->lru.link);
-+		pos->first = res;
-+	} else {
-+		list_move(&res->lru.link, &insert_point->lru.link);
-+		if (insert_point == pos->last)
-+			pos->last = res;
-+	}
-+}
-+
- /* Add the resource to a bulk_move cursor */
- static void ttm_lru_bulk_move_add(struct ttm_lru_bulk_move *bulk,
- 				  struct ttm_resource *res)
-@@ -233,7 +277,10 @@ static void ttm_lru_bulk_move_add(struct ttm_lru_bulk_move *bulk,
- 		pos->last = res;
- 	} else {
- 		WARN_ON(pos->first->bo->base.resv != res->bo->base.resv);
--		ttm_lru_bulk_move_pos_tail(pos, res);
-+		if (bulk->ordered)
-+			ttm_lru_bulk_move_pos_ordered(pos, res);
-+		else
-+			ttm_lru_bulk_move_pos_tail(pos, res);
- 	}
- }
- 
-@@ -320,7 +367,10 @@ void ttm_resource_move_to_lru_tail(struct ttm_resource *res)
- 		struct ttm_lru_bulk_move_pos *pos =
- 			ttm_lru_bulk_move_pos(bo->bulk_move, res);
- 
--		ttm_lru_bulk_move_pos_tail(pos, res);
-+		if (bo->bulk_move->ordered)
-+			ttm_lru_bulk_move_pos_ordered(pos, res);
-+		else
-+			ttm_lru_bulk_move_pos_tail(pos, res);
- 	} else {
- 		struct ttm_resource_manager *man;
- 
-@@ -347,6 +397,7 @@ void ttm_resource_init(struct ttm_buffer_object *bo,
- 	res->size = bo->base.size;
- 	res->mem_type = place->mem_type;
- 	res->placement = place->flags;
-+	res->needs_contiguous = place->flags & TTM_PL_FLAG_CONTIGUOUS;
- 	res->bus.addr = NULL;
- 	res->bus.offset = 0;
- 	res->bus.is_iomem = false;
-@@ -386,33 +437,52 @@ void ttm_resource_fini(struct ttm_resource_manager *man,
+@@ -386,33 +386,52 @@ void ttm_resource_fini(struct ttm_resource_manager *man,
  }
  EXPORT_SYMBOL(ttm_resource_fini);
  
@@ -9462,170 +7068,6 @@ index 154d6739256f8..071779e7c8e64 100644
  
  	spin_lock(&bo->bdev->lru_lock);
  	ttm_resource_add_bulk_move(*res_ptr, bo);
-@@ -561,17 +631,24 @@ EXPORT_SYMBOL(ttm_resource_manager_init);
- int ttm_resource_manager_evict_all(struct ttm_device *bdev,
- 				   struct ttm_resource_manager *man)
- {
--	struct ttm_operation_ctx ctx = { };
-+	struct ttm_bo_lru_cursor cursor;
-+	struct ttm_buffer_object *bo;
-+	struct ttm_operation_ctx ctx = {
-+		.interruptible = false,
-+		.no_wait_gpu = false,
-+	};
-+	struct ttm_lru_walk_arg arg = {
-+		.ctx = &ctx,
-+	};
- 	struct dma_fence *fence;
- 	int ret, i;
- 
--	do {
--		ret = ttm_bo_evict_first(bdev, man, &ctx);
-+	ttm_bo_lru_for_each_reserved_guarded(&cursor, man, &arg, bo) {
-+		ret = ttm_bo_evict(bo, &ctx);
-+		if (ret)
-+			return ret;
- 		cond_resched();
--	} while (!ret);
--
--	if (ret && ret != -ENOENT)
--		return ret;
-+	}
- 
- 	ret = 0;
- 
-@@ -679,6 +756,68 @@ ttm_resource_manager_first(struct ttm_resource_cursor *cursor)
- 	return ttm_resource_manager_next(cursor);
- }
- 
-+struct ttm_resource *
-+ttm_resource_manager_first_on_bulk(struct ttm_resource_cursor *cursor,
-+				   struct ttm_lru_bulk_move *bulk)
-+{
-+	struct ttm_resource_manager *man = cursor->man;
-+	struct ttm_resource *first;
-+
-+	if (WARN_ON_ONCE(!man))
-+		return NULL;
-+
-+	lockdep_assert_held(&man->bdev->lru_lock);
-+
-+	for (;;) {
-+		first = bulk->pos[cursor->mem_type][cursor->priority].first;
-+
-+		if (first)
-+			break;
-+		if (++cursor->priority >= TTM_MAX_BO_PRIORITY)
-+			return NULL;
-+	}
-+
-+	ttm_resource_cursor_check_bulk(cursor, &first->lru);
-+	list_move(&cursor->hitch.link, &first->lru.link);
-+	return first;
-+}
-+
-+struct ttm_resource *
-+ttm_resource_manager_next_on_bulk(struct ttm_resource_cursor *cursor)
-+{
-+	struct ttm_resource_manager *man = cursor->man;
-+	struct ttm_lru_bulk_move *bulk = cursor->bulk;
-+	struct ttm_lru_item *lru;
-+
-+	lockdep_assert_held(&man->bdev->lru_lock);
-+
-+	if (WARN_ON(!bulk))
-+		return NULL;
-+
-+	for (;;) {
-+		lru = &cursor->hitch;
-+		list_for_each_entry_continue(lru, &man->lru[cursor->priority],
-+					     link) {
-+			if (!ttm_lru_item_is_res(lru))
-+				continue;
-+
-+			ttm_resource_cursor_check_bulk(cursor, lru);
-+			if (cursor->bulk != bulk)
-+				break;
-+
-+			list_move(&cursor->hitch.link, &lru->link);
-+			return ttm_lru_item_to_res(lru);
-+		}
-+
-+		if (++cursor->priority >= TTM_MAX_BO_PRIORITY)
-+			break;
-+
-+		return ttm_resource_manager_first_on_bulk(cursor, bulk);
-+	}
-+
-+	return NULL;
-+}
-+
- /**
-  * ttm_resource_manager_next() - Continue iterating over the resource manager
-  * resources
-diff --git a/drivers/gpu/drm/xe/xe_bo.c b/drivers/gpu/drm/xe/xe_bo.c
-index 7ed76349075fd..b8cc4391ae419 100644
---- a/drivers/gpu/drm/xe/xe_bo.c
-+++ b/drivers/gpu/drm/xe/xe_bo.c
-@@ -1654,31 +1654,6 @@ static unsigned long xe_ttm_io_mem_pfn(struct ttm_buffer_object *ttm_bo,
- 
- static void __xe_bo_vunmap(struct xe_bo *bo);
- 
--/*
-- * TODO: Move this function to TTM so we don't rely on how TTM does its
-- * locking, thereby abusing TTM internals.
-- */
--static bool xe_ttm_bo_lock_in_destructor(struct ttm_buffer_object *ttm_bo)
--{
--	struct xe_device *xe = ttm_to_xe_device(ttm_bo->bdev);
--	bool locked;
--
--	xe_assert(xe, !kref_read(&ttm_bo->kref));
--
--	/*
--	 * We can typically only race with TTM trylocking under the
--	 * lru_lock, which will immediately be unlocked again since
--	 * the ttm_bo refcount is zero at this point. So trylocking *should*
--	 * always succeed here, as long as we hold the lru lock.
--	 */
--	spin_lock(&ttm_bo->bdev->lru_lock);
--	locked = dma_resv_trylock(&ttm_bo->base._resv);
--	spin_unlock(&ttm_bo->bdev->lru_lock);
--	xe_assert(xe, locked);
--
--	return locked;
--}
--
- static void xe_ttm_bo_release_notify(struct ttm_buffer_object *ttm_bo)
- {
- 	struct dma_resv_iter cursor;
-@@ -1692,8 +1667,11 @@ static void xe_ttm_bo_release_notify(struct ttm_buffer_object *ttm_bo)
- 	bo = ttm_to_xe_bo(ttm_bo);
- 	xe_assert(xe_bo_device(bo), !(bo->created && kref_read(&ttm_bo->base.refcount)));
- 
--	if (!xe_ttm_bo_lock_in_destructor(ttm_bo))
--		return;
-+	/*
-+	 * This should never fail since there are no other references to the BO
-+	 * any more.
-+	 */
-+	WARN_ON(!dma_resv_trylock(ttm_bo->base.resv));
- 
- 	/*
- 	 * Scrub the preempt fences if any. The unbind fence is already
-diff --git a/drivers/gpu/drm/xe/xe_vm.c b/drivers/gpu/drm/xe/xe_vm.c
-index 67819deb45e3c..6c9f2d6415ef7 100644
---- a/drivers/gpu/drm/xe/xe_vm.c
-+++ b/drivers/gpu/drm/xe/xe_vm.c
-@@ -1655,7 +1655,7 @@ struct xe_vm *xe_vm_create(struct xe_device *xe, u32 flags, struct xe_file *xef)
- 	INIT_LIST_HEAD(&vm->faults.list);
- 	spin_lock_init(&vm->faults.lock);
- 
--	ttm_lru_bulk_move_init(&vm->lru_bulk_move);
-+	ttm_lru_bulk_move_init(&vm->lru_bulk_move, false);
- 
- 	INIT_WORK(&vm->destroy_work, vm_destroy_work_func);
- 
 diff --git a/drivers/hid/Kconfig b/drivers/hid/Kconfig
 index f9bcaeb66385b..48934c4f3c45c 100644
 --- a/drivers/hid/Kconfig
@@ -28937,258 +26379,11 @@ index 7bfbd9f6f0dff..1b36cf12d4e3e 100644
  	error = xfs_log_regrant(tp->t_mountp, tp->t_ticket);
  	if (error)
  		return error;
-diff --git a/include/drm/drm_exec.h b/include/drm/drm_exec.h
-index cc2937185a9f7..1c1fde77f368b 100644
---- a/include/drm/drm_exec.h
-+++ b/include/drm/drm_exec.h
-@@ -178,6 +178,8 @@ void drm_exec_init(struct drm_exec *exec, u32 flags, unsigned nr);
- void drm_exec_fini(struct drm_exec *exec);
- bool drm_exec_cleanup(struct drm_exec *exec);
- int drm_exec_lock_obj(struct drm_exec *exec, struct drm_gem_object *obj);
-+int drm_exec_lock_obj_report_dup(struct drm_exec *exec,
-+				 struct drm_gem_object *obj);
- void drm_exec_unlock_obj(struct drm_exec *exec, struct drm_gem_object *obj);
- int drm_exec_prepare_obj(struct drm_exec *exec, struct drm_gem_object *obj,
- 			 unsigned int num_fences);
-diff --git a/include/drm/ttm/ttm_bo.h b/include/drm/ttm/ttm_bo.h
-index 8310bc3d55f90..03337d8c38139 100644
---- a/include/drm/ttm/ttm_bo.h
-+++ b/include/drm/ttm/ttm_bo.h
-@@ -70,6 +70,8 @@ enum ttm_bo_type {
- 	ttm_bo_type_sg
- };
- 
-+#define TTM_CONTIGUOUS_PIN_TIMEOUT 20000000L
-+
- /**
-  * struct ttm_buffer_object
-  *
-@@ -78,11 +80,8 @@ enum ttm_bo_type {
-  * @type: The bo type.
-  * @page_alignment: Page alignment.
-  * @destroy: Destruction function. If NULL, kfree is used.
-- * @kref: Reference count of this buffer object. When this refcount reaches
-- * zero, the object is destroyed or put on the delayed delete list.
-  * @resource: structure describing current placement.
-  * @ttm: TTM structure holding system pages.
-- * @deleted: True if the object is only a zombie and already deleted.
-  * @bulk_move: The bulk move object.
-  * @priority: Priority for LRU, BOs with lower priority are evicted first.
-  * @pin_count: Pin count.
-@@ -109,21 +108,18 @@ struct ttm_buffer_object {
- 	uint32_t page_alignment;
- 	void (*destroy) (struct ttm_buffer_object *);
- 
--	/*
--	* Members not needing protection.
--	*/
--	struct kref kref;
--
- 	/*
- 	 * Members protected by the bo::resv::reserved lock.
- 	 */
- 	struct ttm_resource *resource;
- 	struct ttm_tt *ttm;
--	bool deleted;
- 	struct ttm_lru_bulk_move *bulk_move;
-+	uint32_t bulk_move_order;
- 	unsigned priority;
- 	unsigned pin_count;
- 
-+	s64 last_pin_us;
-+
- 	/**
- 	 * @delayed_delete: Work item used when we can't delete the BO
- 	 * immediately
-@@ -187,6 +183,9 @@ struct ttm_operation_ctx {
- 	 * when multiple BOs share the same reservation object @resv.
- 	 */
- 	bool allow_res_evict;
-+	bool allow_bulk_evict;
-+	/** @cgroup_throttle: Avoid claiming protected memory aggressively. */
-+	bool cgroup_throttle;
- 	/**
- 	 * @resv: Reservation object to be used together with
- 	 * @allow_res_evict.
-@@ -196,24 +195,12 @@ struct ttm_operation_ctx {
- 	 * @bytes_moved: Statistics on how many bytes have been moved.
- 	 */
- 	uint64_t bytes_moved;
--};
--
--struct ttm_lru_walk;
--
--/** struct ttm_lru_walk_ops - Operations for a LRU walk. */
--struct ttm_lru_walk_ops {
-+	uint32_t unsuccessful_evicts;
- 	/**
--	 * process_bo - Process this bo.
--	 * @walk: struct ttm_lru_walk describing the walk.
--	 * @bo: A locked and referenced buffer object.
--	 *
--	 * Return: Negative error code on error, User-defined positive value
--	 * (typically, but not always, size of the processed bo) on success.
--	 * On success, the returned values are summed by the walk and the
--	 * walk exits when its target is met.
--	 * 0 also indicates success, -EBUSY means this bo was skipped.
-+	 * @exec: optional drm_exec object to use for locking BOs and
-+	 * tracking which are locked.
- 	 */
--	s64 (*process_bo)(struct ttm_lru_walk *walk, struct ttm_buffer_object *bo);
-+	struct drm_exec *exec;
- };
- 
- /**
-@@ -232,14 +219,32 @@ struct ttm_lru_walk_arg {
-  * struct ttm_lru_walk - Structure describing a LRU walk.
-  */
- struct ttm_lru_walk {
--	/** @ops: Pointer to the ops structure. */
--	const struct ttm_lru_walk_ops *ops;
-+	/**
-+	 * process_bo - Process this bo.
-+	 * @walk: struct ttm_lru_walk describing the walk.
-+	 * @bo: A locked and referenced buffer object.
-+	 *
-+	 * Return: Negative error code on error, User-defined positive value
-+	 * (typically, but not always, size of the processed bo) on success.
-+	 * On success, the returned values are summed by the walk and the
-+	 * walk exits when its target is met.
-+	 * 0 also indicates success, -EBUSY means this bo was skipped.
-+	 */
-+	s64 (*process_bo)(struct ttm_lru_walk *walk,
-+			  struct ttm_buffer_object *bo);
-+
- 	/** @arg: Common bo LRU walk arguments. */
- 	struct ttm_lru_walk_arg arg;
- };
- 
- s64 ttm_lru_walk_for_evict(struct ttm_lru_walk *walk, struct ttm_device *bdev,
- 			   struct ttm_resource_manager *man, s64 target);
-+s64 ttm_lru_walk_ordered_bulk_for_evict(struct ttm_lru_walk *walk,
-+					struct ttm_device *bdev,
-+					struct ttm_resource_manager *man,
-+					u32 mem_type,
-+					struct ttm_buffer_object *evictor,
-+					s64 target);
- 
- /**
-  * struct ttm_bo_shrink_flags - flags to govern the bo shrinking behaviour
-@@ -404,6 +409,10 @@ int ttm_bo_validate(struct ttm_buffer_object *bo,
- void ttm_bo_fini(struct ttm_buffer_object *bo);
- void ttm_bo_set_bulk_move(struct ttm_buffer_object *bo,
- 			  struct ttm_lru_bulk_move *bulk);
-+void ttm_bo_set_bulk_move_ordered(struct ttm_buffer_object *bo,
-+				  struct ttm_lru_bulk_move *bulk,
-+				  uint32_t bulk_order);
-+int ttm_bo_evict(struct ttm_buffer_object *bo, struct ttm_operation_ctx *ctx);
- bool ttm_bo_eviction_valuable(struct ttm_buffer_object *bo,
- 			      const struct ttm_place *place);
- int ttm_bo_init_reserved(struct ttm_device *bdev, struct ttm_buffer_object *bo,
-@@ -423,9 +432,8 @@ void *ttm_bo_kmap_try_from_panic(struct ttm_buffer_object *bo, unsigned long pag
- int ttm_bo_vmap(struct ttm_buffer_object *bo, struct iosys_map *map);
- void ttm_bo_vunmap(struct ttm_buffer_object *bo, struct iosys_map *map);
- int ttm_bo_mmap_obj(struct vm_area_struct *vma, struct ttm_buffer_object *bo);
--s64 ttm_bo_swapout(struct ttm_device *bdev, struct ttm_operation_ctx *ctx,
--		   struct ttm_resource_manager *man, gfp_t gfp_flags,
--		   s64 target);
-+s64 ttm_bo_swapout(struct ttm_buffer_object *bo, struct ttm_operation_ctx *ctx,
-+		   gfp_t gfp_flags);
- void ttm_bo_pin(struct ttm_buffer_object *bo);
- void ttm_bo_unpin(struct ttm_buffer_object *bo);
- int ttm_bo_evict_first(struct ttm_device *bdev,
-@@ -497,16 +505,21 @@ struct ttm_bo_lru_cursor {
- 	 * unlock before the next iteration or after loop exit.
- 	 */
- 	bool needs_unlock;
-+	/**
-+	 * @bulk_move: Optional pointer to a bulk_move structure to iterate
-+	 * over. If non-NULL, only buffers from that bulk move are included
-+	 * in the iteration.
-+	 */
-+	struct ttm_lru_bulk_move *bulk_move;
- 	/** @arg: Pointer to common BO LRU walk arguments. */
- 	struct ttm_lru_walk_arg *arg;
- };
- 
- void ttm_bo_lru_cursor_fini(struct ttm_bo_lru_cursor *curs);
- 
--struct ttm_bo_lru_cursor *
--ttm_bo_lru_cursor_init(struct ttm_bo_lru_cursor *curs,
--		       struct ttm_resource_manager *man,
--		       struct ttm_lru_walk_arg *arg);
-+struct ttm_bo_lru_cursor *ttm_bo_lru_cursor_init(
-+	struct ttm_bo_lru_cursor *curs, struct ttm_resource_manager *man,
-+	struct ttm_lru_walk_arg *arg, u32 mem_type, struct ttm_lru_bulk_move *bulk);
- 
- struct ttm_buffer_object *ttm_bo_lru_cursor_first(struct ttm_bo_lru_cursor *curs);
- 
-@@ -515,11 +528,12 @@ struct ttm_buffer_object *ttm_bo_lru_cursor_next(struct ttm_bo_lru_cursor *curs)
- /*
-  * Defines needed to use autocleanup (linux/cleanup.h) with struct ttm_bo_lru_cursor.
-  */
--DEFINE_CLASS(ttm_bo_lru_cursor, struct ttm_bo_lru_cursor *,
--	     if (_T) {ttm_bo_lru_cursor_fini(_T); },
--	     ttm_bo_lru_cursor_init(curs, man, arg),
--	     struct ttm_bo_lru_cursor *curs, struct ttm_resource_manager *man,
--	     struct ttm_lru_walk_arg *arg);
-+DEFINE_CLASS(
-+	ttm_bo_lru_cursor, struct ttm_bo_lru_cursor *,
-+	if (_T) { ttm_bo_lru_cursor_fini(_T); },
-+	ttm_bo_lru_cursor_init(curs, man, arg, mem_type, bulk),
-+	struct ttm_bo_lru_cursor *curs, struct ttm_resource_manager *man,
-+	struct ttm_lru_walk_arg *arg, u32 mem_type, struct ttm_lru_bulk_move *bulk);
- static inline void *
- class_ttm_bo_lru_cursor_lock_ptr(class_ttm_bo_lru_cursor_t *_T)
- { return *_T; }
-@@ -548,9 +562,16 @@ class_ttm_bo_lru_cursor_lock_ptr(class_ttm_bo_lru_cursor_t *_T)
-  * dereference @_bo after loop exit.
-  */
- #define ttm_bo_lru_for_each_reserved_guarded(_cursor, _man, _arg, _bo)	\
--	scoped_guard(ttm_bo_lru_cursor, _cursor, _man, _arg)		\
-+	scoped_guard(ttm_bo_lru_cursor, _cursor, _man, _arg, 0, NULL)	\
- 		for ((_bo) = ttm_bo_lru_cursor_first(_cursor);		\
- 		       !IS_ERR_OR_NULL(_bo);				\
- 		       (_bo) = ttm_bo_lru_cursor_next(_cursor))
- 
-+#define ttm_bo_lru_for_each_on_bulk_reserved_guarded(_cursor, _man, _arg, _bo,	\
-+						     _mem_type, _bulk)		\
-+	scoped_guard(ttm_bo_lru_cursor, _cursor, _man, _arg, _mem_type, _bulk)	\
-+		for ((_bo) = ttm_bo_lru_cursor_first(_cursor);			\
-+			   !IS_ERR_OR_NULL(_bo);				\
-+			   (_bo) = ttm_bo_lru_cursor_next(_cursor))
-+
- #endif
 diff --git a/include/drm/ttm/ttm_resource.h b/include/drm/ttm/ttm_resource.h
-index a5d386583fb6e..93673e405119d 100644
+index a5d386583fb6e..e567b7ec8218f 100644
 --- a/include/drm/ttm/ttm_resource.h
 +++ b/include/drm/ttm/ttm_resource.h
-@@ -265,6 +265,7 @@ struct ttm_resource {
- 	size_t size;
- 	uint32_t mem_type;
- 	uint32_t placement;
-+	bool needs_contiguous;
- 	struct ttm_bus_placement bus;
- 	struct ttm_buffer_object *bo;
- 
-@@ -316,6 +317,7 @@ struct ttm_lru_bulk_move_pos {
- struct ttm_lru_bulk_move {
- 	struct ttm_lru_bulk_move_pos pos[TTM_NUM_MEM_TYPES][TTM_MAX_BO_PRIORITY];
- 	struct list_head cursor_list;
-+	bool ordered;
- };
- 
- /**
-@@ -439,7 +441,7 @@ ttm_resource_manager_cleanup(struct ttm_resource_manager *man)
- 	}
- }
- 
--void ttm_lru_bulk_move_init(struct ttm_lru_bulk_move *bulk);
-+void ttm_lru_bulk_move_init(struct ttm_lru_bulk_move *bulk, bool ordered);
- void ttm_lru_bulk_move_tail(struct ttm_lru_bulk_move *bulk);
- void ttm_lru_bulk_move_fini(struct ttm_device *bdev,
- 			    struct ttm_lru_bulk_move *bulk);
-@@ -458,10 +460,14 @@ void ttm_resource_init(struct ttm_buffer_object *bo,
+@@ -458,10 +458,14 @@ void ttm_resource_init(struct ttm_buffer_object *bo,
  void ttm_resource_fini(struct ttm_resource_manager *man,
  		       struct ttm_resource *res);
  
@@ -29204,30 +26399,6 @@ index a5d386583fb6e..93673e405119d 100644
  void ttm_resource_free(struct ttm_buffer_object *bo, struct ttm_resource **res);
  bool ttm_resource_intersects(struct ttm_device *bdev,
  			     struct ttm_resource *res,
-@@ -487,7 +493,12 @@ void ttm_resource_manager_debug(struct ttm_resource_manager *man,
- struct ttm_resource *
- ttm_resource_manager_first(struct ttm_resource_cursor *cursor);
- struct ttm_resource *
-+ttm_resource_manager_first_on_bulk(struct ttm_resource_cursor *cursor,
-+				   struct ttm_lru_bulk_move *bulk);
-+struct ttm_resource *
- ttm_resource_manager_next(struct ttm_resource_cursor *cursor);
-+struct ttm_resource *
-+ttm_resource_manager_next_on_bulk(struct ttm_resource_cursor *cursor);
- 
- struct ttm_resource *
- ttm_lru_first_res_or_null(struct list_head *head);
-@@ -503,6 +514,10 @@ ttm_lru_first_res_or_null(struct list_head *head);
- 	for (res = ttm_resource_manager_first(cursor); res;	\
- 	     res = ttm_resource_manager_next(cursor))
- 
-+#define ttm_resource_manager_for_each_res_on_bulk(cursor, res, bulk)      \
-+	for (res = ttm_resource_manager_first_on_bulk(cursor, bulk); res; \
-+	     res = ttm_resource_manager_next_on_bulk(cursor))
-+
- struct ttm_kmap_iter *
- ttm_kmap_iter_iomap_init(struct ttm_kmap_iter_iomap *iter_io,
- 			 struct io_mapping *iomap,
 diff --git a/include/kunit/run-in-irq-context.h b/include/kunit/run-in-irq-context.h
 index bfe60d6cf28d8..3802b6fb218ed 100644
 --- a/include/kunit/run-in-irq-context.h
@@ -29646,7 +26817,7 @@ index 31ce349ed42ce..23db2b3d81161 100644
  	}
  }
 diff --git a/include/linux/sched.h b/include/linux/sched.h
-index 373bcc0598d10..f5af9b73f13cb 100644
+index 373bcc0598d10..98297da6ead7b 100644
 --- a/include/linux/sched.h
 +++ b/include/linux/sched.h
 @@ -862,6 +862,7 @@ struct task_struct {
@@ -29657,7 +26828,7 @@ index 373bcc0598d10..f5af9b73f13cb 100644
  	/*
  	 * recent_used_cpu is initially set as the last CPU used by a task
  	 * that wakes affine another task. Waker/wakee relationships can
-@@ -871,12 +872,28 @@ struct task_struct {
+@@ -871,12 +872,29 @@ struct task_struct {
  	 */
  	int				recent_used_cpu;
  	int				wake_cpu;
@@ -29671,13 +26842,14 @@ index 373bcc0598d10..f5af9b73f13cb 100644
 +#ifdef CONFIG_SCHED_ALT
 +	u64				last_ran;
 +	s64				time_slice;
++	u64				sleep_start;
++	u64				wake_start;
 +	struct list_head		sq_node;
 +#ifdef CONFIG_SCHED_BMQ
 +	int				boost_prio;
 +#endif /* CONFIG_SCHED_BMQ */
 +#ifdef CONFIG_SCHED_PDS
 +	u64				deadline;
-+	u64				sleep_start;
 +	u64				sleep_credit;
 +#endif /* CONFIG_SCHED_PDS */
 +	/* sched_clock time spent running */
@@ -29686,7 +26858,7 @@ index 373bcc0598d10..f5af9b73f13cb 100644
  	struct sched_entity		se;
  	struct sched_rt_entity		rt;
  	struct sched_dl_entity		dl;
-@@ -891,6 +908,7 @@ struct task_struct {
+@@ -891,6 +909,7 @@ struct task_struct {
  	unsigned long			core_cookie;
  	unsigned int			core_occupation;
  #endif
@@ -29694,7 +26866,7 @@ index 373bcc0598d10..f5af9b73f13cb 100644
  
  #ifdef CONFIG_CGROUP_SCHED
  	struct task_group		*sched_task_group;
-@@ -932,9 +950,13 @@ struct task_struct {
+@@ -932,9 +951,13 @@ struct task_struct {
  	const cpumask_t			*cpus_ptr;
  	cpumask_t			*user_cpus_ptr;
  	cpumask_t			cpus_mask;
@@ -29708,7 +26880,7 @@ index 373bcc0598d10..f5af9b73f13cb 100644
  
  #ifdef CONFIG_PREEMPT_RCU
  	int				rcu_read_lock_nesting;
-@@ -965,8 +987,10 @@ struct task_struct {
+@@ -965,8 +988,10 @@ struct task_struct {
  	struct sched_info		sched_info;
  
  	struct list_head		tasks;
@@ -29719,7 +26891,7 @@ index 373bcc0598d10..f5af9b73f13cb 100644
  
  	struct mm_struct		*mm;
  	struct mm_struct		*active_mm;
-@@ -1543,6 +1567,14 @@ struct task_struct {
+@@ -1543,6 +1568,14 @@ struct task_struct {
  
  	/* Collect coverage from softirq context: */
  	unsigned int			kcov_softirq;
@@ -29734,7 +26906,7 @@ index 373bcc0598d10..f5af9b73f13cb 100644
  #endif
  
  #ifdef CONFIG_MEMCG_V1
-@@ -1682,6 +1714,15 @@ static inline bool sched_proxy_exec(void)
+@@ -1682,6 +1715,15 @@ static inline bool sched_proxy_exec(void)
  }
  #endif
  
@@ -29750,7 +26922,7 @@ index 373bcc0598d10..f5af9b73f13cb 100644
  #define TASK_REPORT_IDLE	(TASK_REPORT + 1)
  #define TASK_REPORT_MAX		(TASK_REPORT_IDLE << 1)
  
-@@ -2285,7 +2326,11 @@ static inline void set_task_cpu(struct task_struct *p, unsigned int cpu)
+@@ -2285,7 +2327,11 @@ static inline void set_task_cpu(struct task_struct *p, unsigned int cpu)
  
  static inline bool task_is_runnable(struct task_struct *p)
  {
@@ -29762,7 +26934,7 @@ index 373bcc0598d10..f5af9b73f13cb 100644
  }
  
  extern bool sched_task_on_rq(struct task_struct *p);
-@@ -2429,10 +2474,33 @@ DECLARE_PER_CPU_SHARED_ALIGNED(struct rq, runqueues);
+@@ -2429,10 +2475,33 @@ DECLARE_PER_CPU_SHARED_ALIGNED(struct rq, runqueues);
  #endif
  #define this_rq_pinned() (*(unsigned int *)((void *)this_rq_raw() + RQ_nr_pinned))
  
@@ -29796,7 +26968,7 @@ index 373bcc0598d10..f5af9b73f13cb 100644
  #ifdef CONFIG_DEBUG_PREEMPT
  	/*
  	 * Check both overflow from migrate_disable() and superfluous
-@@ -2452,8 +2520,17 @@ static inline void __migrate_enable(void)
+@@ -2452,8 +2521,17 @@ static inline void __migrate_enable(void)
  	 * __set_cpus_allowed_ptr(SCA_MIGRATE_ENABLE) doesn't schedule().
  	 */
  	guard(preempt)();
@@ -29814,7 +26986,7 @@ index 373bcc0598d10..f5af9b73f13cb 100644
  	/*
  	 * Mustn't clear migration_disabled() until cpus_ptr points back at the
  	 * regular cpus_mask, otherwise things that race (eg.
-@@ -2480,8 +2557,20 @@ static inline void __migrate_disable(void)
+@@ -2480,8 +2558,20 @@ static inline void __migrate_disable(void)
  	}
  
  	guard(preempt)();
@@ -30560,18 +27732,6 @@ index e9039e73d058a..390ace5bb252b 100644
  	struct se_tpg_np *(*fabric_make_np)(struct se_portal_group *,
  				struct config_group *, const char *);
  	void (*fabric_drop_np)(struct se_tpg_np *);
-diff --git a/include/uapi/drm/amdgpu_drm.h b/include/uapi/drm/amdgpu_drm.h
-index 9f3090db2f163..a2b831d6dccc0 100644
---- a/include/uapi/drm/amdgpu_drm.h
-+++ b/include/uapi/drm/amdgpu_drm.h
-@@ -806,6 +806,7 @@ union drm_amdgpu_wait_fences {
- #define AMDGPU_GEM_OP_GET_GEM_CREATE_INFO	0
- #define AMDGPU_GEM_OP_SET_PLACEMENT		1
- #define AMDGPU_GEM_OP_GET_MAPPING_INFO		2
-+#define AMDGPU_GEM_OP_SET_PRIORITY              3
- 
- struct drm_amdgpu_gem_vm_entry {
- 	/* Start of mapping (in bytes) */
 diff --git a/include/uapi/linux/inet_diag.h b/include/uapi/linux/inet_diag.h
 index 21f0d735fbae2..80794f609cfe5 100644
 --- a/include/uapi/linux/inet_diag.h
@@ -32736,10 +29896,10 @@ index b1f1a367034ff..0c1f4f030509c 100644
  obj-y += build_utility.o
 diff --git a/kernel/sched/alt_core.c b/kernel/sched/alt_core.c
 new file mode 100644
-index 0000000000000..300f7677438c4
+index 0000000000000..cc65701c438d0
 --- /dev/null
 +++ b/kernel/sched/alt_core.c
-@@ -0,0 +1,8144 @@
+@@ -0,0 +1,8207 @@
 +/*
 + *  kernel/sched/alt_core.c
 + *
@@ -34713,11 +31873,11 @@ index 0000000000000..300f7677438c4
 +	 */
 +	if (time_after(jiffies, current->wakee_flip_decay_ts + HZ)) {
 +		current->wakee_flips >>= 1;
-+		current->wakee_flip_decay_ts = jiffies;
++		WRITE_ONCE(current->wakee_flip_decay_ts, jiffies);
 +	}
 +
 +	if (current->last_wakee != p) {
-+		current->last_wakee = p;
++		WRITE_ONCE(current->last_wakee, p);
 +		current->wakee_flips++;
 +	}
 +}
@@ -34829,16 +31989,17 @@ index 0000000000000..300f7677438c4
 +	}
 +
 +	if (want_affine) {
-+		int affine_cpu = wake_affine_idle(cpu, prev_cpu, sync);
++		int affine_cpu = nr_cpu_ids;
 +
-+		if (affine_cpu == cpu && cpumask_test_cpu(cpu, &allow_mask)) {
-+			int i;
-+
++		if (!is_idle_task(current)) {
 +			cpumask_and(&mask, cpu_smt_mask(cpu), &allow_mask);
-+			i = cpumask_any_but(&mask, cpu);
-+			new_cpu = i < nr_cpu_ids ? i : cpu;
-+			goto out;
++			affine_cpu = cpumask_any_but(&mask, cpu);
 +		}
++		if (affine_cpu >= nr_cpu_ids)
++			affine_cpu = wake_affine_idle(cpu, prev_cpu, sync);
++		else if (!available_idle_cpu(affine_cpu) &&
++			 cpumask_intersects(&allow_mask, sched_idle_mask))
++			affine_cpu = nr_cpu_ids;
 +		if (affine_cpu < nr_cpu_ids &&
 +		    cpumask_test_cpu(affine_cpu, &allow_mask)) {
 +			new_cpu = affine_cpu;
@@ -35197,6 +32358,8 @@ index 0000000000000..300f7677438c4
 +		delayacct_blkio_end(p);
 +		atomic_dec(&task_rq(p)->nr_iowait);
 +	}
++
++	WRITE_ONCE(p->wake_start, rq->clock);
 +
 +	activate_task(p, rq, en_flags);
 +	wakeup_preempt(rq);
@@ -36905,6 +34068,63 @@ index 0000000000000..300f7677438c4
 +}
 +__setup("resched_latency_warn_ms=", setup_resched_latency_warn_ms);
 +
++#ifdef CONFIG_SCHED_SMT
++static void smt_balance_kick(struct rq *rq)
++{
++	int cpu = cpu_of(rq), sibling, target;
++	struct rq *target_rq;
++	cpumask_t mask;
++
++	if (rq->nr_running != 1 || cpumask_empty(sched_idle_mask) ||
++	    !cpumask_test_cpu(cpu, &sched_smt_mask))
++		return;
++
++	for_each_cpu_and(sibling, cpu_smt_mask(cpu), &sched_smt_mask)
++		if (sibling != cpu &&
++		    (cpumask_test_cpu(sibling, sched_idle_mask) ||
++		     cpumask_test_cpu(sibling, &sched_rq_pending_mask)))
++			return;
++
++	cpumask_copy(&mask, sched_sg_idle_mask);
++	if (per_cpu(sched_cpu_topo, cpu) == CPU_TOPOLOGY_PCORE &&
++	    cpumask_empty(sched_pcore_idle_mask))
++		cpumask_or(&mask, &mask, sched_ecore_idle_mask);
++
++	/*
++	 * Other CPUs can clear the last idle core while we hold only this
++	 * rq's lock. Select from a nonempty snapshot, restricted to CPUs the
++	 * task can use, rather than looking up a CPU in the live idle mask.
++	 */
++	if (!cpumask_and(&mask, &mask, rq->curr->cpus_ptr) ||
++	    !cpumask_and(&mask, &mask, cpu_active_mask))
++		return;
++
++	if (sched_smt_group_paired(rq, cpu))
++		return;
++
++	target = best_mask_cpu(cpu, &mask);
++	if (target >= nr_cpu_ids)
++		return;
++
++	target_rq = cpu_rq(target);
++	if (raw_spin_rq_trylock(target_rq)) {
++		if (target_rq->online && idle_rq(target_rq) &&
++		    (cpumask_test_cpu(target, sched_sg_idle_mask) ||
++		     cpumask_test_cpu(target, sched_ecore_idle_mask))) {
++			/*
++			 * The target queues its own callback in __schedule(),
++			 * including the SM_IDLE fast path. Callbacks must not
++			 * remain queued across an rq unlock/relock boundary.
++			 */
++			resched_curr(target_rq);
++		}
++		raw_spin_rq_unlock(target_rq);
++	}
++}
++#else
++static inline void smt_balance_kick(struct rq *rq) { }
++#endif
++
 +/*
 + * This function gets called by the timer code, with HZ frequency.
 + * We call it with interrupts disabled.
@@ -36932,6 +34152,7 @@ index 0000000000000..300f7677438c4
 +		resched_curr(rq);
 +
 +	scheduler_task_tick(rq);
++	smt_balance_kick(rq);
 +	if (sched_feat(LATENCY_WARN))
 +		resched_latency = cpu_resched_latency(rq);
 +	calc_global_load_tick(rq);
@@ -37015,6 +34236,7 @@ index 0000000000000..300f7677438c4
 +				WARN_ON_ONCE(delta > (u64)NSEC_PER_SEC * 30);
 +			}
 +			scheduler_task_tick(rq);
++			smt_balance_kick(rq);
 +
 +			calc_load_nohz_remote(rq);
 +		}
@@ -37608,6 +34830,7 @@ index 0000000000000..300f7677438c4
 +	prev_state = READ_ONCE(prev->__state);
 +	if (sched_mode == SM_IDLE) {
 +		if (!rq->nr_running) {
++			sched_cpu_topology_balance(cpu, rq);
 +			next = prev;
 +			goto picked;
 +		}
@@ -42391,10 +39614,10 @@ index 0000000000000..ab674929683aa
 +#endif /* _KERNEL_SCHED_ALT_SCHED_H */
 diff --git a/kernel/sched/alt_topology.c b/kernel/sched/alt_topology.c
 new file mode 100644
-index 0000000000000..cb6fe0cd28425
+index 0000000000000..3bb4e593dbe5c
 --- /dev/null
 +++ b/kernel/sched/alt_topology.c
-@@ -0,0 +1,717 @@
+@@ -0,0 +1,751 @@
 +#include "alt_core.h"
 +#include "alt_topology.h"
 +
@@ -42733,6 +39956,39 @@ index 0000000000000..cb6fe0cd28425
 +	return true;
 +}
 +
++static bool sched_wakee_recent(struct task_struct *p, u64 now)
++{
++	s64 delta = now - READ_ONCE(p->wake_start);
++
++	return time_before(jiffies, READ_ONCE(p->wakee_flip_decay_ts) + 2 * HZ) &&
++	       delta >= 0 && delta < TICK_NSEC;
++}
++
++bool sched_smt_group_paired(struct rq *rq, int cpu)
++{
++	struct task_struct *p = rcu_dereference_all(cpu_rq(cpu)->curr);
++	u64 now = rq_clock(rq);
++	int sibling;
++
++	if (!sched_wakee_recent(p, now))
++		return false;
++
++	for_each_cpu_and(sibling, cpu_smt_mask(cpu), &sched_smt_mask) {
++		struct task_struct *q;
++
++		if (sibling == cpu)
++			continue;
++
++		q = rcu_dereference_all(cpu_rq(sibling)->curr);
++		if (READ_ONCE(p->last_wakee) == q &&
++		    READ_ONCE(q->last_wakee) == p &&
++		    sched_wakee_recent(q, now))
++			return true;
++	}
++
++	return false;
++}
++
 +static inline int
 +smt_source_balance(struct rq *rq, cpumask_t *single_task_mask,
 +		   const struct cpumask *source_mask, cpumask_t *target_mask)
@@ -42749,6 +40005,7 @@ index 0000000000000..cb6fe0cd28425
 +
 +		for_each_cpu_wrap(i, &smt_single_mask, cpu) {
 +			if (sched_smt_group_busy(i, &smt_single_mask) &&
++			    !sched_smt_group_paired(rq, i) &&
 +			    trigger_active_balance(rq, cpu_rq(i), target_mask))
 +				return 1;
 +		}
@@ -43114,10 +40371,10 @@ index 0000000000000..cb6fe0cd28425
 +#endif
 diff --git a/kernel/sched/alt_topology.h b/kernel/sched/alt_topology.h
 new file mode 100644
-index 0000000000000..126eeaaf42a37
+index 0000000000000..9deb40cce9700
 --- /dev/null
 +++ b/kernel/sched/alt_topology.h
-@@ -0,0 +1,177 @@
+@@ -0,0 +1,178 @@
 +#ifndef _KERNEL_SCHED_ALT_TOPOLOGY_H
 +#define _KERNEL_SCHED_ALT_TOPOLOGY_H
 +
@@ -43256,6 +40513,7 @@ index 0000000000000..126eeaaf42a37
 +#ifdef CONFIG_SCHED_SMT
 +extern void ecore_balance(struct rq *rq);
 +extern void smt_balance(struct rq *rq);
++bool sched_smt_group_paired(struct rq *rq, int cpu);
 +extern void smt_pcore_balance(struct rq *rq);
 +#endif
 +
@@ -43514,10 +40772,10 @@ index 0000000000000..6bdf2d4f1ced9
 +kunit_test_suite(sched_topology_test_suite);
 diff --git a/kernel/sched/bmq.h b/kernel/sched/bmq.h
 new file mode 100644
-index 0000000000000..78144ea0f3de8
+index 0000000000000..d288586dab77a
 --- /dev/null
 +++ b/kernel/sched/bmq.h
-@@ -0,0 +1,107 @@
+@@ -0,0 +1,108 @@
 +#ifndef _KERNEL_SCHED_BMQ_H
 +#define _KERNEL_SCHED_BMQ_H
 +
@@ -43621,6 +40879,7 @@ index 0000000000000..78144ea0f3de8
 +
 +static inline void sched_task_deactivate(struct task_struct *p, struct rq *rq)
 +{
++	WRITE_ONCE(p->sleep_start, rq->clock);
 +	boost_task(p, 1);
 +}
 +
@@ -44923,7 +42182,7 @@ index 052435f4d3e3c..2c436e70af365 100644
 +#endif
 diff --git a/kernel/sched/pds.h b/kernel/sched/pds.h
 new file mode 100644
-index 0000000000000..3edc22ec964be
+index 0000000000000..93e1a3a4e3967
 --- /dev/null
 +++ b/kernel/sched/pds.h
 @@ -0,0 +1,198 @@
@@ -45121,7 +42380,7 @@ index 0000000000000..3edc22ec964be
 +
 +static inline void sched_task_deactivate(struct task_struct *p, struct rq *rq)
 +{
-+	p->sleep_start = rq->clock;
++	WRITE_ONCE(p->sleep_start, rq->clock);
 +}
 +
 +#endif /* _KERNEL_SCHED_PDS_H */
