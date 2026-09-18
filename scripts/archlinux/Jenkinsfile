@@ -1,0 +1,89 @@
+pipeline {
+    agent {
+        label 'ec2-build'
+    }
+
+    environment {
+        ARTIFACT_DIR = 'liquorix-package/artifacts/archlinux/latest'
+        LIQUORIX_REPO = '/var/www/archlinux/liquorix/x86_64'
+        KEY_ID = 'C5ADB4F3FEBBCE27A3E54D7D9AE4078033F8024D'
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                git 'https://github.com/damentz/linux-lqx'
+                sh '''
+                    rm -rf liquorix-package
+                    git clone --depth=1 https://github.com/damentz/liquorix-package.git
+                    git -C liquorix-package log --oneline
+                '''
+                script {
+                    def pkgver = sh(returnStdout: true, script: "grep -Po '^pkgver=\\K.*' PKGBUILD").trim()
+                    def pkgrel = sh(returnStdout: true, script: "grep -Po '^pkgrel=\\K.*' PKGBUILD").trim()
+                    currentBuild.displayName = "#${env.BUILD_NUMBER} - v${pkgver}-${pkgrel}"
+                }
+            }
+        }
+
+        stage('Build Package') {
+            agent {
+                dockerfile {
+                    dir 'liquorix-package/scripts/archlinux'
+                    additionalBuildArgs '--network=host --pull --no-cache ' +
+                        '--build-arg ARCH=amd64 --build-arg DISTRO=archlinux --build-arg RELEASE=latest ' +
+                        '--build-arg BASE_IMAGE=public.ecr.aws/docker/library/archlinux:base-devel'
+                    args '-u0 --network=host'
+                    reuseNode true
+                }
+            }
+
+            steps {
+                withCredentials([file(credentialsId: '6e773de0-6613-45ed-ae4c-7f337540da8d', variable: 'KEY_FILE')]) {
+                    sh '''
+                        sudo su - builder -c "gpg --locate-keys torvalds@kernel.org gregkh@kernel.org"
+                        sudo su - builder -c "gpg --import ${KEY_FILE}"
+                        sudo su - builder -c "echo 'default-key ${KEY_ID}' >> ~/.gnupg/gpg.conf"
+                    '''
+                }
+
+                sh '''
+                    chown -R builder:builder liquorix-package
+                    sudo -u builder bash liquorix-package/scripts/archlinux/common_bootstrap.sh
+                    sudo -u builder eatmydata bash liquorix-package/scripts/archlinux/container_build-binary.sh amd64 archlinux latest
+                    tar -tf "$ARTIFACT_DIR/liquorix.tar" | grep -q '\\.sig$' || { echo 'Packages are unsigned, refusing to publish'; exit 1; }
+                '''
+
+                stash name: 'artifact', includes: "$ARTIFACT_DIR/**/*"
+            }
+        }
+
+        stage('Publish Repository') {
+            steps {
+                withCredentials([sshUserPrivateKey(
+                    credentialsId: 'LiquorixSSHPrivate',
+                    keyFileVariable: 'SSH_KEY',
+                    usernameVariable: 'SSH_USER'
+                )]) {
+                    unstash name: 'artifact'
+
+                    sh '''
+                        SSH_ARGS=( -i "$SSH_KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o 'ConnectionAttempts=10' )
+                        scp ${SSH_ARGS[@]} "$ARTIFACT_DIR/liquorix.tar" $SSH_USER@origin.liquorix.net:~/
+                        ssh ${SSH_ARGS[@]} $SSH_USER@origin.liquorix.net "mkdir -vp $LIQUORIX_REPO && cd $LIQUORIX_REPO && tar -xvf ~/liquorix.tar"
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            emailext to: 'steven@liquorix.net',
+                     subject: '$PROJECT_NAME - Build # $BUILD_NUMBER - $BUILD_STATUS!',
+                     body: 'Check console output at $BUILD_URL to view the results.',
+                     attachLog: true,
+                     compressLog: true
+        }
+    }
+}

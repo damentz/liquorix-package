@@ -1,11 +1,13 @@
 
-ARG ARCH
-ARG DISTRO
-ARG RELEASE
+ARG ARCH=amd64
+ARG DISTRO=archlinux
+ARG RELEASE=latest
+# Override to pull from a mirror registry, e.g. public.ecr.aws/docker/library/archlinux:base-devel
+ARG BASE_IMAGE=$ARCH/$DISTRO:base-devel
 
-FROM $ARCH/$DISTRO:base-devel
+FROM $BASE_IMAGE
 
-RUN echo 'Server = https://mirrors.kernel.org/archlinux/$repo/os/$arch' \
+RUN echo 'Server = https://mirror.quantum5.ca/archlinux/$repo/os/$arch' \
       > /etc/pacman.d/mirrorlist &&\
     pacman -Syyu \
         base-devel \
