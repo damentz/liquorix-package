@@ -45,5 +45,6 @@ else
         --build-arg ARCH="$arch" \
         --build-arg DISTRO="$distro" \
         --build-arg RELEASE="$release" \
+        ${BASE_IMAGE:+--build-arg BASE_IMAGE="$BASE_IMAGE"} \
         "$dir_base"/
 fi
