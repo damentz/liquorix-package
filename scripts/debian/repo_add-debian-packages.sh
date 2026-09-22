@@ -41,4 +41,4 @@ if [[ "$repo_server_name" == "localhost" ]]; then
 fi
 
 log_info "Syncing $repo_local_path to $repo_server_name:$repo_server_path"
-rsync --progress -ahvz --delete "$repo_local_path" -e ssh "$repo_server_name":"$repo_server_path"
+rsync --progress -ahvz --delete "$repo_local_path" "$repo_server_name":"$repo_server_path"

@@ -1,0 +1,137 @@
+def REPO_URL = 'https://github.com/damentz/liquorix-package.git'
+def KEY_ID = 'C5ADB4F3FEBBCE27A3E54D7D9AE4078033F8024D'
+
+// Commit and release list discovered in the first stage, shared by every node
+def commit = ''
+def sourceRelease = ''
+def releases = []
+
+// Clone liquorix-package at a fixed commit so every node builds the same tree
+def checkoutPackage(String url, String sha) {
+    sh """
+        rm -rf liquorix-package
+        git init -q liquorix-package
+        git -C liquorix-package fetch -q --depth=1 '${url}' '${sha}'
+        git -C liquorix-package checkout -q FETCH_HEAD
+    """
+}
+
+def importKey(String keyId) {
+    withCredentials([file(credentialsId: '6e773de0-6613-45ed-ae4c-7f337540da8d', variable: 'KEY_FILE')]) {
+        sh """
+            gpg --import "\$KEY_FILE"
+            echo 'default-key ${keyId}' >> ~/.gnupg/gpg.conf
+        """
+    }
+}
+
+pipeline {
+    agent none
+
+    options {
+        // Each run pulls, modifies and pushes the whole repo with --delete
+        disableConcurrentBuilds()
+    }
+
+    parameters {
+        string(name: 'BUILD', defaultValue: '1', description: 'Package build number')
+    }
+
+    stages {
+        stage('Build Sources') {
+            agent { label 'ec2-build' }
+            steps {
+                sh "rm -rf liquorix-package && git clone -q --depth=1 '${REPO_URL}' liquorix-package"
+                script {
+                    commit = sh(returnStdout: true, script: 'git -C liquorix-package rev-parse HEAD').trim()
+                    def fromEnv = { name -> sh(returnStdout: true, script: "bash -c 'source liquorix-package/scripts/debian/env.sh && echo \"\${${name}}\"'").trim() }
+                    def version = fromEnv('version_package')
+                    sourceRelease = fromEnv('source_release')
+                    releases = fromEnv('releases_debian[*]').split(' ')
+                    currentBuild.displayName = "#${env.BUILD_NUMBER} - v${version}.${params.BUILD}"
+                    echo "Commit ${commit}, releases: ${releases.join(', ')}"
+                }
+
+                // Every source package is built in the source release image, so build them all here once
+                script { importKey(KEY_ID) }
+                sh """
+                    make -C liquorix-package DISTRO=debian RELEASE='${sourceRelease}' bootstrap-image
+                    make -C liquorix-package BUILD="\$BUILD" build-source-debian
+                """
+                script {
+                    for (r in releases) {
+                        stash name: "source-${r}", includes: "liquorix-package/artifacts/debian/${r}/**"
+                    }
+                }
+            }
+        }
+
+        stage('Build Packages') {
+            steps {
+                script {
+                    def branches = [:]
+                    for (r in releases) {
+                        def release = r
+                        branches[release] = {
+                            node('ec2-build') {
+                                checkoutPackage(REPO_URL, commit)
+                                importKey(KEY_ID)
+                                unstash "source-${release}"
+                                sh """
+                                    make -C liquorix-package DISTRO=debian RELEASE='${release}' bootstrap-image
+                                    make -C liquorix-package DISTRO=debian RELEASE='${release}' BUILD="\$BUILD" build-binary
+                                """
+                                // ponytail: artifacts round-trip through the controller, fine for a handful of releases
+                                stash name: "debian-${release}", includes: "liquorix-package/artifacts/debian/${release}/**"
+                            }
+                        }
+                    }
+                    parallel branches
+                }
+            }
+        }
+
+        stage('Publish Repository') {
+            agent { label 'ec2-build' }
+            environment {
+                liquorix_repo = "${WORKSPACE}/debian/"
+                liquorix_server_repo = '/var/www/debian/'
+            }
+            steps {
+                script {
+                    checkoutPackage(REPO_URL, commit)
+                    importKey(KEY_ID)
+                    for (r in releases) {
+                        unstash "debian-${r}"
+                    }
+                }
+                withCredentials([sshUserPrivateKey(
+                    credentialsId: 'LiquorixSSHPrivate',
+                    keyFileVariable: 'SSH_KEY',
+                    usernameVariable: 'SSH_USER'
+                )]) {
+                    sh '''
+                        command -v reprepro > /dev/null || sudo apt-get install -y reprepro
+
+                        export RSYNC_RSH="ssh -i $SSH_KEY -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectionAttempts=10"
+                        export liquorix_server_name="$SSH_USER@liquorix.net"
+
+                        mkdir -p "$liquorix_repo"
+                        rsync -ahz --delete "$liquorix_server_name:$liquorix_server_repo" "$liquorix_repo"
+                        make -C liquorix-package BUILD="$BUILD" repo-add-debian
+                    '''
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            emailext to: 'steven@liquorix.net',
+                     subject: '$PROJECT_NAME - Build # $BUILD_NUMBER - $BUILD_STATUS!',
+                     body: 'Check console output at $BUILD_URL to view the results.',
+                     attachLog: true,
+                     compressLog: true
+        }
+    }
+}
