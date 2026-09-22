@@ -28,10 +28,11 @@ Variables can be overridden on the command line:
 
 ### Bootstrap Docker Images
 
-Before any builds can be executed, the prepared Docker images must be bootstrapped.  To bootstrap Debian images:
+Before any builds can be executed, the prepared Docker images must be bootstrapped.  To bootstrap Debian or Ubuntu images:
 
 ```shell
 make bootstrap-debian
+make bootstrap-ubuntu
 ```
 
 For Arch Linux:
@@ -44,10 +45,11 @@ Subsequent runs will update the existing images rather than performing a full bu
 
 ### Build Source and Binary Packages
 
-Build all Debian source packages:
+Build all Debian or Ubuntu source packages:
 
 ```shell
-make build-source-all
+make build-source-debian
+make build-source-ubuntu
 ```
 
 Build all Debian binary packages:

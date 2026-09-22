@@ -23,9 +23,9 @@ require-release = \
   $(if $(DISTRO),,$(error DISTRO is required, e.g. make $@ DISTRO=ubuntu RELEASE=resolute)) \
   $(if $(RELEASE),,$(error RELEASE is required, e.g. make $@ DISTRO=ubuntu RELEASE=resolute))
 
-.PHONY: help release-debian release-fedora \
-        bootstrap-debian bootstrap-arch bootstrap-fedora bootstrap-image \
-        build-source-all build-source build-binary-debian build-binary-arch build-binary-fedora build-binary \
+.PHONY: help release-debian release-ubuntu release-fedora \
+        bootstrap-debian bootstrap-ubuntu bootstrap-arch bootstrap-fedora bootstrap-image \
+        build-source-debian build-source-ubuntu build-source build-binary-debian build-binary-arch build-binary-fedora build-binary \
         upload-ppa repo-add-debian \
         clean-ppa clean
 
@@ -42,23 +42,31 @@ help: ## Show available targets
 	@grep -E '^[a-z][-a-z]+:.*##' $(MAKEFILE_LIST) | \
 		awk -F ':.*## ' '{ printf "  %-22s %s\n", $$1, $$2 }'
 
-release-debian: ## Full Debian release pipeline
+release-debian: ## Debian release: build binaries, publish to repo (Jenkins)
 	$(MAKE) bootstrap-debian
-	$(MAKE) build-source-all
-	$(MAKE) clean-ppa
-	$(MAKE) upload-ppa
+	$(MAKE) build-source-debian
 	$(MAKE) PROCS=1 build-binary-debian
 	$(MAKE) repo-add-debian
+
+release-ubuntu: ## Ubuntu release: build sources, upload to PPA (local)
+	$(MAKE) bootstrap-ubuntu
+	$(MAKE) build-source-ubuntu
+	$(MAKE) clean-ppa
+	$(MAKE) upload-ppa
 
 release-fedora: ## Full Fedora release pipeline
 	$(MAKE) bootstrap-fedora
 	$(MAKE) build-binary-fedora
 
 bootstrap-debian: ## Bootstrap Debian Docker build images
-	$(SCRIPTS)/debian/docker_bootstrap.sh $(PROCS)
+	$(SCRIPTS)/debian/docker_bootstrap.sh $(PROCS) debian
+
+bootstrap-ubuntu: ## Bootstrap Ubuntu Docker build images
+	$(SCRIPTS)/debian/docker_bootstrap.sh $(PROCS) ubuntu
 
 bootstrap-image: ## Bootstrap a single Docker image (needs DISTRO, RELEASE)
 	$(require-release)
+	$(SCRIPTS)/$(DISTRO)/common_bootstrap.sh
 	$(SCRIPTS)/$(DISTRO)/docker_bootstrap-image.sh amd64 $(DISTRO) $(RELEASE)
 
 bootstrap-arch: ## Bootstrap Arch Linux Docker build image
@@ -67,8 +75,11 @@ bootstrap-arch: ## Bootstrap Arch Linux Docker build image
 bootstrap-fedora: ## Bootstrap Fedora Docker build image
 	$(SCRIPTS)/fedora/docker_bootstrap.sh $(PROCS)
 
-build-source-all: ## Build Debian source packages for all releases
-	$(SCRIPTS)/debian/docker_build-source_all.sh $(PROCS) $(BUILD)
+build-source-debian: ## Build Debian source packages for all releases
+	$(SCRIPTS)/debian/docker_build-source_all.sh $(PROCS) $(BUILD) debian
+
+build-source-ubuntu: ## Build Ubuntu source packages for all releases
+	$(SCRIPTS)/debian/docker_build-source_all.sh $(PROCS) $(BUILD) ubuntu
 
 build-binary-debian: ## Build Debian binary packages for all releases
 	$(SCRIPTS)/debian/docker_build-binary_debian.sh $(PROCS) $(BUILD)

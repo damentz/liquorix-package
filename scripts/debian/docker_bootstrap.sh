@@ -23,10 +23,14 @@ else
     log_info "Using override process count, $processes"
 fi
 
-# Build arguments to bootstrap images in parallel
+# Distros to bootstrap release images for, default all
+declare -a distros=("${@:2}")
+[[ ${#distros[@]} -gt 0 ]] || distros=('debian' 'ubuntu')
+
+# Build arguments to bootstrap images in parallel.  Source packages for every
+# distro are built in the source image, so always include it.
 declare -a architectures=('amd64')
-declare -a distros=('debian' 'ubuntu')
-declare -a args=()
+declare -a args=("$source_arch" "$source_distro" "$source_release")
 for arch in "${architectures[@]}"; do
     for distro in "${distros[@]}"; do
         declare -a releases=()
@@ -37,6 +41,7 @@ for arch in "${architectures[@]}"; do
         fi
 
         for release  in "${releases[@]}"; do
+            [[ "$arch/$distro/$release" == "$source_arch/$source_distro/$source_release" ]] && continue
             args+=("$arch" "$distro" "$release")
         done
     done

@@ -13,16 +13,16 @@ declare -i processes=${1:-"$processes_default"}
 declare -i build=${2:-${version_build}}
 declare -a args=()
 
-declare distro=''
+# Distros to build sources for, default all
+declare -a distros=("${@:3}")
+[[ ${#distros[@]} -gt 0 ]] || distros=('ubuntu' 'debian')
 
-distro='ubuntu'
-for release in "${releases_ubuntu[@]}"; do
-    args+=("$distro" "$release" "$build")
-done
-
-distro='debian'
-for release in "${releases_debian[@]}"; do
-    args+=("$distro" "$release" "$build")
+for distro in "${distros[@]}"; do
+    declare -n releases="releases_$distro"
+    for release in "${releases[@]}"; do
+        args+=("$distro" "$release" "$build")
+    done
+    unset -n releases
 done
 
 log_debug "$0, args: ${args[*]}"
