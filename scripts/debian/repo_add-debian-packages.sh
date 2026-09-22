@@ -35,9 +35,10 @@ declare repo_server_path="${liquorix_server_repo:-/var/www/debian/}"
 log_debug "repo_server_name: $repo_server_name"
 log_debug "repo_server_path: $repo_server_path"
 
+# On the server itself the repo is published in place, nothing to sync
 if [[ "$repo_server_name" == "localhost" ]]; then
-    log_error "Remote server not configured, not syncing"
-    exit 1
+    log_info "Remote server not configured, not syncing"
+    exit 0
 fi
 
 log_info "Syncing $repo_local_path to $repo_server_name:$repo_server_path"
