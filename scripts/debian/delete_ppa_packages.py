@@ -3,6 +3,7 @@
 
 import argparse
 import logging
+import os
 import sys
 import warnings
 from collections import defaultdict
@@ -222,8 +223,13 @@ def main() -> int:
         log.setLevel(logging.DEBUG)
 
     cachedir = Path.home() / ".launchpadlib" / "cache"
+    # CI passes a pre-authorized token file, otherwise log in interactively
     launchpad = Launchpad.login_with(
-        "Liquorix", "production", str(cachedir), version="devel"
+        "Liquorix",
+        "production",
+        str(cachedir),
+        version="devel",
+        credentials_file=os.environ.get("LP_CREDENTIALS_FILE"),
     )
     ppa = launchpad.me.getPPAByName(name="liquorix")
 
