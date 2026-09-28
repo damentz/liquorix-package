@@ -63,7 +63,8 @@ AutoReq:        no
 AutoProv:       yes
 
 %define debug_package %{nil}
-%define _binary_payload w3.zstdio
+# zstd level 3, T0 compresses with all cores
+%define _binary_payload w3T0.zstdio
 
 %description
 The Liquorix kernel is a desktop-optimized kernel built from the Zen kernel

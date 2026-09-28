@@ -5,6 +5,11 @@ ARG RELEASE
 
 FROM $DISTRO:$RELEASE
 
+# eatmydata first, so every later step skips fsync
+RUN dnf -y install libeatmydata &&\
+    dnf clean all
+
+ENV LD_PRELOAD=/usr/lib64/libeatmydata.so
 RUN dnf -y update &&\
     dnf -y install \
         bc \
