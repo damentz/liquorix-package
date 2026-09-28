@@ -26,7 +26,7 @@ require-release = \
 .PHONY: help release-debian release-ubuntu release-fedora \
         bootstrap-debian bootstrap-ubuntu bootstrap-arch bootstrap-fedora bootstrap-image \
         build-source-debian build-source-ubuntu build-source build-binary-debian build-binary-arch build-binary-fedora build-binary \
-        upload-ppa repo-add-debian fedora-releases \
+        upload-ppa repo-add-debian repo-add-fedora fedora-releases \
         clean-ppa clean check-version test
 
 help: ## Show available targets
@@ -103,6 +103,9 @@ upload-ppa: ## Upload source packages to PPA
 
 repo-add-debian: ## Add built packages to Debian repository
 	$(SCRIPTS)/debian/repo_add-debian-packages.sh $(BUILD)
+
+repo-add-fedora: ## Publish built Fedora packages to the dnf repository (needs liquorix_gpg_key)
+	$(SCRIPTS)/fedora/repo_add-fedora-packages.sh
 
 fedora-releases: ## List Fedora releases to build (Bodhi, or RELEASES_FEDORA)
 	@bash -c 'source $(SCRIPTS)/fedora/env.sh && fedora_releases'
