@@ -38,6 +38,7 @@ dists="$(
 # Append upstream distributions through package manager landmarks
 command -v apt-get &> /dev/null && dists="$dists debian"
 command -v pacman  &> /dev/null && dists="$dists arch"
+command -v dnf     &> /dev/null && dists="$dists fedora"
 
 # Deduplicate and trim list of discovered distributions
 dists=$(echo "$dists" | tr '[:space:]' '\n' | sort | uniq | xargs)
@@ -76,20 +77,6 @@ case "$dists" in
             log ERROR "GRUB update failed"
         fi
     fi
-    ;;
-*fedora*)
-    repo_url='https://liquorix.net/fedora/liquorix.repo'
-    if [ ! -f /etc/yum.repos.d/liquorix.repo ]; then
-        curl -fsSL -o /etc/yum.repos.d/liquorix.repo "$repo_url"
-        log INFO "Liquorix repository added successfully to /etc/yum.repos.d/liquorix.repo"
-    else
-        log INFO "Liquorix repo already configured, skipped add step"
-    fi
-
-    dnf install -y kernel-liquorix kernel-liquorix-modules kernel-liquorix-devel
-
-    log INFO "Liquorix kernel installed successfully, it will be the default boot entry"
-    log WARN "Secure Boot must be disabled to boot the Liquorix kernel"
     ;;
 *ubuntu*)
     apt-get update && apt-get install -y --no-install-recommends \
@@ -136,6 +123,20 @@ case "$dists" in
     apt-get install -y linux-image-liquorix-amd64 linux-headers-liquorix-amd64
 
     log INFO "Liquorix kernel installed successfully"
+    ;;
+*fedora*)
+    repo_url='https://liquorix.net/fedora/liquorix.repo'
+    if [ ! -f /etc/yum.repos.d/liquorix.repo ]; then
+        curl -fsSL -o /etc/yum.repos.d/liquorix.repo "$repo_url"
+        log INFO "Liquorix repository added successfully to /etc/yum.repos.d/liquorix.repo"
+    else
+        log INFO "Liquorix repo already configured, skipped add step"
+    fi
+
+    dnf install -y kernel-liquorix kernel-liquorix-modules kernel-liquorix-devel
+
+    log INFO "Liquorix kernel installed successfully, it will be the default boot entry"
+    log WARN "Secure Boot must be disabled to boot the Liquorix kernel"
     ;;
 *)
     log ERROR "This distribution is not supported at this time"
