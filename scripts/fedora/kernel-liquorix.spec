@@ -4,7 +4,6 @@
 #                --define "version_kernel 7.1" \
 #                --define "version_lqx 4" \
 #                --define "version_build 1" \
-#                --define "fedora_release 43" \
 #                kernel-liquorix.spec
 
 # Disable frame pointers (RPM may inject these into CFLAGS)
@@ -27,6 +26,7 @@ ExclusiveArch:  x86_64
 Source0:        linux-%{version_kernel}.tar.xz
 Source1:        v%{version_upstream}-%{lqxversion}.patch
 Source2:        config-x86_64-liquorix
+Source3:        95-liquorix-default.install
 
 BuildRequires:  bc
 BuildRequires:  bindgen-cli
@@ -177,6 +177,9 @@ collect_modules_list modesetting \
 # Compress modules with xz (matching mainline Fedora)
 find %{buildroot}/lib/modules/%{kversion} -type f -name '*.ko' | \
     xargs -n 16 -P${RPM_BUILD_NCPUS} -r xz --check=crc32 --lzma2=dict=1MiB
+
+# kernel-install plugin keeping the newest Liquorix kernel as boot default
+install -D -m 755 %{SOURCE3} %{buildroot}/usr/lib/kernel/install.d/95-liquorix-default.install
 
 # Create dirs for additional modules
 mkdir -p %{buildroot}/lib/modules/%{kversion}/updates
@@ -385,6 +388,7 @@ fi
 /lib/modules/%{kversion}/config
 /lib/modules/%{kversion}/symvers.xz
 /lib/modules/%{kversion}/modules.builtin*
+/usr/lib/kernel/install.d/95-liquorix-default.install
 %dir /lib/modules
 %dir /lib/modules/%{kversion}
 %ghost %attr(0755, root, root) /boot/vmlinuz-%{kversion}

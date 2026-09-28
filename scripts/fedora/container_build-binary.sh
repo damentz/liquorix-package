@@ -37,6 +37,9 @@ log_info "Copying kernel config to rpmbuild SOURCES"
 cp -v "$dir_package/debian/config/kernelarch-x86/config-arch-64" \
     "$rpmbuild_dir/SOURCES/config-x86_64-liquorix"
 
+# Copy kernel-install plugin to SOURCES
+cp -v "$dir_scripts/95-liquorix-default.install" "$rpmbuild_dir/SOURCES/"
+
 # Copy spec file to SPECS
 log_info "Copying spec file to rpmbuild SPECS"
 cp -v "$dir_scripts/$spec_name" "$rpmbuild_dir/SPECS/"
@@ -49,7 +52,6 @@ $schedtool rpmbuild -bb \
     --define "version_kernel $version_kernel" \
     --define "version_lqx $version_lqx" \
     --define "version_build $version_build" \
-    --define "fedora_release $release" \
     "$rpmbuild_dir/SPECS/$spec_name"
 
 # Sign RPMs
@@ -69,5 +71,8 @@ cp -arv "$rpmbuild_dir/RPMS/x86_64/"*.rpm "$dir_artifacts/"
 log_info "Creating RPM repository"
 cd "$dir_artifacts"
 createrepo_c .
+
+# Hand artifacts back to the owner of the mounted tree so the host can clean them up
+sudo chown -R "$(stat -c %u:%g "$dir_base")" "$dir_base/artifacts/fedora"
 
 ls -ltrh
