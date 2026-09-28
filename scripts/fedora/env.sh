@@ -25,7 +25,16 @@ package_source="linux-liquorix_${version_kernel}.orig.tar.xz"
 source_arch='amd64'
 source_distro='fedora'
 
-releases_fedora=('42' '43')
+# Supported releases come from Bodhi, RELEASES_FEDORA="44 45" overrides.
+# A function so sourcing this file (e.g. inside containers) stays offline.
+fedora_releases() {
+    if [[ -n "${RELEASES_FEDORA:-}" ]]; then
+        # shellcheck disable=SC2086  # split "44 45" into lines
+        printf '%s\n' $RELEASES_FEDORA
+    else
+        "$dir_scripts/releases.sh"
+    fi
+}
 
 build_user="builder"
 

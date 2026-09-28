@@ -26,10 +26,12 @@ fi
 # Build arguments to bootstrap images in parallel
 declare -a architectures=('amd64')
 declare -a distros=('fedora')
+declare releases
+releases=$(fedora_releases)
 declare -a args=()
 for arch in "${architectures[@]}"; do
     for distro in "${distros[@]}"; do
-        for release in "${releases_fedora[@]}"; do
+        for release in $releases; do
             args+=("$arch" "$distro" "$release")
         done
     done

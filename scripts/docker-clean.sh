@@ -36,7 +36,7 @@ for release in "${releases_ubuntu[@]}"; do
 done
 remove_image "archlinux:base-devel"
 remove_image "amd64/archlinux:base-devel"
-for release in "${releases_fedora[@]}"; do
+for release in $(fedora_releases || true); do
     remove_image "fedora:$release"
     remove_image "amd64/fedora:$release"
 done
