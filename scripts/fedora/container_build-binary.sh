@@ -44,6 +44,11 @@ cp -v "$dir_scripts/95-liquorix-default.install" "$rpmbuild_dir/SOURCES/"
 log_info "Copying spec file to rpmbuild SPECS"
 cp -v "$dir_scripts/$spec_name" "$rpmbuild_dir/SPECS/"
 
+# Existing images are only updated, never rebuilt, so bring them up to the spec's BuildRequires
+log_info "Installing build dependencies from $spec_name"
+# shellcheck disable=SC2046
+sudo dnf -y install $(awk '/^BuildRequires:/ {print $2}' "$dir_scripts/$spec_name")
+
 # Build RPMs
 log_info "Building RPM packages for $release"
 # shellcheck disable=SC2154  # version_* assigned in env.sh via eval

@@ -39,6 +39,7 @@ BuildRequires:  gcc
 BuildRequires:  gcc-c++
 BuildRequires:  kmod
 BuildRequires:  make
+BuildRequires:  openssl
 BuildRequires:  openssl-devel
 BuildRequires:  patch
 BuildRequires:  perl

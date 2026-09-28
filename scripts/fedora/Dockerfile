@@ -19,6 +19,7 @@ RUN dnf -y update &&\
         gnupg2 \
         kmod \
         make \
+        openssl \
         openssl-devel \
         patch \
         perl \
