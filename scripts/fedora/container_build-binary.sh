@@ -68,7 +68,6 @@ gpg_key="$(
 [[ -n "$gpg_key" ]] && echo "%_gpg_name $gpg_key" >> ~/.rpmmacros
 rpm --addsign "$rpmbuild_dir/RPMS/x86_64/"*.rpm || log_warn "GPG signing failed, skipping"
 
-sudo mkdir -vp "$dir_artifacts"
 sudo chown -R "$build_user":"$build_user" "$dir_artifacts"
 cp -arv "$rpmbuild_dir/RPMS/x86_64/"*.rpm "$dir_artifacts/"
 
@@ -78,6 +77,6 @@ cd "$dir_artifacts"
 createrepo_c .
 
 # Hand artifacts back to the owner of the mounted tree so the host can clean them up
-sudo chown -R "$(stat -c %u:%g "$dir_base")" "$dir_base/artifacts/fedora"
+sudo chown -R "$(stat -c %u:%g "$dir_base")" "$dir_artifacts"
 
 ls -ltrh

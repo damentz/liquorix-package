@@ -16,6 +16,9 @@ require_build_args "$arch" "$distro" "$release"
 
 log_debug "dir_base: $dir_base"
 
+# Created on the host so the host user owns every parent and can clean up
+mkdir -p "$dir_artifacts/$distro/$release"
+
 # shellcheck disable=SC2046
 docker run --net='host' \
     --rm \
