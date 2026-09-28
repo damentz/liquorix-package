@@ -77,6 +77,20 @@ case "$dists" in
         fi
     fi
     ;;
+*fedora*)
+    repo_url='https://liquorix.net/fedora/liquorix.repo'
+    if [ ! -f /etc/yum.repos.d/liquorix.repo ]; then
+        curl -fsSL -o /etc/yum.repos.d/liquorix.repo "$repo_url"
+        log INFO "Liquorix repository added successfully to /etc/yum.repos.d/liquorix.repo"
+    else
+        log INFO "Liquorix repo already configured, skipped add step"
+    fi
+
+    dnf install -y kernel-liquorix kernel-liquorix-modules kernel-liquorix-devel
+
+    log INFO "Liquorix kernel installed successfully, it will be the default boot entry"
+    log WARN "Secure Boot must be disabled to boot the Liquorix kernel"
+    ;;
 *ubuntu*)
     apt-get update && apt-get install -y --no-install-recommends \
         gpg gpg-agent software-properties-common
