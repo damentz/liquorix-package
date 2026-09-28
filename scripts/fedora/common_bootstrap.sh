@@ -7,11 +7,10 @@ source "$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/env.sh"
 # shellcheck source=../lib.sh
 source "$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/../lib.sh"
 
-# Verify kernel source tarball exists
+# shellcheck disable=SC2154  # assigned in env.sh via eval
 if [[ ! -f "$dir_base/$package_source" ]]; then
-    log_error "Kernel source tarball not found: $dir_base/$package_source"
-    log_error "Run the Debian bootstrap first to download the kernel source."
-    exit 1
+    log_warn "Missing source file: $dir_base/$package_source, downloading now."
+    curl -fL -o "$dir_base/$package_source" "https://cdn.kernel.org/pub/linux/kernel/v${version_major}.x/linux-${version_kernel}.tar.xz"
 fi
 
 # Verify liquorix patch exists
