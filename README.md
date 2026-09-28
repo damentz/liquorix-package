@@ -107,7 +107,7 @@ Fedora builds are published at `https://liquorix.net/fedora/<release>/x86_64/`, 
 
 ```shell
 sudo curl -fsSL -o /etc/yum.repos.d/liquorix.repo https://liquorix.net/fedora/liquorix.repo
-sudo dnf install kernel-liquorix kernel-liquorix-modules
+sudo dnf install kernel-liquorix kernel-liquorix-modules kernel-liquorix-devel
 ```
 
 The Liquorix kernel becomes the default boot entry and stays default when stock Fedora kernels update.  Set `UPDATEDEFAULT=no` in `/etc/sysconfig/kernel` to opt out.  Secure Boot must be disabled.
