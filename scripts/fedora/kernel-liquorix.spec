@@ -148,7 +148,7 @@ dd if=/dev/zero of=%{buildroot}/boot/initramfs-%{kversion}.img bs=1M count=40
 cp COPYING %{buildroot}/usr/share/licenses/%{name}/COPYING-%{version}-%{release}
 
 # Install modules (mod-fw= suppresses firmware installation)
-make INSTALL_MOD_PATH=%{buildroot} modules_install INSTALL_MOD_STRIP=1 \
+make %{?_smp_mflags} INSTALL_MOD_PATH=%{buildroot} modules_install INSTALL_MOD_STRIP=1 \
     KERNELRELEASE=%{kversion} mod-fw=
 
 # Generate module category lists
