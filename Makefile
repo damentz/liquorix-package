@@ -8,12 +8,14 @@
 # Variables:
 #   PROCS   - number of parallel jobs (default: nproc/2, min 2)
 #   BUILD   - build number (default: 1)
+#   KEEP    - builds kept per kernel series by repo-prune (default: 3)
 #   DISTRO  - distribution name (e.g. ubuntu, debian) — required for per-release targets
 #   RELEASE - release codename (e.g. resolute, trixie) — required for per-release targets
 
 NPROC := $(shell nproc 2>/dev/null || echo 4)
 PROCS := $(shell echo $$(( $(NPROC) / 2 > 2 ? $(NPROC) / 2 : 2 )))
 BUILD := 1
+KEEP  := 3
 
 DISTRO  :=
 RELEASE :=
@@ -26,7 +28,7 @@ require-release = \
 .PHONY: help release-debian release-ubuntu release-fedora \
         bootstrap-debian bootstrap-ubuntu bootstrap-arch bootstrap-fedora bootstrap-image \
         build-source-debian build-source-ubuntu build-source build-binary-debian build-binary-arch build-binary-fedora build-binary \
-        upload-ppa repo-add-debian repo-add-ubuntu repo-add-fedora fedora-releases \
+        upload-ppa repo-add-debian repo-add-ubuntu repo-add-fedora repo-prune fedora-releases \
         clean-ppa clean check-version test
 
 help: ## Show available targets
@@ -110,6 +112,10 @@ repo-add-ubuntu: ## Add built packages to Ubuntu repository
 repo-add-fedora: ## Publish built Fedora packages to the dnf repository (needs liquorix_gpg_key)
 	$(SCRIPTS)/fedora/repo_add-fedora-packages.sh
 
+repo-prune: ## Keep the newest KEEP builds of each kernel series in the Debian, Ubuntu and Arch repositories (DRY_RUN=true lists only)
+	$(SCRIPTS)/prune/repo-prune.py --keep $(KEEP) $(if $(filter true,$(DRY_RUN)),--dry-run) \
+		reprepro:/var/www/debian reprepro:/var/www/ubuntu arch:/var/www/archlinux/liquorix/x86_64
+
 fedora-releases: ## List Fedora releases to build (Bodhi, or RELEASES_FEDORA)
 	@bash -c 'source $(SCRIPTS)/fedora/env.sh && fedora_releases'
 
@@ -127,3 +133,4 @@ test: ## Run script tests
 	$(SCRIPTS)/tests/test-debian-env.sh
 	$(SCRIPTS)/tests/test-fedora-env.sh
 	$(SCRIPTS)/tests/test-fedora-releases.sh
+	$(SCRIPTS)/tests/test-repo-prune.sh
