@@ -16,7 +16,7 @@ trap 'rm -rf "$cache_home"' EXIT
 live() { env -u BODHI_JSON XDG_CACHE_HOME="$1" ../fedora/releases.sh current 2>/dev/null; }
 asked() { if [[ -e "$called" ]]; then rm "$called"; echo yes; else echo no; fi; }
 export fixture="$BODHI_JSON" called="$cache_home/called"
-# shellcheck disable=SC2329  # called by releases.sh through export -f
+# shellcheck disable=SC2317,SC2329  # called by releases.sh through export -f
 curl() { : > "$called"; [[ -n "$fixture" ]] && cat "$fixture"; }
 export -f curl
 expect "live response"           "43 44"  "$(live "$cache_home" | xargs)"
