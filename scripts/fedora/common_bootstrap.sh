@@ -10,7 +10,7 @@ source "$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )/../lib.sh"
 # shellcheck disable=SC2154  # assigned in env.sh via eval
 if [[ ! -f "$dir_base/$package_source" ]]; then
     log_warn "Missing source file: $dir_base/$package_source, downloading now."
-    curl -fL -o "$dir_base/$package_source" "https://cdn.kernel.org/pub/linux/kernel/v${version_major}.x/linux-${version_kernel}.tar.xz"
+    curl -fL --retry 3 -o "$dir_base/$package_source" "https://cdn.kernel.org/pub/linux/kernel/v${version_major}.x/linux-${version_kernel}.tar.xz"
 fi
 
 # Verify liquorix patch exists

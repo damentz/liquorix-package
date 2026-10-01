@@ -10,5 +10,5 @@ if [[ -f "$dir_base/$package_source" ]]; then
     rm -fv "$dir_base/$package_source"
 fi
 
-curl -fL -o "$dir_base/$package_source" \
+curl -fL --retry 3 -o "$dir_base/$package_source" \
     "https://github.com/damentz/linux-lqx/archive/refs/heads/master.zip"
