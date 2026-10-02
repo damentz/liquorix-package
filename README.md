@@ -1,6 +1,9 @@
 # Liquorix Package
 
 [![license](https://img.shields.io/badge/license-GPL--2.0-blue.svg)](LICENSE)
+![Debian and Ubuntu](https://liquorix.net/jenkins/buildStatus/icon?job=BuildDebianUbuntu&subject=Debian%20%2F%20Ubuntu)
+![Arch Linux](https://liquorix.net/jenkins/buildStatus/icon?job=BuildArchlinux&subject=Arch%20Linux)
+![Fedora](https://liquorix.net/jenkins/buildStatus/icon?job=BuildFedora&subject=Fedora)
 
 This repository contains the Debian package to build Liquorix for both Debian and Ubuntu, and scripts for Debian, Ubuntu, Arch Linux, and Fedora.
 
