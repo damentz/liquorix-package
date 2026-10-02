@@ -1,16 +1,34 @@
-// Helpers shared by the Jenkinsfiles under scripts/.  Each one loads them from its own checkout with
-//   library identifier: 'lqx@scm', changelog: false, retriever: legacySCM(scm: scm, libraryPath: 'scripts/jenkins')
-// and calls lqx.<name>(...) inside a script block.  With the changelog on, Jenkins polls this checkout too,
-// and a job with a push trigger (Arch) would then build on every push to this repository.
+// Helpers shared by the Jenkinsfiles under scripts/.  Each Jenkins job holds its pipeline script inline, and
+// push-jobs.py writes that script as this file followed by the job's Jenkinsfile.  The Jenkinsfile calls the
+// helpers as lqx.<name>(...) inside a script block.
 import groovy.transform.Field
 
 @Field final String REPO_URL = 'https://github.com/damentz/liquorix-package.git'
 @Field final String KEY_ID = 'C5ADB4F3FEBBCE27A3E54D7D9AE4078033F8024D'
+// Filled in by push-jobs.py: the job's Jenkinsfile, and a hash of the sources its script was written from
+@Field final String SOURCE = ''
+@Field final String SOURCE_HASH = ''
 
 // Clone a tag or branch (empty: the default branch) and return its commit
 def clonePackage(String ref = '') {
     sh "rm -rf liquorix-package && git clone -q --depth=1 ${ref ? "--branch '${ref}'" : ''} '${REPO_URL}' liquorix-package"
+    checkCurrent()
     return sh(returnStdout: true, script: 'git -C liquorix-package rev-parse HEAD').trim()
+}
+
+// Stop when the job's script wasn't written from the pipeline sources in the tree being built
+def checkCurrent() {
+    def hash = sh(returnStdout: true, script: "cat liquorix-package/scripts/jenkins/lqx.groovy 'liquorix-package/${SOURCE}' | sha256sum | cut -d' ' -f1").trim()
+    if (hash == SOURCE_HASH) {
+        return
+    }
+    def message = "The job script doesn't match ${SOURCE} in this tree, run scripts/jenkins/push-jobs.py"
+    // Test runs may carry pipeline changes that aren't pushed yet
+    if (params.SKIP_PUBLISH || params.DRY_RUN) {
+        echo "WARNING: ${message}"
+    } else {
+        error message
+    }
 }
 
 // Clone liquorix-package at a fixed commit so every node builds the same tree
@@ -72,3 +90,6 @@ def email() {
              attachLog: true,
              compressLog: true
 }
+
+// The Jenkinsfile that follows calls the helpers above through this
+def lqx = this

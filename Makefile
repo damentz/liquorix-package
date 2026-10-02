@@ -136,3 +136,4 @@ test: ## Run script tests
 	$(SCRIPTS)/tests/test-fedora-env.sh
 	$(SCRIPTS)/tests/test-fedora-releases.sh
 	$(SCRIPTS)/tests/test-repo-prune.sh
+	$(SCRIPTS)/tests/test-push-jobs.sh
