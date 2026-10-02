@@ -1,6 +1,7 @@
 // Helpers shared by the Jenkinsfiles under scripts/.  Each one loads them from its own checkout with
-//   library identifier: 'lqx@scm', retriever: legacySCM(scm: scm, libraryPath: 'scripts/jenkins')
-// and calls lqx.<name>(...) inside a script block.
+//   library identifier: 'lqx@scm', changelog: false, retriever: legacySCM(scm: scm, libraryPath: 'scripts/jenkins')
+// and calls lqx.<name>(...) inside a script block.  With the changelog on, Jenkins polls this checkout too,
+// and a job with a push trigger (Arch) would then build on every push to this repository.
 import groovy.transform.Field
 
 @Field final String REPO_URL = 'https://github.com/damentz/liquorix-package.git'
