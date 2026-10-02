@@ -1,5 +1,4 @@
-def REPO_URL = 'https://github.com/damentz/liquorix-package.git'
-def KEY_ID = 'C5ADB4F3FEBBCE27A3E54D7D9AE4078033F8024D'
+library identifier: 'lqx@scm', retriever: legacySCM(scm: scm, libraryPath: 'scripts/jenkins')
 
 // Commit and release lists discovered in the first stage, shared by every node
 def commit = ''
@@ -8,29 +7,11 @@ def releases = []
 def ubuntuReleases = []
 def builtUbuntu = []
 
-// Clone liquorix-package at a fixed commit so every node builds the same tree
-def checkoutPackage(String url, String sha) {
-    sh """
-        rm -rf liquorix-package
-        git init -q liquorix-package
-        git -C liquorix-package fetch -q --depth=1 '${url}' '${sha}'
-        git -C liquorix-package checkout -q FETCH_HEAD
-    """
-}
-
-def importKey(String keyId) {
-    withCredentials([file(credentialsId: '6e773de0-6613-45ed-ae4c-7f337540da8d', variable: 'KEY_FILE')]) {
-        sh """
-            gpg --import "\$KEY_FILE"
-            echo 'default-key ${keyId}' >> ~/.gnupg/gpg.conf
-        """
-    }
-}
-
 pipeline {
     agent none
 
     options {
+        skipDefaultCheckout()
         // Each run updates the shared reprepro repository
         disableConcurrentBuilds()
         timestamps()
@@ -57,18 +38,10 @@ pipeline {
             agent { label 'ec2-build' }
             steps {
                 script {
-                    // Tag pushes build the tag, manual runs build the default branch
-                    def tag = env.ref ? env.ref.replaceFirst('^refs/tags/', '') : ''
-                    sh "rm -rf liquorix-package && git clone -q --depth=1 ${tag ? "--branch '${tag}'" : ''} '${REPO_URL}' liquorix-package"
-                    commit = sh(returnStdout: true, script: 'git -C liquorix-package rev-parse HEAD').trim()
-                    def fromEnv = { name -> sh(returnStdout: true, script: "bash -c 'source liquorix-package/scripts/debian/env.sh && echo \"\${${name}}\"'").trim() }
-                    def version = fromEnv('version_package')
-                    sourceRelease = fromEnv('source_release')
-                    releases = fromEnv('releases_debian[*]').tokenize()
-                    ubuntuReleases = fromEnv('releases_ubuntu[*]').tokenize()
-                    if (tag && tag != version) {
-                        error "Tag ${tag} doesn't match changelog version ${version}"
-                    }
+                    commit = lqx.prepare('debian')
+                    sourceRelease = lqx.envVar('debian', 'source_release')
+                    releases = lqx.envVar('debian', 'releases_debian[*]').tokenize()
+                    ubuntuReleases = lqx.envVar('debian', 'releases_ubuntu[*]').tokenize()
 
                     // RELEASES narrows a manual run to a few releases, for testing
                     def only = params.RELEASES.tokenize()
@@ -81,12 +54,11 @@ pipeline {
                         ubuntuReleases = ubuntuReleases.findAll { it in only }
                     }
 
-                    currentBuild.displayName = "#${env.BUILD_NUMBER} - v${version}.${params.BUILD}"
                     echo "Commit ${commit}, Debian: ${releases.join(', ')}, Ubuntu: ${ubuntuReleases.join(', ')}"
                 }
 
                 // Every source package is built in the source release image, so build them all here once
-                script { importKey(KEY_ID) }
+                script { lqx.importKey() }
                 sh """
                     make -C liquorix-package DISTRO=debian RELEASE='${sourceRelease}' bootstrap-image
                     make -C liquorix-package BUILD="\$BUILD" build-source-debian build-source-ubuntu
@@ -108,14 +80,9 @@ pipeline {
                     for (r in releases) {
                         def release = r
                         branches[release] = {
-                            node('ec2-build') {
-                                checkoutPackage(REPO_URL, commit)
-                                importKey(KEY_ID)
+                            lqx.buildNode(commit) {
                                 unstash "source-${release}"
-                                sh """
-                                    make -C liquorix-package DISTRO=debian RELEASE='${release}' bootstrap-image
-                                    make -C liquorix-package DISTRO=debian RELEASE='${release}' BUILD="\$BUILD" build-binary
-                                """
+                                lqx.makeBinary('debian', release)
                                 // ponytail: artifacts round-trip through the controller, fine for a handful of releases
                                 stash name: "debian-${release}", includes: "liquorix-package/artifacts/debian/${release}/**"
                             }
@@ -127,14 +94,9 @@ pipeline {
                         def release = r
                         branches["ubuntu-${release}"] = {
                             catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
-                                node('ec2-build') {
-                                    checkoutPackage(REPO_URL, commit)
-                                    importKey(KEY_ID)
+                                lqx.buildNode(commit) {
                                     unstash 'source-ubuntu'
-                                    sh """
-                                        make -C liquorix-package DISTRO=ubuntu RELEASE='${release}' bootstrap-image
-                                        make -C liquorix-package DISTRO=ubuntu RELEASE='${release}' BUILD="\$BUILD" build-binary
-                                    """
+                                    lqx.makeBinary('ubuntu', release)
                                     stash name: "ubuntu-${release}", includes: "liquorix-package/artifacts/ubuntu/${release}/**"
                                     builtUbuntu << release
                                 }
@@ -148,7 +110,7 @@ pipeline {
                         branches['ubuntu-ppa'] = {
                             node('liquorix') {
                                 catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
-                                    checkoutPackage(REPO_URL, commit)
+                                    lqx.checkoutPackage(commit)
                                     unstash 'source-ubuntu'
                                     withCredentials([file(credentialsId: 'launchpad-ci-credentials', variable: 'LP_CREDENTIALS_FILE')]) {
                                         sh '''
@@ -175,7 +137,7 @@ pipeline {
             agent { label 'liquorix' }
             steps {
                 script {
-                    checkoutPackage(REPO_URL, commit)
+                    lqx.checkoutPackage(commit)
                     if (releases) {
                         for (r in releases) {
                             unstash "debian-${r}"
@@ -199,11 +161,7 @@ pipeline {
 
     post {
         always {
-            emailext to: 'steven@liquorix.net',
-                     subject: '$PROJECT_NAME - Build # $BUILD_NUMBER - $BUILD_STATUS!',
-                     body: 'Check console output at $BUILD_URL to view the results.',
-                     attachLog: true,
-                     compressLog: true
+            script { lqx.email() }
         }
     }
 }

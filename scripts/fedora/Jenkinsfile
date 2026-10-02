@@ -1,5 +1,4 @@
-def REPO_URL = 'https://github.com/damentz/liquorix-package.git'
-def KEY_ID = 'C5ADB4F3FEBBCE27A3E54D7D9AE4078033F8024D'
+library identifier: 'lqx@scm', retriever: legacySCM(scm: scm, libraryPath: 'scripts/jenkins')
 
 // Commit and release lists discovered in the first stage, shared by every node
 def commit = ''
@@ -7,29 +6,11 @@ def releases = []
 def stable = []
 def built = []
 
-// Clone liquorix-package at a fixed commit so every node builds the same tree
-def checkoutPackage(String url, String sha) {
-    sh """
-        rm -rf liquorix-package
-        git init -q liquorix-package
-        git -C liquorix-package fetch -q --depth=1 '${url}' '${sha}'
-        git -C liquorix-package checkout -q FETCH_HEAD
-    """
-}
-
-def importKey(String keyId) {
-    withCredentials([file(credentialsId: '6e773de0-6613-45ed-ae4c-7f337540da8d', variable: 'KEY_FILE')]) {
-        sh """
-            gpg --import "\$KEY_FILE"
-            echo 'default-key ${keyId}' >> ~/.gnupg/gpg.conf
-        """
-    }
-}
-
 pipeline {
     agent none
 
     options {
+        skipDefaultCheckout()
         // Each run updates the shared dnf repository
         disableConcurrentBuilds()
         timestamps()
@@ -69,15 +50,7 @@ pipeline {
             agent { label 'liquorix' }
             steps {
                 script {
-                    // Tag pushes build the tag, manual runs build BRANCH or the default branch
-                    def tag = env.ref ? env.ref.replaceFirst('^refs/tags/', '') : ''
-                    def ref = tag ?: params.BRANCH.trim()
-                    sh "rm -rf liquorix-package && git clone -q --depth=1 ${ref ? "--branch '${ref}'" : ''} '${REPO_URL}' liquorix-package"
-                    commit = sh(returnStdout: true, script: 'git -C liquorix-package rev-parse HEAD').trim()
-                    def version = sh(returnStdout: true, script: "bash -c 'source liquorix-package/scripts/fedora/env.sh && echo \"\${version_package}\"'").trim()
-                    if (tag && tag != version) {
-                        error "Tag ${tag} doesn't match changelog version ${version}"
-                    }
+                    commit = lqx.prepare('fedora', params.BRANCH.trim())
 
                     // Current (stable) releases must build, branched and rawhide may fail
                     stable = sh(returnStdout: true, script: 'liquorix-package/scripts/fedora/releases.sh current').tokenize()
@@ -85,7 +58,6 @@ pipeline {
                         params.RELEASES.tokenize() :
                         sh(returnStdout: true, script: 'liquorix-package/scripts/fedora/releases.sh').tokenize()
 
-                    currentBuild.displayName = "#${env.BUILD_NUMBER} - v${version}.${params.BUILD}"
                     echo "Commit ${commit}, releases: ${releases.join(', ')}, stable: ${stable.join(', ')}"
                 }
             }
@@ -102,17 +74,11 @@ pipeline {
                     for (r in releases) {
                         def release = r
                         def build = {
-                            // EC2 hosts are destroyed after each run, so no workspace cleanup
-                            node('ec2-build') {
-                                checkoutPackage(REPO_URL, commit)
-                                importKey(KEY_ID)
-                                sh """
-                                    make -C liquorix-package DISTRO=fedora RELEASE='${release}' bootstrap-image
-                                    make -C liquorix-package DISTRO=fedora RELEASE='${release}' BUILD="\$BUILD" build-binary
-                                """
+                            lqx.buildNode(commit) {
+                                lqx.makeBinary('fedora', release)
                                 // Signing is best-effort for local builds, never publish unsigned RPMs
                                 sh """
-                                    gpg --export --armor '${KEY_ID}' > pubkey.asc
+                                    gpg --export --armor '${lqx.KEY_ID}' > pubkey.asc
                                     docker run --rm --user root -v "\$PWD/pubkey.asc":/pubkey.asc:ro \
                                         -v "\$PWD/liquorix-package/artifacts/fedora/${release}":/rpms:ro \
                                         'liquorix_amd64/fedora/${release}' \
@@ -140,18 +106,14 @@ pipeline {
         stage('Publish Repository') {
             // The repository lives on liquorix.net, so update it in place with the key already there
             agent { label 'liquorix' }
-            environment {
-                liquorix_repo = '/var/www/fedora'
-                liquorix_gpg_key = "${KEY_ID}"
-            }
             steps {
                 script {
-                    checkoutPackage(REPO_URL, commit)
+                    lqx.checkoutPackage(commit)
                     for (r in built) {
                         unstash "fedora-${r}"
                     }
+                    sh "liquorix_repo=/var/www/fedora liquorix_gpg_key=${lqx.KEY_ID} make -C liquorix-package repo-add-fedora"
                 }
-                sh 'make -C liquorix-package repo-add-fedora'
             }
             post {
                 // Don't leave a few GB of packages sitting on the web server
@@ -162,11 +124,7 @@ pipeline {
 
     post {
         always {
-            emailext to: 'steven@liquorix.net',
-                     subject: '$PROJECT_NAME - Build # $BUILD_NUMBER - $BUILD_STATUS!',
-                     body: 'Check console output at $BUILD_URL to view the results.',
-                     attachLog: true,
-                     compressLog: true
+            script { lqx.email() }
         }
     }
 }
