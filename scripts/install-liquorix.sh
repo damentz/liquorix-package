@@ -78,20 +78,18 @@ case "$dists" in
         fi
     fi
     ;;
-*ubuntu*)
-    apt-get update && apt-get install -y --no-install-recommends \
-        gpg gpg-agent software-properties-common
+*ubuntu*|*debian*)
+    distro='debian'
+    [[ "$dists" == *ubuntu* ]] && distro='ubuntu'
 
-    add-apt-repository -y ppa:damentz/liquorix &&\
-    apt-get update -y
+    # Ubuntu packages moved from the Launchpad PPA to liquorix.net
+    ppa_files="$(grep -rl 'damentz/liquorix' /etc/apt/sources.list.d/ 2>/dev/null || true)"
+    if [ -n "$ppa_files" ]; then
+        echo "$ppa_files" | xargs -d '\n' rm -f
+        rm -f /etc/apt/trusted.gpg.d/damentz-ubuntu-liquorix.gpg*
+        log WARN "The Liquorix PPA has been removed in favor of official hosting on liquorix.net"
+    fi
 
-    log INFO "Liquorix PPA repository added successfully"
-
-    apt-get install -y linux-image-liquorix-amd64 linux-headers-liquorix-amd64
-
-    log INFO "Liquorix kernel installed successfully"
-    ;;
-*debian*)
     apt-get update && apt-get install -y --no-install-recommends \
         curl gpg ca-certificates
 
@@ -109,10 +107,10 @@ case "$dists" in
 
     repo_file="/etc/apt/sources.list.d/liquorix.list"
     repo_code="$(
-        apt-cache policy | grep o=Debian | grep -Po 'n=\w+' | cut -f2 -d= |\
+        apt-cache policy | grep "o=${distro^}" | grep -Po 'n=\w+' | cut -f2 -d= |\
         sort | uniq -c | sort | tail -n1 | awk '{print $2}'
     )"
-    repo_line="[arch=amd64 signed-by=$keyring_path] https://liquorix.net/debian $repo_code main"
+    repo_line="[arch=amd64 signed-by=$keyring_path] https://liquorix.net/$distro $repo_code main"
     echo "deb $repo_line"      > $repo_file
     echo "deb-src $repo_line" >> $repo_file
 
