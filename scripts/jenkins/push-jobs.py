@@ -26,6 +26,7 @@ JOBS = {
     "BuildDebianUbuntu": "scripts/debian/Jenkinsfile",
     "BuildFedora": "scripts/fedora/Jenkinsfile",
     "BuildArchlinux": "scripts/archlinux/Jenkinsfile",
+    "BuildArchlinuxCustom": "scripts/archlinux-custom/Jenkinsfile",
     "PruneRepositories": "scripts/prune/Jenkinsfile",
 }
 # What a job that Jenkins doesn't have yet is created from

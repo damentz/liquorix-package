@@ -22,6 +22,11 @@ cd "$dir_build" || exit
 
 unzip -j "$dir_base/$package_source"
 
+# A custom build merges zen-kernel branches into the release and renames the package
+if [[ -n "${FEATURE_BRANCHES:-}" ]]; then
+    "$dir_scripts/merge-branches.sh"
+fi
+
 log_info "Building binary package for $release"
 export PACKAGER="$package_maintainer"
 
@@ -34,9 +39,12 @@ sudo mkdir -vp "$dir_artifacts"
 sudo chown -R "$build_user":"$build_user" "$dir_artifacts"
 cp -arv "$dir_build/"*.pkg.tar* "$dir_artifacts/"
 
-log_info "Creating AUR repository"
 cd "$dir_artifacts" || exit
-repo-add "$repo_file" ./*.pkg.tar.zst
-tar --remove-files -cf "$repo_name.tar" -- *.pkg.tar* *.db* *.files*
+# The job archives the packages of a custom build, they don't go into the repository
+if [[ -z "${FEATURE_BRANCHES:-}" ]]; then
+    log_info "Creating AUR repository"
+    repo-add "$repo_file" ./*.pkg.tar.zst
+    tar --remove-files -cf "$repo_name.tar" -- *.pkg.tar* *.db* *.files*
+fi
 
 ls -ltrh

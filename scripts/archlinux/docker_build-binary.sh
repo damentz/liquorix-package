@@ -19,6 +19,8 @@ log_debug "dir_base: $dir_base"
 docker run --net='host' \
     --rm \
     --ulimit nofile=524288:524288 \
+    -e FEATURE_BRANCHES \
+    -e BUILD_NUMBER \
     $(gpg_docker_flags /home/builder) \
     -v "$dir_base":/liquorix-package \
     -t "liquorix_$arch/$distro/$release" \

@@ -6,7 +6,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/../.."
 fail=0
 expect() { if [[ "$2" == "$3" ]]; then echo "ok   $1"; else echo "FAIL $1: want '$2', got '$3'" >&2; fail=1; fi; }
 
-for job in BuildDebianUbuntu BuildFedora BuildArchlinux PruneRepositories; do
+for job in BuildDebianUbuntu BuildFedora BuildArchlinux BuildArchlinuxCustom PruneRepositories; do
     script=$(scripts/jenkins/push-jobs.py --print "$job")
     jenkinsfile=$(grep -oP "String SOURCE = '\K[^']+" <<< "$script")
     # The same command as checkCurrent in lqx.groovy
