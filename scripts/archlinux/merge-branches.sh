@@ -2,7 +2,7 @@
 
 # Merge zen-kernel branches on top of the release that the PKGBUILD in the current directory builds.  The result is
 # left as a patch beside the PKGBUILD, which applies it in prepare(), and the package is renamed so that it installs
-# beside the released one.
+# beside the released one.  The package also gets pacman hooks that keep the GRUB menu current.
 #
 #     FEATURE_BRANCHES='7.2/foo 7.2/bar' merge-branches.sh
 
@@ -27,6 +27,7 @@ fi
 
 declare tag="v${pkgver/.lqx/-lqx}"
 declare main="$major/main"
+declare name="$package_name-test"
 
 for branch in "${branches[@]}"; do
     if [[ "$branch" != "$major"/* ]] || ! git check-ref-format --branch "$branch" > /dev/null 2>&1; then
@@ -72,8 +73,35 @@ done
 
 git diff "$tag" "$result" > feature-branches.patch
 
-sed -i "s/^pkgbase=.*/pkgbase=$package_name-test/; s/'$package_name'/'$package_name-test'/" PKGBUILD
+sed -i "s/^pkgbase=.*/pkgbase=$name/; s/'$package_name'/'$name'/" PKGBUILD
 if [[ "${BUILD_NUMBER:-}" =~ ^[0-9]+$ ]]; then
     sed -i "s/^pkgrel=.*/pkgrel=$BUILD_NUMBER/" PKGBUILD
 fi
-log_info "Prepared $package_name-test from $tag: $(git diff --shortstat "$tag" "$result")"
+
+# Nothing writes the GRUB menu when pacman installs a kernel, and a kernel with a new name is not in it.  An install
+# script runs too early for that: mkinitcpio puts the kernel and the initramfs in /boot from a PostTransaction hook,
+# and takes them out from a PreTransaction hook.  These hooks sort after both.
+# Usage: grub_hook <install|remove> <operations> <when>
+grub_hook() {
+    cat > "95-$name-grub-$1.hook" <<EOF
+[Trigger]
+Type = Package
+$2
+Target = $name
+
+[Action]
+Description = Updating the GRUB menu...
+When = $3
+Exec = /bin/sh -c '[ ! -f /boot/grub/grub.cfg ] || grub-mkconfig -o /boot/grub/grub.cfg'
+EOF
+}
+grub_hook install $'Operation = Install\nOperation = Upgrade' PostTransaction
+grub_hook remove 'Operation = Remove' PreTransaction
+# shellcheck disable=SC2016  # expanded by makepkg
+sed -i '/^_package() {$/a\  install -Dm644 -t "$pkgdir/usr/share/libalpm/hooks" "$startdir"/*.hook' PKGBUILD
+if ! grep -q 'libalpm/hooks' PKGBUILD; then
+    log_error "No _package() in the PKGBUILD to install the GRUB hooks from"
+    exit 1
+fi
+
+log_info "Prepared $name from $tag: $(git diff --shortstat "$tag" "$result")"

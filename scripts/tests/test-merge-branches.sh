@@ -71,6 +71,20 @@ expect "the headers depend on the renamed kernel" "  depends=('linux-lqx-test' '
 expect "the install script keeps its name" "  install=linux-lqx.install" "$(grep 'install=' "$tmp/build/PKGBUILD")"
 expect "pkgrel is the build number" "7" "$(grep -Po '^pkgrel=\K.*' "$tmp/build/PKGBUILD")"
 
+# What a pacman hook that _package() puts in the package triggers on, and when it runs
+packaged() {
+    rm -rf "$tmp/pkg"
+    # shellcheck disable=SC1091,SC2034  # the PKGBUILD reads them
+    (cd "$tmp/build" && pkgdir="$tmp/pkg" startdir="$tmp/build" && source ./PKGBUILD && _package)
+    grep -Po '^(Operation|Target|When) = \K.*' "$tmp/pkg/usr/share/libalpm/hooks/$1" | paste -sd' '
+}
+expect "the GRUB menu gets the kernel after its initramfs is built" \
+    "Install Upgrade linux-lqx-test PostTransaction" "$(packaged 95-linux-lqx-test-grub-install.hook)"
+expect "the GRUB menu loses the kernel after it left /boot" \
+    "Remove linux-lqx-test PreTransaction" "$(packaged 95-linux-lqx-test-grub-remove.hook)"
+expect "both hooks write grub.cfg" "2" \
+    "$(grep -l 'grub-mkconfig -o /boot/grub/grub.cfg' "$tmp"/pkg/usr/share/libalpm/hooks/*.hook | wc -l)"
+
 expect "main alone merges" "0" "$(build 1.2/main)"
 expect "pkgrel stays without a build number" "1" "$(grep -Po '^pkgrel=\K.*' "$tmp/build/PKGBUILD")"
 
