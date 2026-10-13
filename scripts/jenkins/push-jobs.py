@@ -3,7 +3,8 @@
 
 Each job holds its pipeline script inline.  The script is scripts/jenkins/lqx.groovy followed by
 the job's Jenkinsfile, with a hash of both filled in so a build can tell when its job is out of
-date.  The Jenkins Sync workflow runs this on every push to the default branch.
+date.  The Jenkins Sync workflow runs this on every push to the default branch.  A job that Jenkins
+doesn't have yet is created.
 
     push-jobs.py [job...]        write the jobs (default: all of them)
     push-jobs.py --print job     print the job's script instead
@@ -15,6 +16,7 @@ import base64
 import hashlib
 import os
 import sys
+import urllib.error
 import urllib.request
 from pathlib import Path
 from xml.sax.saxutils import escape
@@ -26,6 +28,8 @@ JOBS = {
     "BuildArchlinux": "scripts/archlinux/Jenkinsfile",
     "PruneRepositories": "scripts/prune/Jenkinsfile",
 }
+# What a job that Jenkins doesn't have yet is created from
+NEW_JOB = "<flow-definition>\n  <definition ></definition>\n</flow-definition>\n"
 
 
 def job_script(jenkinsfile):
@@ -63,14 +67,21 @@ def main():
         sys.stdout.write(job_script(JOBS[sys.argv[2]]))
         return
     for job in sys.argv[1:] or JOBS:
-        url = f"{os.environ['JENKINS_URL'].rstrip('/')}/job/{job}/config.xml"
+        base = os.environ["JENKINS_URL"].rstrip("/")
+        url = f"{base}/job/{job}/config.xml"
         definition = (
             '<definition class="org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition" plugin="workflow-cps">\n'
             f"    <script>{escape(job_script(JOBS[job]))}</script>\n"
             "    <sandbox>true</sandbox>\n"
             "  </definition>"
         )
-        before, found, rest = jenkins(url).partition("<definition ")
+        try:
+            config = jenkins(url)
+        except urllib.error.HTTPError as error:
+            if error.code != 404:
+                raise
+            url, config = f"{base}/createItem?name={job}", NEW_JOB
+        before, found, rest = config.partition("<definition ")
         after = rest.partition("</definition>")[2]
         if not found or not after:
             sys.exit(f"{job}: no <definition> in config.xml")
