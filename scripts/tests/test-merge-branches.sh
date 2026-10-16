@@ -13,19 +13,22 @@ trap 'rm -rf "$tmp"' EXIT
 g() { git -C "$tmp/repo" -c user.name=test -c user.email=test@localhost "$@"; }
 commit() { echo "$2" > "$tmp/repo/$1"; g add "$1"; g commit -qm "$1: $2"; }
 
-# The release tag is 1.2/main plus a Cut commit.  1.2/main has a newer commit, and two branches change the same line.
+# The release tag is 1.2/main plus a Cut commit that sets EXTRAVERSION.  Since then 1.2/main has a newer commit and a
+# stable release, which changes the line next to EXTRAVERSION.  Two branches change the same line.
 git init -q "$tmp/repo"
 g checkout -qb 1.2/main
 commit a base
+commit Makefile $'SUBLEVEL = 3\nEXTRAVERSION = -zen'
 g branch 1.2/clean
 g branch 1.2/clash
 g branch 1.3/other
 commit m 1
 g checkout -qb 1.2/main-liquorix
-commit Makefile cut
+commit Makefile $'SUBLEVEL = 3\nEXTRAVERSION = -lqx1'
 g tag -am 'Cut v1.2.3-lqx1' v1.2.3-lqx1
 g checkout -q 1.2/main
 commit m 2
+commit Makefile $'SUBLEVEL = 4\nEXTRAVERSION = -zen'
 g checkout -q 1.2/clean
 commit a clean
 g checkout -q 1.2/clash
@@ -65,7 +68,7 @@ prepared() {
 expect "a branch merges" "0" "$(build 1.2/clean 7)"
 expect "the branch change is in the patch" "clean" "$(prepared a)"
 expect "the newer main commit is in the patch" "2" "$(prepared m)"
-expect "the Cut commit stays" "cut" "$(prepared Makefile)"
+expect "the stable release on main is in the patch" "SUBLEVEL = 4 EXTRAVERSION = -zen" "$(prepared Makefile | paste -sd' ')"
 expect "the package is renamed" "linux-lqx-test" "$(grep -Po '^pkgbase=\K.*' "$tmp/build/PKGBUILD")"
 expect "the headers depend on the renamed kernel" "  depends=('linux-lqx-test' 'pahole')" "$(grep 'depends=' "$tmp/build/PKGBUILD")"
 expect "the install script keeps its name" "  install=linux-lqx.install" "$(grep 'install=' "$tmp/build/PKGBUILD")"

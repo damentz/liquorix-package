@@ -1,8 +1,9 @@
 #!/bin/bash
 
-# Merge zen-kernel branches on top of the release that the PKGBUILD in the current directory builds.  The result is
-# left as a patch beside the PKGBUILD, which applies it in prepare(), and the package is renamed so that it installs
-# beside the released one.  The package also gets pacman hooks that keep the GRUB menu current.
+# Merge zen-kernel branches on top of the main branch of the series that the PKGBUILD in the current directory
+# builds.  The difference from the release that the PKGBUILD builds is left as a patch beside it, which applies it in
+# prepare(), and the package is renamed so that it installs beside the released one.  The package also gets pacman
+# hooks that keep the GRUB menu current.
 #
 #     FEATURE_BRANCHES='7.2/foo 7.2/bar' merge-branches.sh
 
@@ -58,9 +59,11 @@ done
 log_info "Fetching $tag, $main and ${branches[*]} from $repo, history since $since"
 git fetch --no-tags --shallow-since="$since" "$repo" "${refs[@]}"
 
+# Not on top of the release tag: its Cut commit sets EXTRAVERSION, and conflicts with each stable release on main
 declare result tree
-result=$(git rev-parse "$tag^{commit}")
-for branch in "$main" "${branches[@]}"; do
+result=$(git rev-parse "$main")
+log_info "Starting from $main at $(git rev-parse --short "$main")"
+for branch in "${branches[@]}"; do
     if ! tree=$(git merge-tree --write-tree --name-only --no-messages "$result" "$branch"); then
         log_error "Conflict merging $branch:"
         tail -n +2 <<< "$tree" >&2
