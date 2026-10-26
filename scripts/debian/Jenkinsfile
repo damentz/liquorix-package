@@ -12,6 +12,8 @@ pipeline {
     options {
         // Each run updates the shared reprepro repository
         disableConcurrentBuilds()
+        // Keep packages around so a failed publish can "Restart from Stage" without rebuilding them
+        preserveStashes(buildCount: 3)
         timestamps()
     }
 
@@ -69,6 +71,8 @@ pipeline {
                 }
 
                 stash name: 'source-ubuntu', includes: 'liquorix-package/artifacts/ubuntu/**'
+                writeFile file: 'commit', text: commit
+                stash name: 'commit', includes: 'commit'
             }
         }
 
@@ -149,18 +153,23 @@ pipeline {
             }
             steps {
                 script {
-                    lqx.checkoutPackage(commit)
-                    if (builtDebian) {
-                        for (r in builtDebian) {
-                            unstash "debian-${r}"
+                    // A restart from this stage skips the earlier ones and the variables they set,
+                    // so work from the stashes alone: the commit, then whichever releases built
+                    unstash 'commit'
+                    lqx.checkoutPackage(readFile('commit').trim())
+                    for (distro in ['debian', 'ubuntu']) {
+                        def built = false
+                        for (r in lqx.envVar('debian', "releases_${distro}[*]").tokenize()) {
+                            try {
+                                unstash "${distro}-${r}"
+                                built = true
+                            } catch (hudson.AbortException e) {
+                                echo "${distro} ${r} wasn't built, not publishing it"
+                            }
                         }
-                        sh 'liquorix_repo=/var/www/debian/ make -C liquorix-package BUILD="$BUILD" repo-add-debian'
-                    }
-                    if (builtUbuntu) {
-                        for (r in builtUbuntu) {
-                            unstash "ubuntu-${r}"
+                        if (built) {
+                            sh "liquorix_repo=/var/www/${distro}/ make -C liquorix-package BUILD=\"\$BUILD\" repo-add-${distro}"
                         }
-                        sh 'liquorix_repo=/var/www/ubuntu/ make -C liquorix-package BUILD="$BUILD" repo-add-ubuntu'
                     }
                 }
             }
