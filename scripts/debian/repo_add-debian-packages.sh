@@ -32,6 +32,11 @@ for arch in amd64; do
             continue
         fi
 
+        # A rebuild of a version already in the repo (e.g. a rerun of a partly failed build) has new
+        # checksums that reprepro refuses, so replace whatever this release has at that version
+        version="$(sed -n 's/^Version: //p' "$changes")"
+        reprepro -b "$repo_local_path" removesrc "$release" "$package_name" "$version"
+
         log_info "Including $changes to repo at $repo_local_path"
         reprepro -b "$repo_local_path" include "$release" "$changes"
         published+=1
