@@ -4,13 +4,24 @@ def releases = []
 def stable = []
 def built = []
 
+// "Restart from Stage" skips the stages before it and the variables they set, so read them back
+// from Prepare's stash, along with what earlier attempts finished.  Needs a workspace.
+def restore = {
+    def state = lqx.loadState()
+    commit = state.commit
+    releases = state.releases.tokenize()
+    stable = state.stable.tokenize()
+    built = lqx.done('fedora', releases)
+    echo "Restarted at ${commit}, already built: ${built.join(', ') ?: 'nothing'}"
+}
+
 pipeline {
     agent none
 
     options {
         // Each run updates the shared dnf repository
         disableConcurrentBuilds()
-        // Keep packages around so a failed publish can "Restart from Stage" without rebuilding them
+        // Keep packages around so "Restart from Stage" reuses them instead of rebuilding
         preserveStashes(buildCount: 3)
         timestamps()
     }
@@ -63,10 +74,8 @@ pipeline {
                         sh(returnStdout: true, script: 'liquorix-package/scripts/fedora/releases.sh').tokenize()
 
                     echo "Commit ${commit}, releases: ${releases.join(', ')}, stable: ${stable.join(', ')}"
+                    lqx.saveState(commit: commit, releases: releases.join(' '), stable: stable.join(' '))
                 }
-                writeFile file: 'commit', text: commit
-                writeFile file: 'releases', text: releases.join(' ')
-                stash name: 'meta', includes: 'commit,releases'
             }
             post {
                 // Later stages only need the commit and release lists
@@ -77,10 +86,15 @@ pipeline {
         stage('Build Packages') {
             steps {
                 script {
+                    if (!commit) {
+                        node('liquorix') { restore() }
+                    }
+
                     // A release that fails to build, or loses its spot agent, still lets the others
-                    // publish.  Only a stable release failing fails the run.
+                    // publish.  Only a stable release failing fails the run.  "Restart from Stage"
+                    // here builds only what's missing.
                     def branches = [:]
-                    for (r in releases) {
+                    for (r in releases - built) {
                         def release = r
                         branches[release] = {
                             catchError(buildResult: stable.contains(release) ? 'FAILURE' : 'UNSTABLE', stageResult: 'FAILURE') {
@@ -101,12 +115,15 @@ pipeline {
                                     """
                                     // ponytail: artifacts round-trip through the controller, fine for a handful of releases
                                     stash name: "fedora-${release}", includes: "liquorix-package/artifacts/fedora/${release}/*.rpm"
+                                    lqx.markDone('fedora', release)
                                     built << release
                                 }
                             }
                         }
                     }
-                    parallel branches
+                    if (branches) {
+                        parallel branches
+                    }
 
                     def missing = releases - built
                     if (missing) {
@@ -125,20 +142,15 @@ pipeline {
             }
             steps {
                 script {
-                    // A restart from this stage skips the earlier ones and the variables they set,
-                    // so work from the stashes alone: the commit and releases, then whichever built
-                    unstash 'meta'
-                    lqx.checkoutPackage(readFile('commit').trim())
-                    def published = false
-                    for (r in readFile('releases').tokenize()) {
-                        try {
-                            unstash "fedora-${r}"
-                            published = true
-                        } catch (hudson.AbortException e) {
-                            echo "Fedora ${r} wasn't built, not publishing it"
-                        }
+                    if (!commit) {
+                        restore()
                     }
-                    if (published) {
+                    // Publishing replaces each built release's tree, packages already there included
+                    lqx.checkoutPackage(commit)
+                    for (r in built) {
+                        unstash "fedora-${r}"
+                    }
+                    if (built) {
                         sh "liquorix_repo=/var/www/fedora liquorix_gpg_key=${lqx.KEY_ID} make -C liquorix-package repo-add-fedora"
                     }
                 }

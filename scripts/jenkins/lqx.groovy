@@ -83,6 +83,58 @@ def makeBinary(String distro, String release) {
     """
 }
 
+// "Restart from Stage" skips the stages before it and the variables they set, but copies their stashes
+// (preserveStashes), so stages hand later ones what they need through stashes.  These need a workspace.
+def saveState(Map state) {
+    def text = ''
+    for (key in state.keySet()) {
+        text += "${key}=${state[key]}\n"
+    }
+    dir('state') {
+        writeFile file: 'state', text: text
+        stash name: 'state', includes: 'state'
+    }
+}
+
+// Returns the map saveState() stashed, values as strings
+def loadState() {
+    def state = [:]
+    dir('state') {
+        unstash 'state'
+        for (line in readFile('state').split('\n')) {
+            def kv = line.split('=', 2)
+            state[kv[0]] = kv.size() > 1 ? kv[1] : ''
+        }
+        deleteDir()
+    }
+    return state
+}
+
+// Mark a piece of work finished so a restarted run can skip it
+def markDone(String kind, String name) {
+    dir('done') {
+        writeFile file: "${kind}-${name}", text: ''
+        stash name: "done-${kind}-${name}", includes: "${kind}-${name}"
+    }
+}
+
+// The names whose work markDone() recorded, in this run or the one it restarted from
+def done(String kind, List names) {
+    def found = []
+    dir('done') {
+        for (name in names) {
+            try {
+                unstash "done-${kind}-${name}"
+                found << name
+            } catch (hudson.AbortException e) {
+                // Not finished yet
+            }
+        }
+        deleteDir()
+    }
+    return found
+}
+
 def email() {
     emailext to: 'steven@liquorix.net',
              subject: '$PROJECT_NAME - Build # $BUILD_NUMBER - $BUILD_STATUS!',

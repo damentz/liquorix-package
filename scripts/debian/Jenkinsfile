@@ -5,6 +5,20 @@ def releases = []
 def ubuntuReleases = []
 def builtDebian = []
 def builtUbuntu = []
+def ppaUploaded = false
+
+// "Restart from Stage" skips the stages before it and the variables they set, so read them back
+// from Build Sources' stash, along with what earlier attempts finished.  Needs a workspace.
+def restore = {
+    def state = lqx.loadState()
+    commit = state.commit
+    releases = state.releases.tokenize()
+    ubuntuReleases = state.ubuntu.tokenize()
+    builtDebian = lqx.done('debian', releases)
+    builtUbuntu = lqx.done('ubuntu', ubuntuReleases)
+    ppaUploaded = 'upload' in lqx.done('ppa', ['upload'])
+    echo "Restarted at ${commit}, already built: ${(builtDebian + builtUbuntu).join(', ') ?: 'nothing'}, PPA uploaded: ${ppaUploaded}"
+}
 
 pipeline {
     agent none
@@ -12,7 +26,7 @@ pipeline {
     options {
         // Each run updates the shared reprepro repository
         disableConcurrentBuilds()
-        // Keep packages around so a failed publish can "Restart from Stage" without rebuilding them
+        // Keep packages around so "Restart from Stage" reuses them instead of rebuilding
         preserveStashes(buildCount: 3)
         timestamps()
     }
@@ -56,6 +70,7 @@ pipeline {
                     }
 
                     echo "Commit ${commit}, Debian: ${releases.join(', ')}, Ubuntu: ${ubuntuReleases.join(', ')}"
+                    lqx.saveState(commit: commit, releases: releases.join(' '), ubuntu: ubuntuReleases.join(' '))
                 }
 
                 // Every source package is built in the source release image, so build them all here once
@@ -71,18 +86,20 @@ pipeline {
                 }
 
                 stash name: 'source-ubuntu', includes: 'liquorix-package/artifacts/ubuntu/**'
-                writeFile file: 'commit', text: commit
-                stash name: 'commit', includes: 'commit'
             }
         }
 
         stage('Build Packages') {
             steps {
                 script {
+                    if (!commit) {
+                        node('liquorix') { restore() }
+                    }
+
                     // A release that fails to build, or loses its spot agent, fails the run but the
-                    // others still publish.  Rebuild the missing ones later with RELEASES.
+                    // others still publish.  "Restart from Stage" here builds only what's missing.
                     def branches = [:]
-                    for (r in releases) {
+                    for (r in releases - builtDebian) {
                         def release = r
                         branches[release] = {
                             catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
@@ -91,13 +108,14 @@ pipeline {
                                     lqx.makeBinary('debian', release)
                                     // ponytail: artifacts round-trip through the controller, fine for a handful of releases
                                     stash name: "debian-${release}", includes: "liquorix-package/artifacts/debian/${release}/**"
+                                    lqx.markDone('debian', release)
                                     builtDebian << release
                                 }
                             }
                         }
                     }
                     // Ubuntu binaries for liquorix.net/ubuntu
-                    for (r in ubuntuReleases) {
+                    for (r in ubuntuReleases - builtUbuntu) {
                         def release = r
                         branches["ubuntu-${release}"] = {
                             catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
@@ -105,6 +123,7 @@ pipeline {
                                     unstash 'source-ubuntu'
                                     lqx.makeBinary('ubuntu', release)
                                     stash name: "ubuntu-${release}", includes: "liquorix-package/artifacts/ubuntu/${release}/**"
+                                    lqx.markDone('ubuntu', release)
                                     builtUbuntu << release
                                 }
                             }
@@ -112,8 +131,9 @@ pipeline {
                     }
                     // Launchpad also builds Ubuntu binaries from the sources, so the PPA upload only
                     // needs liquorix.net.  A PPA failure fails the build but still lets the rest publish.
-                    // A run narrowed by RELEASES or with SKIP_PUBLISH leaves the PPA alone.
-                    if (!params.RELEASES.trim() && !params.SKIP_PUBLISH) {
+                    // A run narrowed by RELEASES or with SKIP_PUBLISH leaves the PPA alone, and Launchpad
+                    // refuses a version twice so a restart doesn't upload again.
+                    if (!params.RELEASES.trim() && !params.SKIP_PUBLISH && !ppaUploaded) {
                         branches['ubuntu-ppa'] = {
                             node('liquorix') {
                                 catchError(buildResult: 'FAILURE', stageResult: 'FAILURE') {
@@ -128,13 +148,16 @@ pipeline {
                                             timeout 30m make -C liquorix-package BUILD="$BUILD" clean-ppa upload-ppa < /dev/null
                                         '''
                                     }
+                                    lqx.markDone('ppa', 'upload')
                                 }
                                 deleteDir()
                             }
                         }
                     }
 
-                    parallel branches
+                    if (branches) {
+                        parallel branches
+                    }
 
                     def missing = (releases - builtDebian) + (ubuntuReleases - builtUbuntu)
                     if (missing) {
@@ -153,23 +176,22 @@ pipeline {
             }
             steps {
                 script {
-                    // A restart from this stage skips the earlier ones and the variables they set,
-                    // so work from the stashes alone: the commit, then whichever releases built
-                    unstash 'commit'
-                    lqx.checkoutPackage(readFile('commit').trim())
-                    for (distro in ['debian', 'ubuntu']) {
-                        def built = false
-                        for (r in lqx.envVar('debian', "releases_${distro}[*]").tokenize()) {
-                            try {
-                                unstash "${distro}-${r}"
-                                built = true
-                            } catch (hudson.AbortException e) {
-                                echo "${distro} ${r} wasn't built, not publishing it"
-                            }
+                    if (!commit) {
+                        restore()
+                    }
+                    // Publishing replaces any packages already in the repository at the same version
+                    lqx.checkoutPackage(commit)
+                    if (builtDebian) {
+                        for (r in builtDebian) {
+                            unstash "debian-${r}"
                         }
-                        if (built) {
-                            sh "liquorix_repo=/var/www/${distro}/ make -C liquorix-package BUILD=\"\$BUILD\" repo-add-${distro}"
+                        sh 'liquorix_repo=/var/www/debian/ make -C liquorix-package BUILD="$BUILD" repo-add-debian'
+                    }
+                    if (builtUbuntu) {
+                        for (r in builtUbuntu) {
+                            unstash "ubuntu-${r}"
                         }
+                        sh 'liquorix_repo=/var/www/ubuntu/ make -C liquorix-package BUILD="$BUILD" repo-add-ubuntu'
                     }
                 }
             }
