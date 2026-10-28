@@ -93,6 +93,7 @@ def saveState(Map state) {
     dir('state') {
         writeFile file: 'state', text: text
         stash name: 'state', includes: 'state'
+        deleteDir()
     }
 }
 
@@ -115,6 +116,7 @@ def markDone(String kind, String name) {
     dir('done') {
         writeFile file: "${kind}-${name}", text: ''
         stash name: "done-${kind}-${name}", includes: "${kind}-${name}"
+        deleteDir()
     }
 }
 

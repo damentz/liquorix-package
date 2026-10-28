@@ -1,10 +1,14 @@
+// Commits checked out in the first stage
+def lqxCommit = ''
+def pkgCommit = ''
+
 pipeline {
     agent {
         label 'ec2-build'
     }
 
     options {
-        // Keep packages around so a failed publish can "Restart from Stage" without rebuilding them
+        // Keep packages around so "Restart from Stage" reuses them instead of rebuilding
         preserveStashes(buildCount: 3)
         timestamps()
     }
@@ -24,16 +28,35 @@ pipeline {
             steps {
                 git 'https://github.com/damentz/linux-lqx'
                 script {
-                    echo "liquorix-package ${lqx.clonePackage()}"
+                    lqxCommit = sh(returnStdout: true, script: 'git rev-parse HEAD').trim()
+                    pkgCommit = lqx.clonePackage()
+                    echo "linux-lqx ${lqxCommit}, liquorix-package ${pkgCommit}"
                     def pkgver = sh(returnStdout: true, script: "grep -Po '^pkgver=\\K.*' PKGBUILD").trim()
                     def pkgrel = sh(returnStdout: true, script: "grep -Po '^pkgrel=\\K.*' PKGBUILD").trim()
                     currentBuild.displayName = "#${env.BUILD_NUMBER} - v${pkgver}-${pkgrel}"
+                    lqx.saveState(lqx: lqxCommit, pkg: pkgCommit, version: "${pkgver}-${pkgrel}")
                 }
             }
         }
 
         stage('Build Package') {
             steps {
+                script {
+                    // "Restart from Stage" lands on a fresh node without Checkout's clones or variables,
+                    // so check out the same commits again
+                    if (!pkgCommit) {
+                        def state = lqx.loadState()
+                        lqxCommit = state.lqx
+                        pkgCommit = state.pkg
+                        currentBuild.displayName = "#${env.BUILD_NUMBER} - v${state.version}"
+                        sh """
+                            git init -q .
+                            git fetch -q --depth=1 https://github.com/damentz/linux-lqx '${lqxCommit}'
+                            git checkout -q -f FETCH_HEAD
+                        """
+                        lqx.checkoutPackage(pkgCommit)
+                    }
+                }
                 sh 'gpg --locate-keys torvalds@kernel.org gregkh@kernel.org'
                 script { lqx.importKey() }
 
