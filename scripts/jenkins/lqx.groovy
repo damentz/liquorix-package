@@ -67,12 +67,15 @@ def prepare(String distro, String branch = '') {
     return commit
 }
 
-// EC2 hosts are destroyed after each run, so no workspace cleanup
+// EC2 hosts are destroyed after each run, so no workspace cleanup.  A spot host reclaimed mid-build
+// aborts the node step; redo just this work on a fresh host.  Any other failure fails as usual.
 def buildNode(String commit, Closure body) {
-    node('ec2-build') {
-        checkoutPackage(commit)
-        importKey()
-        body()
+    retry(count: 3, conditions: [agent()]) {
+        node('ec2-build') {
+            checkoutPackage(commit)
+            importKey()
+            body()
+        }
     }
 }
 
