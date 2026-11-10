@@ -13,7 +13,7 @@ dir_build="/build"
 dir_scripts="$dir_base/scripts/fedora"
 dir_artifacts="$dir_base/artifacts"
 
-# Release Version strings come from the version module (see CONTEXT.md).
+# Release Version strings come from the version module.
 eval "$("$dir_base/scripts/version" -C "$dir_package" env)"
 # shellcheck disable=SC2154  # assigned by eval above
 version_package="${version_kernel}-${version_pkgrev}"
