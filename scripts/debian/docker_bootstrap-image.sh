@@ -36,6 +36,16 @@ if [[ "$(docker image ls --format table)" == *"$release_string"* ]]; then
     docker container rm "$container_id" > /dev/null
 else
     log_info "$release_string: Docker image not found, building with Dockerfile."
+
+    # A new Ubuntu development release has no Docker Hub image at first; start
+    # from the newest released one and upgrade it to the target release.
+    declare base_tag="$release"
+    if [[ "$distro" == 'ubuntu' ]] &&
+        ! docker buildx imagetools inspect "$arch/$distro:$release" > /dev/null 2>&1; then
+        base_tag='rolling'
+        log_warn "$release_string: No $arch/$distro:$release image, building from $arch/$distro:$base_tag"
+    fi
+
     docker buildx build \
         --network="host" \
         --no-cache \
@@ -46,5 +56,6 @@ else
         --build-arg ARCH="$arch" \
         --build-arg DISTRO="$distro" \
         --build-arg RELEASE="$release" \
+        --build-arg BASE_TAG="$base_tag" \
         "$dir_base"/
 fi
