@@ -562,7 +562,7 @@ index 654bb48499724..c546e821ce6b2 100644
  Historically, Linux guests have trusted Hyper-V to send well-formed
  and valid messages, and Linux drivers for synthetic devices did not
 diff --git a/Makefile b/Makefile
-index c61ea07ee5051..d072b23e9053f 100644
+index c61ea07ee5051..9272e67cd3a93 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -1,9 +1,9 @@
@@ -573,7 +573,7 @@ index c61ea07ee5051..d072b23e9053f 100644
 -EXTRAVERSION =
 -NAME = Baby Opossum Posse
 +SUBLEVEL = 4
-+EXTRAVERSION = -lqx1
++EXTRAVERSION = -lqx3
 +NAME = Channeling Inner Peace for Peak Performance
  
  # *DOCUMENTATION*
@@ -11215,7 +11215,7 @@ index 08da3810cffd8..d55615f343004 100644
  	.release_params	= zstd_release_params,
  	.name		= "zstd",
 diff --git a/drivers/block/zram/zcomp.c b/drivers/block/zram/zcomp.c
-index 974c4691887e6..79a073a8e2479 100644
+index 974c4691887e6..ad8c7dc739223 100644
 --- a/drivers/block/zram/zcomp.c
 +++ b/drivers/block/zram/zcomp.c
 @@ -7,6 +7,8 @@
@@ -11367,8 +11367,8 @@ index 974c4691887e6..79a073a8e2479 100644
 +
 +static struct zcomp_dstrm *zcomp_dstrm_excl_tryget(struct zcomp *comp)
 +{
-+	struct zcomp_dstrm *zstrm;
 +	unsigned int cpu, start = raw_smp_processor_id();
++	struct zcomp_dstrm *zstrm;
 +
 +	/* Best-effort start CPU hint; migration during the scan is fine */
 +	for_each_online_cpu_wrap(cpu, start) {
@@ -11751,7 +11751,7 @@ index 81a0f3f6ff487..39efefc43a138 100644
  
  #endif /* _ZCOMP_H_ */
 diff --git a/drivers/block/zram/zram_drv.c b/drivers/block/zram/zram_drv.c
-index a9b3bb1d3bef3..aa6fd18588442 100644
+index a9b3bb1d3bef3..5e5ad2e6ce608 100644
 --- a/drivers/block/zram/zram_drv.c
 +++ b/drivers/block/zram/zram_drv.c
 @@ -32,6 +32,7 @@
@@ -11861,7 +11861,140 @@ index a9b3bb1d3bef3..aa6fd18588442 100644
  	slot_unlock(zram, index);
  
  	return ret;
-@@ -2086,15 +2098,19 @@ static int read_same_filled_page(struct zram *zram, struct page *page,
+@@ -1542,68 +1554,70 @@ static void zram_debugfs_destroy(void)
+ 	debugfs_remove_recursive(zram_debugfs_root);
+ }
+ 
+-static ssize_t read_block_state(struct file *file, char __user *buf,
+-				size_t count, loff_t *ppos)
++static void *zram_block_state_start(struct seq_file *seq, loff_t *pos)
+ {
+-	char *kbuf;
+-	unsigned long index;
+-	ssize_t written = 0;
+-	struct zram *zram = file->private_data;
++	struct zram *zram = seq->private;
+ 	unsigned long nr_pages;
+ 
+-	kbuf = kvmalloc(count, GFP_KERNEL);
+-	if (!kbuf)
+-		return -ENOMEM;
+-
+-	guard(rwsem_read)(&zram->dev_lock);
+-	if (!init_done(zram)) {
+-		kvfree(kbuf);
+-		return -EINVAL;
+-	}
++	down_read(&zram->dev_lock);
++	if (!init_done(zram))
++		return ERR_PTR(-EINVAL);
+ 
+ 	nr_pages = zram->disksize >> PAGE_SHIFT;
++	if (*pos >= nr_pages)
++		return NULL;
+ 
+-	for (index = *ppos; index < nr_pages; index++) {
+-		int copied;
+-
+-		slot_lock(zram, index);
+-		if (!slot_allocated(zram, index))
+-			goto next;
+-
+-		copied = snprintf(kbuf + written, count,
+-			"%12lu %12u.%06d %c%c%c%c%c%c\n",
+-			index, zram->table[index].attr.ac_time, 0,
+-			test_slot_flag(zram, index, ZRAM_SAME) ? 's' : '.',
+-			test_slot_flag(zram, index, ZRAM_WB) ? 'w' : '.',
+-			test_slot_flag(zram, index, ZRAM_HUGE) ? 'h' : '.',
+-			test_slot_flag(zram, index, ZRAM_IDLE) ? 'i' : '.',
+-			get_slot_comp_priority(zram, index) ? 'r' : '.',
+-			test_slot_flag(zram, index,
+-				       ZRAM_INCOMPRESSIBLE) ? 'n' : '.');
+-
+-		if (count <= copied) {
+-			slot_unlock(zram, index);
+-			break;
+-		}
+-		written += copied;
+-		count -= copied;
+-next:
+-		slot_unlock(zram, index);
+-		*ppos += 1;
+-	}
+-
+-	if (copy_to_user(buf, kbuf, written))
+-		written = -EFAULT;
+-	kvfree(kbuf);
+-
+-	return written;
++	return pos;
+ }
+ 
+-static const struct file_operations proc_zram_block_state_op = {
+-	.open = simple_open,
+-	.read = read_block_state,
+-	.llseek = default_llseek,
++static void *zram_block_state_next(struct seq_file *seq, void *v, loff_t *pos)
++{
++	struct zram *zram = seq->private;
++	unsigned long nr_pages = zram->disksize >> PAGE_SHIFT;
++
++	++*pos;
++	if (*pos >= nr_pages)
++		return NULL;
++
++	return pos;
++}
++
++static void zram_block_state_stop(struct seq_file *seq, void *v)
++{
++	struct zram *zram = seq->private;
++
++	up_read(&zram->dev_lock);
++}
++
++static int zram_block_state_show(struct seq_file *seq, void *v)
++{
++	struct zram *zram = seq->private;
++	unsigned long index = *(loff_t *)v;
++
++	slot_lock(zram, index);
++	if (slot_allocated(zram, index)) {
++		seq_printf(seq, "%12lu %12u.%06d %c%c%c%c%c%c\n",
++			   index, zram->table[index].attr.ac_time, 0,
++			   test_slot_flag(zram, index, ZRAM_SAME) ? 's' : '.',
++			   test_slot_flag(zram, index, ZRAM_WB) ? 'w' : '.',
++			   test_slot_flag(zram, index, ZRAM_HUGE) ? 'h' : '.',
++			   test_slot_flag(zram, index, ZRAM_IDLE) ? 'i' : '.',
++			   get_slot_comp_priority(zram, index) ? 'r' : '.',
++			   test_slot_flag(zram, index,
++					  ZRAM_INCOMPRESSIBLE) ? 'n' : '.');
++	}
++	slot_unlock(zram, index);
++
++	return 0;
++}
++
++static const struct seq_operations zram_block_state_sops = {
++	.start = zram_block_state_start,
++	.next = zram_block_state_next,
++	.stop = zram_block_state_stop,
++	.show = zram_block_state_show,
+ };
++DEFINE_SEQ_ATTRIBUTE(zram_block_state);
+ 
+ static void zram_debugfs_register(struct zram *zram)
+ {
+@@ -1613,7 +1627,7 @@ static void zram_debugfs_register(struct zram *zram)
+ 	zram->debugfs_dir = debugfs_create_dir(zram->disk->disk_name,
+ 						zram_debugfs_root);
+ 	debugfs_create_file("block_state", 0400, zram->debugfs_dir,
+-				zram, &proc_zram_block_state_op);
++				zram, &zram_block_state_fops);
+ }
+ 
+ static void zram_debugfs_unregister(struct zram *zram)
+@@ -2086,15 +2100,19 @@ static int read_same_filled_page(struct zram *zram, struct page *page,
  static int read_incompressible_page(struct zram *zram, struct page *page,
  				    unsigned long index)
  {
@@ -11883,7 +12016,7 @@ index a9b3bb1d3bef3..aa6fd18588442 100644
  
  	return 0;
  }
-@@ -2102,24 +2118,28 @@ static int read_incompressible_page(struct zram *zram, struct page *page,
+@@ -2102,24 +2120,28 @@ static int read_incompressible_page(struct zram *zram, struct page *page,
  static int read_compressed_page(struct zram *zram, struct page *page,
  				unsigned long index)
  {
@@ -11920,7 +12053,7 @@ index a9b3bb1d3bef3..aa6fd18588442 100644
  
  	return ret;
  }
-@@ -2128,25 +2148,23 @@ static int read_compressed_page(struct zram *zram, struct page *page,
+@@ -2128,25 +2150,23 @@ static int read_compressed_page(struct zram *zram, struct page *page,
  static int read_from_zspool_raw(struct zram *zram, struct page *page,
  				unsigned long index)
  {
@@ -11955,7 +12088,42 @@ index a9b3bb1d3bef3..aa6fd18588442 100644
  
  	memzero_page(page, size, PAGE_SIZE - size);
  
-@@ -2289,7 +2307,7 @@ static int zram_write_page(struct zram *zram, struct page *page,
+@@ -2177,6 +2197,7 @@ static int zram_read_page(struct zram *zram, struct page *page,
+ 	int ret;
+ 
+ 	slot_lock(zram, index);
++	mark_slot_accessed(zram, index);
+ 	if (!test_slot_flag(zram, index, ZRAM_WB)) {
+ 		/* Slot should be locked through out the function call */
+ 		ret = read_from_zspool(zram, page, index);
+@@ -2192,10 +2213,6 @@ static int zram_read_page(struct zram *zram, struct page *page,
+ 		ret = read_from_bdev(zram, page, index, blk_idx, parent);
+ 	}
+ 
+-	/* Should NEVER happen. Return bio error if it does. */
+-	if (WARN_ON(ret < 0))
+-		pr_err("Decompression failed! err=%d, page=%lu\n", ret, index);
+-
+ 	return ret;
+ }
+ 
+@@ -2233,6 +2250,7 @@ static int write_same_filled_page(struct zram *zram, unsigned long fill,
+ 	slot_free(zram, index);
+ 	set_slot_flag(zram, index, ZRAM_SAME);
+ 	set_slot_handle(zram, index, fill);
++	mark_slot_accessed(zram, index);
+ 	slot_unlock(zram, index);
+ 
+ 	atomic64_inc(&zram->stats.same_pages);
+@@ -2272,6 +2290,7 @@ static int write_incompressible_page(struct zram *zram, struct page *page,
+ 	set_slot_flag(zram, index, ZRAM_HUGE);
+ 	set_slot_handle(zram, index, handle);
+ 	set_slot_size(zram, index, PAGE_SIZE);
++	mark_slot_accessed(zram, index);
+ 	slot_unlock(zram, index);
+ 
+ 	atomic64_add(PAGE_SIZE, &zram->stats.compr_data_size);
+@@ -2289,7 +2308,7 @@ static int zram_write_page(struct zram *zram, struct page *page,
  	unsigned long handle;
  	unsigned int comp_len;
  	void *mem;
@@ -11964,7 +12132,7 @@ index a9b3bb1d3bef3..aa6fd18588442 100644
  	unsigned long element;
  	bool same_filled;
  
-@@ -2299,20 +2317,20 @@ static int zram_write_page(struct zram *zram, struct page *page,
+@@ -2299,20 +2318,20 @@ static int zram_write_page(struct zram *zram, struct page *page,
  	if (same_filled)
  		return write_same_filled_page(zram, element, index);
  
@@ -11988,7 +12156,7 @@ index a9b3bb1d3bef3..aa6fd18588442 100644
  		return write_incompressible_page(zram, page, index);
  	}
  
-@@ -2320,18 +2338,18 @@ static int zram_write_page(struct zram *zram, struct page *page,
+@@ -2320,23 +2339,24 @@ static int zram_write_page(struct zram *zram, struct page *page,
  			   GFP_NOIO | __GFP_NOWARN |
  			   __GFP_HIGHMEM | __GFP_MOVABLE, page_to_nid(page));
  	if (IS_ERR_VALUE(handle)) {
@@ -12010,7 +12178,13 @@ index a9b3bb1d3bef3..aa6fd18588442 100644
  
  	slot_lock(zram, index);
  	slot_free(zram, index);
-@@ -2440,7 +2458,7 @@ static int recompress_slot(struct zram *zram, unsigned long index,
+ 	set_slot_handle(zram, index, handle);
+ 	set_slot_size(zram, index, comp_len);
++	mark_slot_accessed(zram, index);
+ 	slot_unlock(zram, index);
+ 
+ 	/* Update stats */
+@@ -2440,7 +2460,7 @@ static int recompress_slot(struct zram *zram, unsigned long index,
  			   struct page *page, u64 *num_recomp_pages,
  			   u32 threshold, u32 prio)
  {
@@ -12019,7 +12193,7 @@ index a9b3bb1d3bef3..aa6fd18588442 100644
  	unsigned long handle_old;
  	unsigned long handle_new;
  	unsigned int comp_len_old;
-@@ -2472,7 +2490,7 @@ static int recompress_slot(struct zram *zram, unsigned long index,
+@@ -2472,7 +2492,7 @@ static int recompress_slot(struct zram *zram, unsigned long index,
  	 */
  	clear_slot_flag(zram, index, ZRAM_IDLE);
  
@@ -12028,7 +12202,7 @@ index a9b3bb1d3bef3..aa6fd18588442 100644
  	src = kmap_local_page(page);
  	ret = zcomp_compress(zram->comps[prio], zstrm, src, &comp_len_new);
  	kunmap_local(src);
-@@ -2487,7 +2505,7 @@ static int recompress_slot(struct zram *zram, unsigned long index,
+@@ -2487,7 +2507,7 @@ static int recompress_slot(struct zram *zram, unsigned long index,
  		*num_recomp_pages -= 1;
  
  	if (ret) {
@@ -12037,7 +12211,7 @@ index a9b3bb1d3bef3..aa6fd18588442 100644
  		return ret;
  	}
  
-@@ -2496,7 +2514,7 @@ static int recompress_slot(struct zram *zram, unsigned long index,
+@@ -2496,7 +2516,7 @@ static int recompress_slot(struct zram *zram, unsigned long index,
  
  	if (class_index_new >= class_index_old ||
  	    (threshold && comp_len_new >= threshold)) {
@@ -12046,7 +12220,7 @@ index a9b3bb1d3bef3..aa6fd18588442 100644
  
  		/*
  		 * Secondary algorithms failed to re-compress the page
-@@ -2511,7 +2529,7 @@ static int recompress_slot(struct zram *zram, unsigned long index,
+@@ -2511,7 +2531,7 @@ static int recompress_slot(struct zram *zram, unsigned long index,
  	}
  
  	/*
@@ -12055,7 +12229,7 @@ index a9b3bb1d3bef3..aa6fd18588442 100644
  	 * avoid direct reclaim.  Allocation error is not fatal since
  	 * we still have the old object in the mem_pool.
  	 *
-@@ -2525,12 +2543,12 @@ static int recompress_slot(struct zram *zram, unsigned long index,
+@@ -2525,12 +2545,12 @@ static int recompress_slot(struct zram *zram, unsigned long index,
  			       __GFP_HIGHMEM | __GFP_MOVABLE,
  			       page_to_nid(page));
  	if (IS_ERR_VALUE(handle_new)) {
@@ -12070,7 +12244,29 @@ index a9b3bb1d3bef3..aa6fd18588442 100644
  
  	slot_free(zram, index);
  	set_slot_handle(zram, index, handle_new);
-@@ -2871,6 +2889,12 @@ static void zram_reset_device(struct zram *zram)
+@@ -2745,10 +2765,6 @@ static void zram_bio_read(struct zram *zram, struct bio *bio)
+ 		}
+ 		flush_dcache_page(bv.bv_page);
+ 
+-		slot_lock(zram, index);
+-		mark_slot_accessed(zram, index);
+-		slot_unlock(zram, index);
+-
+ 		bio_advance_iter_single(bio, &iter, bv.bv_len);
+ 	} while (iter.bi_size);
+ 
+@@ -2775,10 +2791,6 @@ static void zram_bio_write(struct zram *zram, struct bio *bio)
+ 			break;
+ 		}
+ 
+-		slot_lock(zram, index);
+-		mark_slot_accessed(zram, index);
+-		slot_unlock(zram, index);
+-
+ 		bio_advance_iter_single(bio, &iter, bv.bv_len);
+ 	} while (iter.bi_size);
+ 
+@@ -2871,6 +2883,12 @@ static void zram_reset_device(struct zram *zram)
  	zram_destroy_comps(zram);
  	memset(&zram->stats, 0, sizeof(zram->stats));
  	reset_bdev(zram);
@@ -12083,7 +12279,7 @@ index a9b3bb1d3bef3..aa6fd18588442 100644
  }
  
  static ssize_t disksize_store(struct device *dev, struct device_attribute *attr,
-@@ -2907,7 +2931,8 @@ static ssize_t disksize_store(struct device *dev, struct device_attribute *attr,
+@@ -2907,7 +2925,8 @@ static ssize_t disksize_store(struct device *dev, struct device_attribute *attr,
  			continue;
  
  		comp = zcomp_create(zram->comp_algs[prio],
@@ -12093,7 +12289,7 @@ index a9b3bb1d3bef3..aa6fd18588442 100644
  		if (IS_ERR(comp)) {
  			pr_err("Cannot initialise %s compressing backend\n",
  			       zram->comp_algs[prio]);
-@@ -3287,6 +3312,7 @@ static int __init zram_init(void)
+@@ -3287,6 +3306,7 @@ static int __init zram_init(void)
  	if (zram_major <= 0) {
  		pr_err("Unable to get major number\n");
  		class_unregister(&zram_control_class);
@@ -69088,10 +69284,10 @@ index b1f1a367034ff..0c1f4f030509c 100644
  obj-y += build_utility.o
 diff --git a/kernel/sched/alt_core.c b/kernel/sched/alt_core.c
 new file mode 100644
-index 0000000000000..4d1e003745eeb
+index 0000000000000..e3515b0b8e3ad
 --- /dev/null
 +++ b/kernel/sched/alt_core.c
-@@ -0,0 +1,8262 @@
+@@ -0,0 +1,8264 @@
 +/*
 + *  kernel/sched/alt_core.c
 + *
@@ -71213,8 +71409,10 @@ index 0000000000000..4d1e003745eeb
 +		if (affine_cpu >= nr_cpu_ids)
 +			affine_cpu = wake_affine_idle(cpu, prev_cpu, sync);
 +		else if (!available_idle_cpu(affine_cpu) &&
-+			 cpu_rq(cpu)->nr_running + cpu_rq(affine_cpu)->nr_running > 3 &&
-+			 cpumask_intersects(&allow_mask, sched_idle_mask))
++			 ((affine_cpu != cpu &&
++			   task_sched_prio(p) >= cpu_rq(affine_cpu)->prio) ||
++			  (cpu_rq(cpu)->nr_running + cpu_rq(affine_cpu)->nr_running > 3 &&
++			   cpumask_intersects(&allow_mask, sched_idle_mask))))
 +			affine_cpu = nr_cpu_ids;
 +		if (affine_cpu < nr_cpu_ids &&
 +		    cpumask_test_cpu(affine_cpu, &allow_mask)) {
@@ -82640,7 +82838,7 @@ index 0bed462e9b2a2..af06883dff0bd 100644
  	cred->cap_permitted = CAP_FULL_SET;
  	cred->cap_effective = CAP_FULL_SET;
 diff --git a/kernel/workqueue.c b/kernel/workqueue.c
-index c1cb328bce3c7..8ec788f98223d 100644
+index c1cb328bce3c7..b20a0b6708239 100644
 --- a/kernel/workqueue.c
 +++ b/kernel/workqueue.c
 @@ -1291,6 +1291,7 @@ static bool kick_pool_pick(struct worker_pool *pool, struct task_struct **wakep)
@@ -82683,7 +82881,7 @@ index c1cb328bce3c7..8ec788f98223d 100644
  	    wq_cpu_intensive_thresh_us * NSEC_PER_USEC)
  		return;
  
-@@ -3315,7 +3325,12 @@ __acquires(&pool->lock)
+@@ -3315,7 +3325,11 @@ __acquires(&pool->lock)
  	worker->current_func = work->func;
  	worker->current_pwq = pwq;
  	if (worker->task)
@@ -82691,7 +82889,6 @@ index c1cb328bce3c7..8ec788f98223d 100644
 +		worker->current_at = worker->task->sched_time;
 +#else
  		worker->current_at = READ_ONCE(worker->task->se.sum_exec_runtime);
-+		worker->current_at = worker->task->se.sum_exec_runtime;
 +#endif
  	worker->current_start = jiffies;
  	work_data = *work_data_bits(work);
@@ -86298,7 +86495,7 @@ index 6c35f0d775ab6..3d63f73e723b9 100644
  		vma_flags_set(&map->vma_flags, VMA_ACCOUNT_BIT);
  	}
 diff --git a/mm/vmscan.c b/mm/vmscan.c
-index f11491ee9ed5c..e801dae686355 100644
+index f11491ee9ed5c..ed24467478f1b 100644
 --- a/mm/vmscan.c
 +++ b/mm/vmscan.c
 @@ -182,17 +182,37 @@ struct scan_control {
@@ -86953,6 +87150,24 @@ index f11491ee9ed5c..e801dae686355 100644
  
  	lazy_mmu_mode_disable();
  	spin_unlock(ptl);
+@@ -3772,7 +4031,7 @@ static void walk_pmd_range(pud_t *pud, unsigned long start, unsigned long end,
+ 
+ 		walk->mm_stats[MM_NONLEAF_FOUND]++;
+ 
+-		if (!walk_pte_range(&val, addr, next, args))
++		if (!walk_pte_range(pmd + i, addr, next, args))
+ 			continue;
+ 
+ 		walk->mm_stats[MM_NONLEAF_ADDED]++;
+@@ -3808,7 +4067,7 @@ static int walk_pud_range(p4d_t *p4d, unsigned long start, unsigned long end,
+ 		if (!pud_present(val) || WARN_ON_ONCE(pud_leaf(val)))
+ 			continue;
+ 
+-		walk_pmd_range(&val, addr, next, args);
++		walk_pmd_range(pud + i, addr, next, args);
+ 
+ 		if (need_resched() || walk->batched >= MAX_LRU_BATCH) {
+ 			end = (addr | ~PUD_MASK) + 1;
 @@ -3890,6 +4149,7 @@ static void clear_mm_walk(void)
  
  	VM_WARN_ON_ONCE(walk && memchr_inv(walk->nr_pages, 0, sizeof(walk->nr_pages)));
@@ -87268,7 +87483,17 @@ index f11491ee9ed5c..e801dae686355 100644
  
  	return positive_ctrl_err(&sp, &pv);
  }
-@@ -4931,9 +5186,16 @@ static int evict_folios(unsigned long nr_to_scan, struct lruvec *lruvec,
+@@ -4897,6 +5152,9 @@ static int evict_folios(unsigned long nr_to_scan, struct lruvec *lruvec,
+ 	scanned = isolate_folios(nr_to_scan, lruvec, sc, swappiness,
+ 				 &list, &isolated, &type, &type_scanned);
+ 	nr_isolated = isolated;
++	if (nr_isolated)
++		__mod_node_page_state(pgdat, NR_ISOLATED_ANON + type,
++				      nr_isolated);
+ 
+ 	/* Scanning may have emptied the oldest gen, flush it */
+ 	if (scanned)
+@@ -4931,9 +5189,16 @@ static int evict_folios(unsigned long nr_to_scan, struct lruvec *lruvec,
  			continue;
  		}
  
@@ -87287,7 +87512,16 @@ index f11491ee9ed5c..e801dae686355 100644
  	}
  
  	move_folios_to_lru(&list);
-@@ -5102,7 +5364,13 @@ static int shrink_one(struct lruvec *lruvec, struct scan_control *sc)
+@@ -4959,6 +5224,8 @@ static int evict_folios(unsigned long nr_to_scan, struct lruvec *lruvec,
+ 		goto retry;
+ 	}
+ 
++	mod_node_page_state(pgdat, NR_ISOLATED_ANON + type, -nr_isolated);
++
+ 	if (nr_isolated > total_reclaimed)
+ 		mod_lruvec_state(lruvec, PGROTATE_ANON + type,
+ 				 nr_isolated - total_reclaimed);
+@@ -5102,7 +5369,13 @@ static int shrink_one(struct lruvec *lruvec, struct scan_control *sc)
  	struct mem_cgroup *memcg = lruvec_memcg(lruvec);
  	struct pglist_data *pgdat = lruvec_pgdat(lruvec);
  
@@ -87302,7 +87536,7 @@ index f11491ee9ed5c..e801dae686355 100644
  	if (mem_cgroup_below_min(NULL, memcg))
  		return MEMCG_LRU_YOUNG;
  
-@@ -5253,7 +5521,7 @@ static void lru_gen_shrink_node(struct pglist_data *pgdat, struct scan_control *
+@@ -5253,7 +5526,7 @@ static void lru_gen_shrink_node(struct pglist_data *pgdat, struct scan_control *
  		sc->nr_reclaimed = 0;
  
  	if (mem_cgroup_disabled())
@@ -87311,7 +87545,7 @@ index f11491ee9ed5c..e801dae686355 100644
  	else
  		shrink_many(pgdat, sc);
  
-@@ -5644,7 +5912,8 @@ static int lru_gen_seq_show(struct seq_file *m, void *v)
+@@ -5644,7 +5917,8 @@ static int lru_gen_seq_show(struct seq_file *m, void *v)
  			char mark = full && seq < min_seq[type] ? 'x' : ' ';
  
  			for (zone = 0; zone < MAX_NR_ZONES; zone++)
@@ -87321,7 +87555,7 @@ index f11491ee9ed5c..e801dae686355 100644
  
  			seq_printf(m, " %10lu%c", size, mark);
  		}
-@@ -5670,6 +5939,9 @@ static int run_aging(struct lruvec *lruvec, unsigned long seq,
+@@ -5670,6 +5944,9 @@ static int run_aging(struct lruvec *lruvec, unsigned long seq,
  {
  	DEFINE_MAX_SEQ(lruvec);
  
@@ -87331,7 +87565,7 @@ index f11491ee9ed5c..e801dae686355 100644
  	if (seq > max_seq)
  		return -EINVAL;
  
-@@ -7842,7 +8114,8 @@ static unsigned long __node_reclaim(struct pglist_data *pgdat,
+@@ -7842,7 +8119,8 @@ static unsigned long __node_reclaim(struct pglist_data *pgdat,
  					   sc->gfp_mask);
  
  	cond_resched();
@@ -87341,7 +87575,7 @@ index f11491ee9ed5c..e801dae686355 100644
  	delayacct_freepages_start();
  	fs_reclaim_acquire(sc->gfp_mask);
  	/*
-@@ -7866,7 +8139,8 @@ static unsigned long __node_reclaim(struct pglist_data *pgdat,
+@@ -7866,7 +8144,8 @@ static unsigned long __node_reclaim(struct pglist_data *pgdat,
  	memalloc_noreclaim_restore(noreclaim_flag);
  	fs_reclaim_release(sc->gfp_mask);
  	delayacct_freepages_end();
@@ -87351,7 +87585,7 @@ index f11491ee9ed5c..e801dae686355 100644
  
  	trace_mm_vmscan_node_reclaim_end(sc->nr_reclaimed, NULL);
  
-@@ -8034,7 +8308,7 @@ int user_proactive_reclaim(char *buf,
+@@ -8034,7 +8313,7 @@ int user_proactive_reclaim(char *buf,
  		} else {
  			struct scan_control sc = {
  				.gfp_mask = current_gfp_context(gfp_mask),
